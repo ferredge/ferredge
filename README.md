@@ -32,3 +32,11 @@ We are planning to have devices be able to communicate with other devices so lon
 ### What about UI?
 
 Incoming as a future goal. Once we nail down the core functionality.
+
+### What about App service sdk?
+
+Not an immediate goal. You can just use the FFIs or device SDKs to communicate and do whatever you want.
+
+### What about running this directly in embedded devices?
+
+We plan to first nail down core functionality with the use of std lib even though we would be using or at least some form of compatibility with [embassy framework](https://github.com/embassy-rs/embassy). So not guarenteed in initial versions unless you are running certain std lib supported devices viz [ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3). Even then not everything is guarenteed to work as certain cryptographic libs are not going to be supported in them at hardware level (OpenSSL being a notorious example). We do plan to address some of these by providing feature flags to choose what all features are necessary.
