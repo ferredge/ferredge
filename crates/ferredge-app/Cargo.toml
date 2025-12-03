@@ -1,0 +1,9 @@
+[package]
+name = "ferredge-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ferredge-core = { workspace = true }
+ferredge-sdk = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

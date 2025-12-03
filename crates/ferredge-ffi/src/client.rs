@@ -1,0 +1,1 @@
+// Placeholder - implement C-compatible types and client handle
