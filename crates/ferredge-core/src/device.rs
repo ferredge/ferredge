@@ -7,7 +7,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -301,7 +300,7 @@ pub struct ResourceOperation {
 /// This trait defines the interface for communicating with devices.
 /// Protocol-specific drivers implement this trait to provide
 /// uniform access to different device types.
-pub trait Device: Send + Sync {
+pub trait Device: Send + Sync + Clone {
     /// Returns the device information.
     fn info(&self) -> &DeviceInfo;
 
@@ -309,23 +308,58 @@ pub trait Device: Send + Sync {
     fn state(&self) -> DeviceState;
 
     /// Reads a value from a named resource.
-    fn read(&self, resource: &str) -> BoxFuture<'static, Result<Reading>>;
+    fn read(&self, resource: &str) -> impl std::future::Future<Output = Result<Reading>> + Send;
 
     /// Writes a value to a named resource.
-    fn write(&self, resource: &str, value: Value) -> BoxFuture<'static, Result<()>>;
+    fn write(
+        &self,
+        resource: &str,
+        value: Value,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Executes a command on the device.
-    fn execute(&self, command: Command) -> BoxFuture<'static, Result<CommandResponse>>;
+    fn execute(
+        &self,
+        command: Command,
+    ) -> impl std::future::Future<Output = Result<CommandResponse>> + Send;
 
     /// Called when the device should connect/initialize.
-    fn connect(&self) -> BoxFuture<'static, Result<()>>;
+    fn connect(&self) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Called when the device should disconnect/cleanup.
-    fn disconnect(&self) -> BoxFuture<'static, Result<()>>;
+    fn disconnect(&self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
-/// A type-erased device reference for storage in collections.
-pub type DynDevice = Arc<dyn Device>;
+// Delegate Device for Arc<T> so Arc<MockDevice> implements Device when MockDevice does.
+impl<T: Device + ?Sized> Device for Arc<T> {
+    fn info(&self) -> &DeviceInfo {
+        (&**self).info()
+    }
+
+    fn state(&self) -> DeviceState {
+        (&**self).state()
+    }
+
+    fn read(&self, resource: &str) -> impl Future<Output = Result<Reading>> + Send {
+        (&**self).read(resource)
+    }
+
+    fn write(&self, resource: &str, value: Value) -> impl Future<Output = Result<()>> + Send {
+        (&**self).write(resource, value)
+    }
+
+    fn execute(&self, command: Command) -> impl Future<Output = Result<CommandResponse>> + Send {
+        (&**self).execute(command)
+    }
+
+    fn connect(&self) -> impl Future<Output = Result<()>> + Send {
+        (&**self).connect()
+    }
+
+    fn disconnect(&self) -> impl Future<Output = Result<()>> + Send {
+        (&**self).disconnect()
+    }
+}
 
 #[cfg(test)]
 mod tests {
