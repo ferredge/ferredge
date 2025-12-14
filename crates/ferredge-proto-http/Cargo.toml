@@ -1,0 +1,16 @@
+[package]
+name = "ferredge-proto-http"
+description = "HTTP protocol support for ferredge - device and data aggregator for edge devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+std = []
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
