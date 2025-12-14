@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ferredge-core",
+    "crates/ferredge-proto-http",
 ]
 
 [workspace.package]
@@ -14,6 +15,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 # Internal crates
 ferredge-core = { path = "crates/ferredge-core" }
+ferredge-proto-http = { path = "crates/ferredge-proto-http" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
