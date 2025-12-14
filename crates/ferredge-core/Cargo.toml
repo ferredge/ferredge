@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-std = []
+std = ["serde/std"]
 
 [dependencies]
 serde = { workspace = true }
