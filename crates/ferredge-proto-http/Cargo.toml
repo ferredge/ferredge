@@ -8,9 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-std = []
+std = ["serde/std", "httparse/std"]
 
 [dependencies]
+httparse = { version = "1.10.1", default-features = false }
 serde = { workspace = true }
 
 [dev-dependencies]
