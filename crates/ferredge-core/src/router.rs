@@ -19,9 +19,9 @@ pub struct DeviceEvent {
 /// The main trait for the Core logic.
 /// It routes messages between the external world (API), Drivers, and Storage.
 
-pub trait Router<T: DeviceResourceAttributes>: Send + Sync {
+pub trait Router<T: DeviceResourceAttributes, Dr: Driver>: Send + Sync {
     /// Register a new device with the core.
-    fn register_device(&self, device: Device<T>) -> impl Future<Output = Result<(), String>> + Send;
+    fn register_device(&self, device: Device<T, Dr>) -> impl Future<Output = Result<(), String>> + Send;
 
     /// Route a command to a specific device.
     fn route_command(
