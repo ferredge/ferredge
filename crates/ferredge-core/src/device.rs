@@ -10,6 +10,8 @@ pub use std::collections::HashMap as Map;
 #[cfg(not(feature = "std"))]
 pub use alloc::collections::BTreeMap as Map;
 
+use crate::router::Driver;
+
 pub type DeviceId = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +77,7 @@ where
 
 /// Represents the metadata and state of a connected device.
 #[derive(Debug)]
-pub struct Device<T: DeviceResourceAttributes> {
+pub struct Device<T: DeviceResourceAttributes, Dr: Driver> {
     pub id: DeviceId,
     pub name: String,
     pub status: DeviceStatus,
@@ -85,6 +87,21 @@ pub struct Device<T: DeviceResourceAttributes> {
     pub metadata: Option<Map<String, String>>,
     // max resources the device can handle
     pub max_connections: Option<u32>,
-
+    pub driver: Dr,
     pub resources: Option<Vec<DeviceResource<T>>>,
+}
+
+impl<T: DeviceResourceAttributes, Dr: Driver> Device<T, Dr> {
+    pub fn new(id: DeviceId, name: String, endpoint: DeviceEndpoint, driver: Dr) -> Self {
+        Device {
+            id,
+            name,
+            status: DeviceStatus::Unknown,
+            endpoint,
+            metadata: None,
+            max_connections: None,
+            driver,
+            resources: None,
+        }
+    }
 }
