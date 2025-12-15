@@ -1,5 +1,5 @@
 use crate::command::{Command, CommandResult};
-use crate::device::Device;
+use crate::device::{Device, DeviceId, DeviceResourceAttributes};
 
 /// A generic message that flows through the system.
 #[derive(Debug, Clone)]
@@ -19,9 +19,9 @@ pub struct DeviceEvent {
 /// The main trait for the Core logic.
 /// It routes messages between the external world (API), Drivers, and Storage.
 
-pub trait Router: Send + Sync {
+pub trait Router<T: DeviceResourceAttributes>: Send + Sync {
     /// Register a new device with the core.
-    fn register_device(&self, device: Device) -> impl Future<Output = Result<(), String>> + Send;
+    fn register_device(&self, device: Device<T>) -> impl Future<Output = Result<(), String>> + Send;
 
     /// Route a command to a specific device.
     fn route_command(
@@ -32,6 +32,13 @@ pub trait Router: Send + Sync {
     /// Handle an incoming event from a device (e.g., sensor reading).
     /// This typically involves routing to storage or triggering other actions.
     fn handle_event(&self, event: DeviceEvent) -> impl Future<Output = Result<(), String>> + Send;
+
+    /// Route a command from one device to another
+    fn route_device_to_device(
+        &self,
+        source_device_id: DeviceId,
+        command: Command,
+    ) -> impl Future<Output = Result<CommandResult, String>> + Send;
 }
 
 /// Trait for Device Drivers to implement.

@@ -1,4 +1,4 @@
-use crate::{Command, device::DeviceProtocol};
+use crate::{ command::Command, device::DeviceProtocol};
 
 pub trait ProtocolBridge: Send + Sync {
     /// Translate a command from source protocol to target protocol
