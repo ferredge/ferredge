@@ -8,9 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-std = ["serde/std"]
+std = ["serde/std", "bitflags/std"]
 
 [dependencies]
 serde = { workspace = true }
+bitflags = { version = "2.10.0", features = ["serde"] }
 
 [dev-dependencies]

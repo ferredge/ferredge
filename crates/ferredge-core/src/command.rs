@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum CommandType {
     Get,
     Set,
-    Action,
+    Execute,
 }
 
 /// Represents a command sent to a device or the core.
