@@ -21,7 +21,7 @@ pub struct DeviceEvent {
 
 pub trait Router<T: DeviceResourceAttributes, Dr: Driver>: Send + Sync {
     /// Register a new device with the core.
-    fn register_device(&self, device: Device<T, Dr>) -> impl Future<Output = Result<(), String>> + Send;
+    fn register_device(&self, device: Device<T>) -> impl Future<Output = Result<(), String>> + Send;
 
     /// Route a command to a specific device.
     fn route_command(
