@@ -8,7 +8,7 @@ use std::{
 
 use ferredge_core::prelude::*;
 #[cfg(feature = "std")]
-use runtime_stack::{StackRuntime, StackSocket};
+use runtime_stack::StackSocket;
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
@@ -139,8 +139,7 @@ pub(crate) fn packet_request_packet_id(packet: &MqttWirePacket) -> Option<u16> {
 }
 
 #[cfg(feature = "std")]
-pub(crate) fn send_packet_request(
-    runtime: &StackRuntime,
+pub(crate) async fn send_packet_request_async(
     session: &mut MqttClientSession,
     device_id: &str,
     request: MqttPacketRequest,
@@ -157,7 +156,7 @@ pub(crate) fn send_packet_request(
     let events = session
         .connection
         .checked_send(packet_request_into_packet(request));
-    let _ = handle_connection_events(runtime, session, device_id, events)?;
+    let _ = handle_connection_events_async(session, device_id, events).await?;
     Ok(())
 }
 
@@ -287,16 +286,6 @@ fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<
 }
 
 #[cfg(feature = "std")]
-pub(crate) fn read_from_session(
-    runtime: &StackRuntime,
-    session: &mut MqttClientSession,
-    device_id: &str,
-    timeout: Option<Duration>,
-) -> Result<Vec<RoutedMessage>, String> {
-    runtime.block_on(read_from_session_async(session, device_id, timeout))
-}
-
-#[cfg(feature = "std")]
 pub(crate) async fn read_from_session_async(
     session: &mut MqttClientSession,
     device_id: &str,
@@ -323,16 +312,6 @@ pub(crate) async fn read_from_session_async(
         }
         Err(error) => Err(format!("failed reading MQTT stream: {error:?}")),
     }
-}
-
-#[cfg(feature = "std")]
-pub(crate) fn handle_connection_events(
-    runtime: &StackRuntime,
-    session: &mut MqttClientSession,
-    device_id: &str,
-    events: Vec<mqtt::connection::Event>,
-) -> Result<Vec<RoutedMessage>, String> {
-    runtime.block_on(handle_connection_events_async(session, device_id, events))
 }
 
 #[cfg(feature = "std")]
