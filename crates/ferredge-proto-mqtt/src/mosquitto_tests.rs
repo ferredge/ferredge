@@ -19,6 +19,17 @@ use crate::{
     MqttDriver, MqttListenerStatus,
 };
 
+const MOSQUITTO_START_TIMEOUT_SECS: u64 = 5;
+const MOSQUITTO_EVENT_WAIT_TIMEOUT_SECS: u64 = 5;
+const MOSQUITTO_POLL_INTERVAL_MS: u64 = 25;
+const MOSQUITTO_CONNECT_RETRY_INTERVAL_MS: u64 = 50;
+const MOSQUITTO_SUBSCRIBER_STARTUP_MS: u64 = 200;
+const MOSQUITTO_UNSUBSCRIBE_SETTLE_MS: u64 = 500;
+const MOSQUITTO_RESTART_DOWN_WAIT_MS: u64 = 400;
+const MOSQUITTO_RECONNECT_SETTLE_MS: u64 = 1_200;
+const MOSQUITTO_KEEPALIVE_SHORT_SECS: u64 = 5;
+const MOSQUITTO_KEEPALIVE_LONG_SECS: u64 = 35;
+
 fn block_on<F: core::future::Future>(future: F) -> F::Output {
     static RUNTIME: OnceLock<StackRuntime> = OnceLock::new();
     RUNTIME.get_or_init(StackRuntime::default).block_on(future)
@@ -123,13 +134,13 @@ impl MosquittoGuard {
             .expect("mosquitto should spawn");
         self.child = Some(child);
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(MOSQUITTO_START_TIMEOUT_SECS);
         loop {
             if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
                 break;
             }
             assert!(Instant::now() < deadline, "mosquitto should start before timeout");
-            thread::sleep(Duration::from_millis(25));
+            thread::sleep(Duration::from_millis(MOSQUITTO_POLL_INTERVAL_MS));
         }
     }
 
@@ -240,7 +251,7 @@ fn publish_packet(
 }
 
 fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8]) -> RoutedEvent {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(MOSQUITTO_EVENT_WAIT_TIMEOUT_SECS);
     loop {
         if let Some(event) = events
             .lock()
@@ -252,7 +263,23 @@ fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8])
             return event;
         }
         assert!(Instant::now() < deadline, "expected inbound MQTT event");
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(MOSQUITTO_POLL_INTERVAL_MS));
+    }
+}
+
+fn wait_for_driver_start(driver: &MqttDriver) {
+    let deadline = Instant::now() + Duration::from_secs(MOSQUITTO_START_TIMEOUT_SECS);
+    loop {
+        match block_on(driver.start()) {
+            Ok(()) => return,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "driver should connect before timeout: {error}"
+                );
+                thread::sleep(Duration::from_millis(MOSQUITTO_CONNECT_RETRY_INTERVAL_MS));
+            }
+        }
     }
 }
 
@@ -333,7 +360,7 @@ fn mosquitto_extended_client_flow() {
     }))
     .expect("listener should start");
 
-    thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(MOSQUITTO_SUBSCRIBER_STARTUP_MS));
 
     let pub_status = ProcessCommand::new("mosquitto_pub")
         .args([
@@ -375,7 +402,7 @@ fn mosquitto_extended_client_flow() {
         .stderr(Stdio::null())
         .spawn()
         .expect("mosquitto_sub should spawn");
-    thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(MOSQUITTO_SUBSCRIBER_STARTUP_MS));
 
     block_on(publisher.publish(publish_packet(
         &publisher,
@@ -417,7 +444,7 @@ fn mosquitto_extended_client_flow() {
         .status()
         .expect("mosquitto_pub should run after unsubscribe");
     assert!(pub_status.success());
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(MOSQUITTO_UNSUBSCRIBE_SETTLE_MS));
     assert_eq!(events.lock().expect("events lock").len(), prior_len);
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
@@ -445,13 +472,13 @@ fn mosquitto_keepalive_client_flow_five_seconds() {
         Some(2),
     );
 
-    block_on(driver.start()).expect("driver should connect");
+    wait_for_driver_start(&driver);
     block_on(driver.start_listening(RecordingSink {
         events: Arc::new(Mutex::new(Vec::new())),
     }))
     .expect("listener should start");
 
-    thread::sleep(Duration::from_secs(5));
+    thread::sleep(Duration::from_secs(MOSQUITTO_KEEPALIVE_SHORT_SECS));
 
     assert_eq!(
         driver.listener_status().expect("listener status should be readable"),
@@ -559,7 +586,7 @@ fn mosquitto_keepalive_client_flow_thirty_five_seconds() {
     }))
     .expect("listener should start");
 
-    thread::sleep(Duration::from_secs(35));
+    thread::sleep(Duration::from_secs(MOSQUITTO_KEEPALIVE_LONG_SECS));
 
     assert_eq!(
         driver.listener_status().expect("listener status should be readable"),
@@ -600,7 +627,7 @@ fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
     .expect("listener should start");
 
     broker.stop_broker();
-    thread::sleep(Duration::from_millis(400));
+    thread::sleep(Duration::from_millis(MOSQUITTO_RESTART_DOWN_WAIT_MS));
     broker.start_broker();
 
     let sub_child = ProcessCommand::new("mosquitto_sub")
@@ -623,7 +650,7 @@ fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
         .spawn()
         .expect("mosquitto_sub should spawn");
 
-    thread::sleep(Duration::from_millis(1200));
+    thread::sleep(Duration::from_millis(MOSQUITTO_RECONNECT_SETTLE_MS));
 
     block_on(driver.publish(publish_packet(
         &driver,
@@ -682,7 +709,7 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
 
     broker.stop_broker();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(MOSQUITTO_EVENT_WAIT_TIMEOUT_SECS);
     loop {
         let status = driver
             .listener_status()
@@ -694,7 +721,7 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
             Instant::now() < deadline,
             "listener should fail after reconnect attempts are exhausted"
         );
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(MOSQUITTO_POLL_INTERVAL_MS));
     }
 
     match driver
@@ -712,7 +739,7 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
 
 #[test]
 #[ignore = "requires local mosquitto process and escalated execution"]
-fn mosquitto_replays_subscriptions_and_queued_publish_after_restart() {
+fn mosquitto_replays_subscriptions_after_restart() {
     let mut broker = MosquittoGuard::start();
     let reconnect = BrokerReconnectConfig {
         enabled: true,
@@ -725,19 +752,10 @@ fn mosquitto_replays_subscriptions_and_queued_publish_after_restart() {
         queue_requests_while_disconnected: true,
         max_queued_requests: 64,
     };
-    let publisher = make_driver_with_config(
-        broker.broker_url(),
-        "mqtt-mosquitto-recovery-publisher".to_string(),
-        "ferredge-mosquitto-recovery-publisher".to_string(),
-        Some(2),
-        reconnect.clone(),
-        true,
-        None,
-    );
     let subscriber = make_driver_with_config(
         broker.broker_url(),
-        "mqtt-mosquitto-recovery-subscriber".to_string(),
-        "ferredge-mosquitto-recovery-subscriber".to_string(),
+        "mqtt-mosquitto-resub-subscriber".to_string(),
+        "ferredge-mosquitto-resub-subscriber".to_string(),
         Some(2),
         reconnect,
         true,
@@ -758,27 +776,30 @@ fn mosquitto_replays_subscriptions_and_queued_publish_after_restart() {
     }))
     .expect("subscriber listener should start");
 
-    block_on(publisher.start()).expect("publisher should connect");
-    block_on(publisher.start_listening(RecordingSink {
-        events: Arc::new(Mutex::new(Vec::new())),
-    }))
-    .expect("publisher listener should start");
-
     broker.stop_broker();
-    thread::sleep(Duration::from_millis(400));
-
-    block_on(publisher.publish(publish_packet(
-        &publisher,
-        "pub-recovery-1",
-        "ferredge/it/recovery",
-        b"queued-recovery-ok",
-        BrokerMessageOptions::default(),
-    )))
-    .expect("publisher should queue publish during outage");
-
+    thread::sleep(Duration::from_millis(MOSQUITTO_RESTART_DOWN_WAIT_MS));
     broker.start_broker();
 
-    let event = wait_for_event_payload(&events, b"queued-recovery-ok");
+    thread::sleep(Duration::from_millis(MOSQUITTO_RECONNECT_SETTLE_MS));
+
+    let pub_status = ProcessCommand::new("mosquitto_pub")
+        .args([
+            "-h",
+            broker.host().as_str(),
+            "-p",
+            broker.port_string().as_str(),
+            "-V",
+            "mqttv5",
+            "-t",
+            "ferredge/it/recovery",
+            "-m",
+            "resub-ok",
+        ])
+        .status()
+        .expect("mosquitto_pub should run after broker restart");
+    assert!(pub_status.success());
+
+    let event = wait_for_event_payload(&events, b"resub-ok");
     assert_eq!(
         event.address,
         Address::Channel("ferredge/it/recovery".to_string())
@@ -789,13 +810,75 @@ fn mosquitto_replays_subscriptions_and_queued_publish_after_restart() {
             .expect("subscriber listener status should be readable"),
         MqttListenerStatus::Running
     );
+    block_on(subscriber.stop()).expect("subscriber should stop cleanly");
+}
+
+#[test]
+#[ignore = "requires local mosquitto process and escalated execution"]
+fn mosquitto_replays_queued_publish_after_restart() {
+    let mut broker = MosquittoGuard::start();
+    let driver = make_driver_with_config(
+        broker.broker_url(),
+        "mqtt-mosquitto-queued-recovery".to_string(),
+        "ferredge-mosquitto-queued-recovery".to_string(),
+        Some(2),
+        BrokerReconnectConfig {
+            enabled: true,
+            initial_delay_ms: 100,
+            max_delay_ms: 500,
+            strategy: BrokerBackoffStrategy::Exponential,
+            multiplier: 2,
+            max_attempts: None,
+            replay_subscriptions: true,
+            queue_requests_while_disconnected: true,
+            max_queued_requests: 64,
+        },
+        true,
+        None,
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    block_on(driver.start()).expect("driver should connect");
+    block_on(driver.subscribe(
+        subscribe_packet(&driver, "sub-queued-recovery-1", "ferredge/it/recovery/out"),
+        RecordingSink {
+            events: Arc::clone(&events),
+        },
+    ))
+    .expect("driver should subscribe before outage");
+    block_on(driver.start_listening(RecordingSink {
+        events: Arc::clone(&events),
+    }))
+    .expect("driver listener should start");
+
+    broker.stop_broker();
+    thread::sleep(Duration::from_millis(MOSQUITTO_RESTART_DOWN_WAIT_MS));
+
+    block_on(driver.publish(publish_packet(
+        &driver,
+        "pub-queued-recovery-1",
+        "ferredge/it/recovery/out",
+        b"queued-recovery-ok",
+        BrokerMessageOptions {
+            delivery: Some(DeliveryGuarantee::AtLeastOnce),
+            ..BrokerMessageOptions::default()
+        },
+    )))
+    .expect("driver should queue publish during outage");
+
+    broker.start_broker();
+
+    let event = wait_for_event_payload(&events, b"queued-recovery-ok");
     assert_eq!(
-        publisher
+        event.address,
+        Address::Channel("ferredge/it/recovery/out".to_string())
+    );
+    assert_eq!(
+        driver
             .listener_status()
-            .expect("publisher listener status should be readable"),
+            .expect("driver listener status should be readable"),
         MqttListenerStatus::Running
     );
 
-    block_on(publisher.stop()).expect("publisher should stop cleanly");
-    block_on(subscriber.stop()).expect("subscriber should stop cleanly");
+    block_on(driver.stop()).expect("driver should stop cleanly");
 }
