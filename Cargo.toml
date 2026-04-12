@@ -4,6 +4,9 @@ members = [
     "crates/ferredge-core",
     "crates/ferredge-proto-http",
     "crates/ferredge-proto-mqtt",
+    "crates/ferredge-runtime-tokio",
+    "crates/ferredge-runtime-async-std",
+    "crates/ferredge-runtime-embassy",
 ]
 
 [workspace.package]
@@ -18,6 +21,9 @@ rust-version = "1.93"
 ferredge-core = { path = "crates/ferredge-core" }
 ferredge-proto-http = { path = "crates/ferredge-proto-http" }
 ferredge-proto-mqtt = { path = "crates/ferredge-proto-mqtt" }
+ferredge-runtime-tokio = { path = "crates/ferredge-runtime-tokio" }
+ferredge-runtime-async-std = { path = "crates/ferredge-runtime-async-std" }
+ferredge-runtime-embassy = { path = "crates/ferredge-runtime-embassy" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -36,3 +42,5 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Unique identifiers
 uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "io-util"] }
+async-std = { version = "1", features = ["attributes"] }
