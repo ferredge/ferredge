@@ -12,7 +12,7 @@ use std::{
 use ferredge_core::prelude::{
     Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions, BrokerSubscriptionOptions, EventSink,
     EventSource, Correlation, Device, DeviceEndpoint, DeviceStatus, Lifecycle, Map,
-    MqttEndpointConfig, MqttProtocolVersion, RoutedEvent, RoutedMessage,
+    MqttEndpointConfig, MqttProtocolVersion, RoutedEvent, RoutedMessage, TransportMeta,
 };
 use mqtt_protocol_core::mqtt;
 
@@ -232,8 +232,8 @@ fn mqtt_subscribe_builds_version_specific_packet() {
             },
             options: BrokerSubscriptionOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                durable_name: None,
-                shared_group: None,
+                durable_name: Some("durable-a".to_string()),
+                shared_group: Some("shared-a".to_string()),
             },
         },
         correlation: None,
@@ -246,7 +246,72 @@ fn mqtt_subscribe_builds_version_specific_packet() {
     .expect("subscribe should build");
 
     assert_eq!(packet.command_id, "cmd-3");
-    assert!(matches!(packet.packet, MqttWirePacket::V5Subscribe(_)));
+    match packet.packet {
+        MqttWirePacket::V5Subscribe(packet) => {
+            let mut saw_subscription_identifier = false;
+            let mut saw_durable = false;
+            let mut saw_shared = false;
+            for prop in packet.props() {
+                match prop {
+                    mqtt::packet::Property::SubscriptionIdentifier(prop) => {
+                        saw_subscription_identifier = prop.val() == 1;
+                    }
+                    mqtt::packet::Property::UserProperty(prop) => {
+                        if prop.key() == "ferredge-durable-name" && prop.val() == "durable-a" {
+                            saw_durable = true;
+                        }
+                        if prop.key() == "ferredge-shared-group" && prop.val() == "shared-a" {
+                            saw_shared = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(saw_subscription_identifier);
+            assert!(saw_durable);
+            assert!(saw_shared);
+        }
+        other => panic!("expected v5 subscribe packet, got {other:?}"),
+    }
+}
+
+#[test]
+fn mqtt_unsubscribe_v5_includes_command_id_user_property() {
+    let driver = make_default_driver();
+    let command = ferredge_core::prelude::Command {
+        id: "cmd-unsub-1".to_string(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".to_string(),
+        intent: ferredge_core::prelude::Intent::Unsubscribe {
+            channel: BrokerAddress {
+                name: "alerts/#".to_string(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+        },
+        correlation: None,
+    };
+
+    let packet = MqttPacketRequest::try_from(MqttCommandRef {
+        device: &driver.dvc,
+        command: &command,
+    })
+    .expect("unsubscribe should build");
+
+    match packet.packet {
+        MqttWirePacket::V5Unsubscribe(packet) => {
+            let mut saw_command_id = false;
+            for prop in packet.props() {
+                if let mqtt::packet::Property::UserProperty(prop) = prop
+                    && prop.key() == "ferredge-command-id"
+                    && prop.val() == "cmd-unsub-1"
+                {
+                    saw_command_id = true;
+                }
+            }
+            assert!(saw_command_id);
+        }
+        other => panic!("expected v5 unsubscribe packet, got {other:?}"),
+    }
 }
 
 #[test]
@@ -313,11 +378,20 @@ fn inbound_publish_packet_converts_to_routed_event() {
         .payload("42")
         .props({
             let mut props = mqtt::packet::Properties::new();
+            props.push(mqtt::packet::Property::ContentType(
+                mqtt::packet::ContentType::new("application/json").unwrap(),
+            ));
             props.push(mqtt::packet::Property::ResponseTopic(
                 mqtt::packet::ResponseTopic::new("rpc/reply").unwrap(),
             ));
             props.push(mqtt::packet::Property::CorrelationData(
                 mqtt::packet::CorrelationData::new(b"corr-42".to_vec()).unwrap(),
+            ));
+            props.push(mqtt::packet::Property::SubscriptionIdentifier(
+                mqtt::packet::SubscriptionIdentifier::new(7).unwrap(),
+            ));
+            props.push(mqtt::packet::Property::UserProperty(
+                mqtt::packet::UserProperty::new("source", "broker-a").unwrap(),
             ));
             props
         })
@@ -342,6 +416,19 @@ fn inbound_publish_packet_converts_to_routed_event() {
                     reply_to: Some(Address::Channel("rpc/reply".to_string())),
                 })
             );
+            match event.transport {
+                Some(TransportMeta::Mqtt(meta)) => {
+                    assert_eq!(meta.content_type, Some("application/json".to_string()));
+                    assert_eq!(meta.response_topic, Some("rpc/reply".to_string()));
+                    assert_eq!(meta.correlation_data, Some("corr-42".to_string()));
+                    assert_eq!(meta.subscription_identifiers, vec![7]);
+                    assert_eq!(
+                        meta.user_properties,
+                        vec![("source".to_string(), "broker-a".to_string())]
+                    );
+                }
+                other => panic!("expected MQTT transport metadata, got {other:?}"),
+            }
         }
         other => panic!("expected routed event, got {other:?}"),
     }
