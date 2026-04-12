@@ -92,6 +92,14 @@ where
     async fn recv(&mut self) -> Result<T, ChannelError> {
         self.inner.recv().await.map_err(|_| ChannelError::Closed)
     }
+
+    fn try_recv(&mut self) -> Result<T, ChannelError> {
+        match self.inner.try_recv() {
+            Ok(item) => Ok(item),
+            Err(async_std::channel::TryRecvError::Empty) => Err(ChannelError::Empty),
+            Err(async_std::channel::TryRecvError::Closed) => Err(ChannelError::Closed),
+        }
+    }
 }
 
 impl AsyncRuntime for AsyncStdRuntime {
