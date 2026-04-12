@@ -158,15 +158,19 @@ pub fn build_subscribe_packet(
     .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?;
 
     match version {
-        MqttProtocolVersion::V5_0 => mqtt::packet::v5_0::Subscribe::builder()
-            .packet_id(1u16)
-            .entries(vec![entry])
-            .build()
-            .map(|packet| MqttPacketRequest {
-                command_id: subscription.command_id.clone(),
-                packet: MqttWirePacket::V5Subscribe(packet),
-            })
-            .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string())),
+        MqttProtocolVersion::V5_0 => {
+            let props = build_v5_subscribe_props(&subscription)?;
+            mqtt::packet::v5_0::Subscribe::builder()
+                .packet_id(1u16)
+                .entries(vec![entry])
+                .props(props)
+                .build()
+                .map(|packet| MqttPacketRequest {
+                    command_id: subscription.command_id.clone(),
+                    packet: MqttWirePacket::V5Subscribe(packet),
+                })
+                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+        }
         MqttProtocolVersion::V3_1_1 => mqtt::packet::v3_1_1::Subscribe::builder()
             .packet_id(1u16)
             .entries(vec![entry])
@@ -187,16 +191,20 @@ pub fn build_unsubscribe_packet(
     let topic = mqtt_topic_from_address(&subscription.channel)?;
 
     match version {
-        MqttProtocolVersion::V5_0 => mqtt::packet::v5_0::Unsubscribe::builder()
-            .packet_id(1u16)
-            .entries(vec![topic.as_str()])
-            .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?
-            .build()
-            .map(|packet| MqttPacketRequest {
-                command_id: subscription.command_id.clone(),
-                packet: MqttWirePacket::V5Unsubscribe(packet),
-            })
-            .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string())),
+        MqttProtocolVersion::V5_0 => {
+            let props = build_v5_unsubscribe_props(&subscription)?;
+            mqtt::packet::v5_0::Unsubscribe::builder()
+                .packet_id(1u16)
+                .entries(vec![topic.as_str()])
+                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?
+                .props(props)
+                .build()
+                .map(|packet| MqttPacketRequest {
+                    command_id: subscription.command_id.clone(),
+                    packet: MqttWirePacket::V5Unsubscribe(packet),
+                })
+                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+        }
         MqttProtocolVersion::V3_1_1 => mqtt::packet::v3_1_1::Unsubscribe::builder()
             .packet_id(1u16)
             .entries(vec![topic.as_str()])
@@ -242,6 +250,45 @@ pub fn build_v5_publish_props(
         }
     }
 
+    Ok(props)
+}
+
+pub fn build_v5_subscribe_props(
+    subscription: &MqttSubscriptionRequest,
+) -> Result<mqtt::packet::Properties, MqttCommandConversionError> {
+    let mut props = mqtt::packet::Properties::new();
+
+    if subscription.durable_name.is_some() || subscription.shared_group.is_some() {
+        props.push(mqtt::packet::Property::SubscriptionIdentifier(
+            mqtt::packet::SubscriptionIdentifier::new(1)
+                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+        ));
+    }
+
+    if let Some(durable_name) = &subscription.durable_name {
+        props.push(mqtt::packet::Property::UserProperty(
+            mqtt::packet::UserProperty::new("ferredge-durable-name", durable_name.as_str())
+                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+        ));
+    }
+    if let Some(shared_group) = &subscription.shared_group {
+        props.push(mqtt::packet::Property::UserProperty(
+            mqtt::packet::UserProperty::new("ferredge-shared-group", shared_group.as_str())
+                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+        ));
+    }
+
+    Ok(props)
+}
+
+pub fn build_v5_unsubscribe_props(
+    subscription: &MqttSubscriptionRequest,
+) -> Result<mqtt::packet::Properties, MqttCommandConversionError> {
+    let mut props = mqtt::packet::Properties::new();
+    props.push(mqtt::packet::Property::UserProperty(
+        mqtt::packet::UserProperty::new("ferredge-command-id", subscription.command_id.as_str())
+            .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+    ));
     Ok(props)
 }
 

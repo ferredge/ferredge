@@ -445,6 +445,9 @@ pub(crate) fn routed_event_from_v5_publish(
 ) -> RoutedEvent {
     let mut correlation_id = None;
     let mut reply_to = None;
+    let mut content_type = None;
+    let mut subscription_identifiers = Vec::new();
+    let mut user_properties = Vec::new();
     for prop in packet.props() {
         match prop {
             mqtt::packet::Property::CorrelationData(prop) => {
@@ -453,16 +456,29 @@ pub(crate) fn routed_event_from_v5_publish(
             mqtt::packet::Property::ResponseTopic(prop) => {
                 reply_to = Some(Address::Channel(prop.val().to_string()));
             }
+            mqtt::packet::Property::ContentType(prop) => {
+                content_type = Some(prop.val().to_string());
+            }
+            mqtt::packet::Property::SubscriptionIdentifier(prop) => {
+                subscription_identifiers.push(prop.val());
+            }
+            mqtt::packet::Property::UserProperty(prop) => {
+                user_properties.push((prop.key().to_string(), prop.val().to_string()));
+            }
             _ => {}
         }
     }
+    let response_topic = reply_to.as_ref().and_then(|address| match address {
+        Address::Channel(channel) => Some(channel.clone()),
+        Address::Resource(_) => None,
+    });
     RoutedEvent {
         source: mqtt_source(device_id),
         address: Address::Channel(packet.topic_name().to_string()),
         payload: packet.payload().as_slice().to_vec(),
         correlation: if correlation_id.is_some() || reply_to.is_some() {
             Some(Correlation {
-                request_id: correlation_id.unwrap_or_default(),
+                request_id: correlation_id.clone().unwrap_or_default(),
                 reply_to,
             })
         } else {
@@ -474,6 +490,11 @@ pub(crate) fn routed_event_from_v5_publish(
             retain: packet.retain(),
             duplicate: packet.dup(),
             packet_id: packet.packet_id(),
+            content_type,
+            response_topic,
+            correlation_data: correlation_id.clone(),
+            subscription_identifiers,
+            user_properties,
         })),
     }
 }
@@ -494,6 +515,11 @@ pub(crate) fn routed_event_from_v3_publish(
             retain: packet.retain(),
             duplicate: packet.dup(),
             packet_id: packet.packet_id(),
+            content_type: None,
+            response_topic: None,
+            correlation_data: None,
+            subscription_identifiers: Vec::new(),
+            user_properties: Vec::new(),
         })),
     }
 }

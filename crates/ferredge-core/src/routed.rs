@@ -47,6 +47,16 @@ pub struct MqttMeta {
     pub duplicate: bool,
     /// Packet identifier when protocol exchange exposed one.
     pub packet_id: Option<u16>,
+    /// Optional content type declared on MQTT v5 publish.
+    pub content_type: Option<String>,
+    /// Optional response topic declared on MQTT v5 publish.
+    pub response_topic: Option<String>,
+    /// Optional correlation data preserved as UTF-8 lossless string view.
+    pub correlation_data: Option<String>,
+    /// Optional subscription identifiers included by broker on MQTT v5 publish.
+    pub subscription_identifiers: Vec<u32>,
+    /// Optional MQTT v5 user properties preserved from packet metadata.
+    pub user_properties: Vec<(String, String)>,
 }
 
 /// Transport-specific message metadata preserved during routing.
