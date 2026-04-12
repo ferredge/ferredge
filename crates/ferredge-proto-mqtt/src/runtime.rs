@@ -1,22 +1,26 @@
 #[cfg(feature = "std")]
 use std::{
     collections::HashMap,
-    io::{ErrorKind, Read, Write},
-    net::TcpStream,
     string::String,
     time::Duration,
     vec::Vec,
 };
 
 use ferredge_core::prelude::*;
+#[cfg(feature = "std")]
+use runtime_stack::{StackRuntime, StackSocket};
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
 use crate::types::{MqttPacketRequest, MqttWirePacket};
+#[cfg(feature = "tokio-runtime")]
+use crate::runtime_stack;
+#[cfg(feature = "async-std-runtime")]
+use crate::runtime_stack;
 
 #[cfg(feature = "std")]
 pub(crate) struct MqttClientSession {
-    pub(crate) stream: TcpStream,
+    pub(crate) stream: StackSocket,
     pub(crate) connection: mqtt::Connection<mqtt::role::Client>,
     pub(crate) pending_command_ids: HashMap<u16, String>,
     pub(crate) pending_reply_routes: HashMap<String, PendingReplyRoute>,
@@ -124,6 +128,7 @@ pub(crate) fn packet_request_packet_id(packet: &MqttWirePacket) -> Option<u16> {
 
 #[cfg(feature = "std")]
 pub(crate) fn send_packet_request(
+    runtime: &StackRuntime,
     session: &mut MqttClientSession,
     device_id: &str,
     request: MqttPacketRequest,
@@ -140,7 +145,7 @@ pub(crate) fn send_packet_request(
     let events = session
         .connection
         .checked_send(packet_request_into_packet(request));
-    let _ = handle_connection_events(session, device_id, events)?;
+    let _ = handle_connection_events(runtime, session, device_id, events)?;
     Ok(())
 }
 
@@ -271,6 +276,16 @@ fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<
 
 #[cfg(feature = "std")]
 pub(crate) fn read_from_session(
+    runtime: &StackRuntime,
+    session: &mut MqttClientSession,
+    device_id: &str,
+    timeout: Option<Duration>,
+) -> Result<Vec<RoutedMessage>, String> {
+    runtime.block_on(read_from_session_async(session, device_id, timeout))
+}
+
+#[cfg(feature = "std")]
+pub(crate) async fn read_from_session_async(
     session: &mut MqttClientSession,
     device_id: &str,
     timeout: Option<Duration>,
@@ -278,25 +293,33 @@ pub(crate) fn read_from_session(
     session
         .stream
         .set_read_timeout(timeout)
-        .map_err(|e| format!("failed to set MQTT read timeout: {e}"))?;
+        .map_err(|e| format!("failed to set MQTT read timeout: {e:?}"))?;
 
     let mut buffer = [0u8; 4096];
-    match session.stream.read(&mut buffer) {
+    match session.stream.read(&mut buffer).await {
         Ok(0) => Ok(Vec::new()),
         Ok(n) => {
             let mut cursor = mqtt::common::Cursor::new(&buffer[..n]);
             let events = session.connection.recv(&mut cursor);
-            handle_connection_events(session, device_id, events)
+            handle_connection_events_async(session, device_id, events).await
         }
-        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-            Ok(Vec::new())
-        }
-        Err(error) => Err(format!("failed reading MQTT stream: {error}")),
+        Err(NetError::TimedOut) => Ok(Vec::new()),
+        Err(error) => Err(format!("failed reading MQTT stream: {error:?}")),
     }
 }
 
 #[cfg(feature = "std")]
 pub(crate) fn handle_connection_events(
+    runtime: &StackRuntime,
+    session: &mut MqttClientSession,
+    device_id: &str,
+    events: Vec<mqtt::connection::Event>,
+) -> Result<Vec<RoutedMessage>, String> {
+    runtime.block_on(handle_connection_events_async(session, device_id, events))
+}
+
+#[cfg(feature = "std")]
+pub(crate) async fn handle_connection_events_async(
     session: &mut MqttClientSession,
     device_id: &str,
     events: Vec<mqtt::connection::Event>,
@@ -307,10 +330,14 @@ pub(crate) fn handle_connection_events(
         match event {
             mqtt::connection::Event::RequestSendPacket { packet, .. } => {
                 let bytes = packet.to_continuous_buffer();
+                write_all_socket_async(&mut session.stream, &bytes)
+                    .await
+                    .map_err(|e| format!("failed to write MQTT packet: {e:?}"))?;
                 session
                     .stream
-                    .write_all(&bytes)
-                    .map_err(|e| format!("failed to write MQTT packet: {e}"))?;
+                    .flush()
+                    .await
+                    .map_err(|e| format!("failed to flush MQTT packet: {e:?}"))?;
             }
             mqtt::connection::Event::NotifyPacketReceived(packet) => {
                 if let Some(message) = routed_message_from_packet(
@@ -336,6 +363,22 @@ pub(crate) fn handle_connection_events(
 
     Ok(routed)
 }
+
+#[cfg(feature = "std")]
+async fn write_all_socket_async(
+    socket: &mut StackSocket,
+    mut buf: &[u8],
+) -> Result<(), NetError> {
+    while !buf.is_empty() {
+        let written = socket.write(buf).await?;
+        if written == 0 {
+            return Err(NetError::Closed);
+        }
+        buf = &buf[written..];
+    }
+    Ok(())
+}
+
 
 #[cfg(feature = "std")]
 pub(crate) fn routed_message_from_packet(

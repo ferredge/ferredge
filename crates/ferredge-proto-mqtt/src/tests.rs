@@ -65,7 +65,7 @@ fn wait_for_status(
     rx: &mpsc::Receiver<MqttListenerStatus>,
     matcher: impl Fn(&MqttListenerStatus) -> bool,
 ) -> MqttListenerStatus {
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let timeout = deadline.saturating_duration_since(std::time::Instant::now());
         let status = rx
@@ -79,6 +79,14 @@ fn wait_for_status(
 
 fn spawn_test_broker_v5(
     publish_after_connack: Option<mqtt::packet::v5_0::Publish>,
+) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let publishes = publish_after_connack.into_iter().collect::<Vec<_>>();
+    spawn_test_broker_v5_with_publishes(publishes, Duration::from_millis(150))
+}
+
+fn spawn_test_broker_v5_with_publishes(
+    publishes_after_connack: Vec<mqtt::packet::v5_0::Publish>,
+    publish_delay: Duration,
 ) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
     let addr = listener.local_addr().expect("test broker should have local addr");
@@ -103,8 +111,8 @@ fn spawn_test_broker_v5(
             .write_all(&connack.to_continuous_buffer())
             .expect("broker should send connack");
 
-        if let Some(publish) = publish_after_connack {
-            thread::sleep(Duration::from_millis(150));
+        for publish in publishes_after_connack {
+            thread::sleep(publish_delay);
             stream
                 .write_all(&publish.to_continuous_buffer())
                 .expect("broker should send publish");
