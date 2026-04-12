@@ -52,13 +52,15 @@ use runtime_stack::{RuntimeTask, StackNet, StackRuntime};
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "mosquitto-tests"))]
+mod mosquitto_tests;
 
 use types::{MqttPacketRequest, MqttResourceAttributes};
 
 #[cfg(feature = "std")]
 use runtime::{
-    MqttClientSession, build_connect_packet, handle_connection_events, mqtt_version_from_core,
-    normalize_broker_addr, read_from_session, send_packet_request, disconnect_session,
+    MqttClientSession, build_connect_packet, mqtt_version_from_core, normalize_broker_addr,
+    read_from_session_async, send_packet_request_async, disconnect_session,
 };
 
 pub use types::{
@@ -138,39 +140,16 @@ impl MqttDriver {
         }
     }
 
-    /// Establishes std transport session and MQTT handshake if not already connected.
     #[cfg(feature = "std")]
-    pub fn connect(&self) -> Result<(), String> {
-        self.ensure_connected()
-    }
-
-    /// Reads one batch of inbound MQTT data and converts packets into routed messages.
-    #[cfg(feature = "std")]
-    pub fn poll(&self) -> Result<Vec<RoutedMessage>, String> {
-        self.ensure_connected()?;
-        let mut guard = self
-            .session
-            .lock()
-            .map_err(|_| "failed to lock MQTT session".to_string())?;
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| "MQTT session not initialized".to_string())?;
-        read_from_session(
-            self.runtime.as_ref(),
-            session,
-            &self.dvc.id,
-            Some(std::time::Duration::from_millis(50)),
-        )
-    }
-
-    #[cfg(feature = "std")]
-    fn ensure_connected(&self) -> Result<(), String> {
-        let mut guard = self
-            .session
-            .lock()
-            .map_err(|_| "failed to lock MQTT session".to_string())?;
-        if guard.is_some() {
-            return Ok(());
+    async fn ensure_connected_async(&self) -> Result<(), String> {
+        {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| "failed to lock MQTT session".to_string())?;
+            if guard.is_some() {
+                return Ok(());
+            }
         }
 
         let config = match &self.dvc.endpoint {
@@ -178,10 +157,10 @@ impl MqttDriver {
             _ => return Err("device endpoint is not MQTT".to_string()),
         };
 
-        let mut stream = self.runtime.block_on(
-            self.net
-                .connect(normalize_broker_addr(&config.broker).as_str()),
-        )
+        let mut stream = self
+            .net
+            .connect(normalize_broker_addr(&config.broker).as_str())
+            .await
             .map_err(|e| format!("failed to connect to MQTT broker: {e:?}"))?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_millis(1000)))
@@ -208,15 +187,21 @@ impl MqttDriver {
             pending_reply_routes: std::collections::HashMap::new(),
         };
         let events = session.connection.checked_send(connect_packet);
-        handle_connection_events(self.runtime.as_ref(), &mut session, &self.dvc.id, events)?;
-        let _ = read_from_session(
-            self.runtime.as_ref(),
+        runtime::handle_connection_events_async(&mut session, &self.dvc.id, events).await?;
+        let _ = read_from_session_async(
             &mut session,
             &self.dvc.id,
             Some(std::time::Duration::from_millis(1000)),
-        )?;
+        )
+        .await?;
 
-        *guard = Some(session);
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| "failed to lock MQTT session".to_string())?;
+        if guard.is_none() {
+            *guard = Some(session);
+        }
         Ok(())
     }
 
@@ -322,17 +307,25 @@ impl MqttDriver {
         subscribers.retain(|subscriber| subscriber.send(status.clone()).is_ok());
         Ok(())
     }
+    #[cfg(feature = "std")]
+    fn take_session(&self) -> Result<MqttClientSession, String> {
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| "failed to lock MQTT session".to_string())?;
+        guard
+            .take()
+            .ok_or_else(|| "MQTT session not initialized".to_string())
+    }
 
     #[cfg(feature = "std")]
-    fn reconnect_session(&self) -> Result<(), String> {
-        {
-            let mut guard = self
-                .session
-                .lock()
-                .map_err(|_| "failed to lock MQTT session".to_string())?;
-            *guard = None;
-        }
-        self.ensure_connected()
+    fn restore_session(&self, session: MqttClientSession) -> Result<(), String> {
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| "failed to lock MQTT session".to_string())?;
+        *guard = Some(session);
+        Ok(())
     }
 }
 
@@ -352,7 +345,7 @@ impl Lifecycle for MqttDriver {
     async fn start(&self) -> Result<(), Self::Error> {
         #[cfg(feature = "std")]
         {
-            return self.connect();
+            return self.ensure_connected_async().await;
         }
 
         #[cfg(not(feature = "std"))]
@@ -363,14 +356,16 @@ impl Lifecycle for MqttDriver {
         #[cfg(feature = "std")]
         {
             self.stop_listener()?;
-            let mut guard = self
-                .session
-                .lock()
-                .map_err(|_| "failed to lock MQTT session".to_string())?;
-            if let Some(session) = guard.as_mut() {
-                let _ = self.runtime.block_on(disconnect_session(session));
+            let maybe_session = {
+                let mut guard = self
+                    .session
+                    .lock()
+                    .map_err(|_| "failed to lock MQTT session".to_string())?;
+                guard.take()
+            };
+            if let Some(mut session) = maybe_session {
+                let _ = disconnect_session(&mut session).await;
             }
-            *guard = None;
             self.broadcast_listener_status(self.listener_status()?)?;
             return Ok(());
         }
@@ -388,22 +383,21 @@ impl PubSub for MqttDriver {
     async fn publish(&self, request: Self::PublishRequest) -> Result<(), Self::Error> {
         #[cfg(feature = "std")]
         {
-            self.ensure_connected()?;
-            let mut guard = self
-                .session
-                .lock()
-                .map_err(|_| "failed to lock MQTT session".to_string())?;
-            let session = guard
-                .as_mut()
-                .ok_or_else(|| "MQTT session not initialized".to_string())?;
-
-            send_packet_request(self.runtime.as_ref(), session, &self.dvc.id, request)?;
-            let _ = read_from_session(
-                self.runtime.as_ref(),
-                session,
-                &self.dvc.id,
-                Some(std::time::Duration::from_millis(250)),
-            )?;
+            self.ensure_connected_async().await?;
+            let mut session = self.take_session()?;
+            let result = async {
+                send_packet_request_async(&mut session, &self.dvc.id, request).await?;
+                let _ = read_from_session_async(
+                    &mut session,
+                    &self.dvc.id,
+                    Some(std::time::Duration::from_millis(250)),
+                )
+                .await?;
+                Ok::<(), String>(())
+            }
+            .await;
+            self.restore_session(session)?;
+            result?;
             return Ok(());
         }
 
@@ -421,22 +415,20 @@ impl PubSub for MqttDriver {
     {
         #[cfg(feature = "std")]
         {
-            self.ensure_connected()?;
-            let mut guard = self
-                .session
-                .lock()
-                .map_err(|_| "failed to lock MQTT session".to_string())?;
-            let session = guard
-                .as_mut()
-                .ok_or_else(|| "MQTT session not initialized".to_string())?;
-
-            send_packet_request(self.runtime.as_ref(), session, &self.dvc.id, subscription)?;
-            let messages = read_from_session(
-                self.runtime.as_ref(),
-                session,
-                &self.dvc.id,
-                Some(std::time::Duration::from_millis(250)),
-            )?;
+            self.ensure_connected_async().await?;
+            let mut session = self.take_session()?;
+            let result = async {
+                send_packet_request_async(&mut session, &self.dvc.id, subscription).await?;
+                read_from_session_async(
+                    &mut session,
+                    &self.dvc.id,
+                    Some(std::time::Duration::from_millis(250)),
+                )
+                .await
+            }
+            .await;
+            self.restore_session(session)?;
+            let messages = result?;
             let mut sink = sink;
             for message in messages {
                 if let RoutedMessage::Event(event) = message {
@@ -454,22 +446,21 @@ impl PubSub for MqttDriver {
     async fn unsubscribe(&self, subscription: Self::Subscription) -> Result<(), Self::Error> {
         #[cfg(feature = "std")]
         {
-            self.ensure_connected()?;
-            let mut guard = self
-                .session
-                .lock()
-                .map_err(|_| "failed to lock MQTT session".to_string())?;
-            let session = guard
-                .as_mut()
-                .ok_or_else(|| "MQTT session not initialized".to_string())?;
-
-            send_packet_request(self.runtime.as_ref(), session, &self.dvc.id, subscription)?;
-            let _ = read_from_session(
-                self.runtime.as_ref(),
-                session,
-                &self.dvc.id,
-                Some(std::time::Duration::from_millis(250)),
-            )?;
+            self.ensure_connected_async().await?;
+            let mut session = self.take_session()?;
+            let result = async {
+                send_packet_request_async(&mut session, &self.dvc.id, subscription).await?;
+                let _ = read_from_session_async(
+                    &mut session,
+                    &self.dvc.id,
+                    Some(std::time::Duration::from_millis(250)),
+                )
+                .await?;
+                Ok::<(), String>(())
+            }
+            .await;
+            self.restore_session(session)?;
+            result?;
             return Ok(());
         }
 
@@ -488,7 +479,7 @@ impl EventSource for MqttDriver {
     {
         #[cfg(feature = "std")]
         {
-            self.ensure_connected()?;
+            self.ensure_connected_async().await?;
             if self.listener_running.swap(true, Ordering::SeqCst) {
                 return Err("MQTT listener already running".to_string());
             }
@@ -506,7 +497,7 @@ impl EventSource for MqttDriver {
                 let mut sink = sink;
 
                 while running.load(Ordering::SeqCst) {
-                    let messages = {
+                    let mut session_value = {
                         let mut guard = match session.lock() {
                             Ok(guard) => guard,
                             Err(_) => {
@@ -524,7 +515,7 @@ impl EventSource for MqttDriver {
                                 break;
                             }
                         };
-                        let session = match guard.as_mut() {
+                        match guard.take() {
                             Some(session) => session,
                             None => {
                                 if let Ok(mut error_guard) = listener_error.lock() {
@@ -541,14 +532,17 @@ impl EventSource for MqttDriver {
                                 );
                                 break;
                             }
-                        };
-                        read_from_session(
-                            runtime.as_ref(),
-                            session,
-                            &device_id,
-                            Some(std::time::Duration::from_millis(250)),
-                        )
+                        }
                     };
+                    let messages = read_from_session_async(
+                        &mut session_value,
+                        &device_id,
+                        Some(std::time::Duration::from_millis(250)),
+                    )
+                    .await;
+                    if let Ok(mut guard) = session.lock() {
+                        *guard = Some(session_value);
+                    }
 
                     match messages {
                         Ok(messages) => {
@@ -573,7 +567,9 @@ impl EventSource for MqttDriver {
                             }
                         }
                         Err(error) => {
-                            if running.load(Ordering::SeqCst) && driver.reconnect_session().is_ok() {
+                            if running.load(Ordering::SeqCst)
+                                && driver.ensure_connected_async().await.is_ok()
+                            {
                                 if let Ok(mut error_guard) = listener_error.lock() {
                                     *error_guard = None;
                                 }
