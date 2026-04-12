@@ -24,3 +24,4 @@ ferredge-runtime-async-std = { workspace = true, optional = true }
 ferredge-runtime-embassy = { workspace = true, optional = true }
 
 [dev-dependencies]
+ferredge-proto-http = { workspace = true }

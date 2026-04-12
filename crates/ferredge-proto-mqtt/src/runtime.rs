@@ -2,7 +2,7 @@
 use std::{
     collections::HashMap,
     string::String,
-    time::Duration,
+    time::{Duration, Instant},
     vec::Vec,
 };
 
@@ -22,6 +22,10 @@ use crate::runtime_stack;
 pub(crate) struct MqttClientSession {
     pub(crate) stream: StackSocket,
     pub(crate) connection: mqtt::Connection<mqtt::role::Client>,
+    pub(crate) protocol_version: MqttProtocolVersion,
+    pub(crate) keepalive_secs: Option<u16>,
+    pub(crate) last_activity: Instant,
+    pub(crate) awaiting_pingresp: bool,
     pub(crate) pending_command_ids: HashMap<u16, String>,
     pub(crate) pending_reply_routes: HashMap<String, PendingReplyRoute>,
 }
@@ -60,11 +64,19 @@ pub(crate) fn build_connect_packet(
 ) -> Result<mqtt::packet::Packet, String> {
     match config.preferred_protocol_version() {
         MqttProtocolVersion::V5_0 => {
+            let mut props = mqtt::packet::Properties::new();
+            if let Some(session_expiry_secs) = config.session_expiry_secs {
+                props.push(mqtt::packet::Property::SessionExpiryInterval(
+                    mqtt::packet::SessionExpiryInterval::new(session_expiry_secs)
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
             let mut builder = mqtt::packet::v5_0::Connect::builder()
                 .client_id(config.client_id.as_str())
                 .map_err(|e| e.to_string())?
                 .clean_start(config.clean_start)
-                .keep_alive(config.keepalive_secs.unwrap_or(0));
+                .keep_alive(config.keepalive_secs.unwrap_or(0))
+                .props(props);
             if let Some(auth) = &config.auth {
                 if let Some(username) = &auth.username {
                     builder = builder
@@ -297,13 +309,18 @@ pub(crate) async fn read_from_session_async(
 
     let mut buffer = [0u8; 4096];
     match session.stream.read(&mut buffer).await {
-        Ok(0) => Ok(Vec::new()),
+        Ok(0) => Err("mqtt stream closed".to_string()),
         Ok(n) => {
+            session.last_activity = Instant::now();
+            session.awaiting_pingresp = false;
             let mut cursor = mqtt::common::Cursor::new(&buffer[..n]);
             let events = session.connection.recv(&mut cursor);
             handle_connection_events_async(session, device_id, events).await
         }
-        Err(NetError::TimedOut) => Ok(Vec::new()),
+        Err(NetError::TimedOut) => {
+            send_keepalive_ping_if_due(session, device_id).await?;
+            Ok(Vec::new())
+        }
         Err(error) => Err(format!("failed reading MQTT stream: {error:?}")),
     }
 }
@@ -338,6 +355,7 @@ pub(crate) async fn handle_connection_events_async(
                     .flush()
                     .await
                     .map_err(|e| format!("failed to flush MQTT packet: {e:?}"))?;
+                session.last_activity = Instant::now();
             }
             mqtt::connection::Event::NotifyPacketReceived(packet) => {
                 if let Some(message) = routed_message_from_packet(
@@ -362,6 +380,70 @@ pub(crate) async fn handle_connection_events_async(
     }
 
     Ok(routed)
+}
+
+#[cfg(feature = "std")]
+pub(crate) async fn disconnect_session(session: &mut MqttClientSession) -> Result<(), String> {
+    let events = match session.protocol_version {
+        MqttProtocolVersion::V5_0 => {
+            let disconnect = mqtt::packet::v5_0::Disconnect::builder()
+            .reason_code(mqtt::result_code::DisconnectReasonCode::NormalDisconnection)
+            .props(mqtt::packet::Properties::new())
+            .build()
+            .map_err(|e| e.to_string())?;
+            session.connection.checked_send(disconnect)
+        }
+        MqttProtocolVersion::V3_1_1 => {
+            let disconnect = mqtt::packet::v3_1_1::Disconnect::builder()
+            .build()
+            .map_err(|e| e.to_string())?;
+            session.connection.checked_send(disconnect)
+        }
+    };
+    let _ = handle_connection_events_async(session, "", events).await?;
+    session
+        .stream
+        .close()
+        .await
+        .map_err(|e| format!("failed to close MQTT socket: {e:?}"))
+}
+
+#[cfg(feature = "std")]
+async fn send_keepalive_ping_if_due(
+    session: &mut MqttClientSession,
+    device_id: &str,
+) -> Result<(), String> {
+    let Some(keepalive_secs) = session.keepalive_secs else {
+        return Ok(());
+    };
+    if keepalive_secs == 0 {
+        return Ok(());
+    }
+
+    if session.last_activity.elapsed() < Duration::from_secs(keepalive_secs as u64) {
+        return Ok(());
+    }
+    if session.awaiting_pingresp {
+        return Err("mqtt keepalive timed out waiting for ping response".to_string());
+    }
+
+    let events = match session.protocol_version {
+        MqttProtocolVersion::V5_0 => {
+            let pingreq = mqtt::packet::v5_0::Pingreq::builder()
+            .build()
+            .map_err(|e| e.to_string())?;
+            session.connection.checked_send(pingreq)
+        }
+        MqttProtocolVersion::V3_1_1 => {
+            let pingreq = mqtt::packet::v3_1_1::Pingreq::builder()
+            .build()
+            .map_err(|e| e.to_string())?;
+            session.connection.checked_send(pingreq)
+        }
+    };
+    session.awaiting_pingresp = true;
+    let _ = handle_connection_events_async(session, device_id, events).await?;
+    Ok(())
 }
 
 #[cfg(feature = "std")]

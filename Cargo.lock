@@ -366,6 +366,7 @@ name = "ferredge-proto-mqtt"
 version = "0.1.0"
 dependencies = [
  "ferredge-core",
+ "ferredge-proto-http",
  "ferredge-runtime-async-std",
  "ferredge-runtime-embassy",
  "ferredge-runtime-tokio",
