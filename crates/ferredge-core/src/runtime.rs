@@ -14,6 +14,8 @@ pub enum TaskJoinError {
 pub enum ChannelError {
     /// Channel is full and cannot currently accept more messages.
     Full,
+    /// Channel currently has no item available for nonblocking receive.
+    Empty,
     /// Channel was closed by the receiver or runtime.
     Closed,
     /// Channel operation failed because runtime resources are unavailable.
@@ -57,6 +59,9 @@ where
 {
     /// Receives the next item from the channel.
     fn recv(&mut self) -> impl Future<Output = Result<T, ChannelError>> + Send;
+
+    /// Attempts to receive one item without waiting.
+    fn try_recv(&mut self) -> Result<T, ChannelError>;
 }
 
 /// Generic async runtime contract shared by protocol adapters.
@@ -163,6 +168,10 @@ mod tests {
         T: Send + 'static,
     {
         async fn recv(&mut self) -> Result<T, ChannelError> {
+            Err(ChannelError::Closed)
+        }
+
+        fn try_recv(&mut self) -> Result<T, ChannelError> {
             Err(ChannelError::Closed)
         }
     }

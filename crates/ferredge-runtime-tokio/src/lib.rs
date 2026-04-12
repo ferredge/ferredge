@@ -117,6 +117,14 @@ where
     async fn recv(&mut self) -> Result<T, ChannelError> {
         self.inner.recv().await.ok_or(ChannelError::Closed)
     }
+
+    fn try_recv(&mut self) -> Result<T, ChannelError> {
+        match self.inner.try_recv() {
+            Ok(item) => Ok(item),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Err(ChannelError::Empty),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Err(ChannelError::Closed),
+        }
+    }
 }
 
 impl AsyncRuntime for TokioRuntime {
