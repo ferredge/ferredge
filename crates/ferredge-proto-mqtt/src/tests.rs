@@ -371,6 +371,49 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
 }
 
 #[test]
+fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
+    let driver = make_default_driver();
+    let command = ferredge_core::prelude::Command {
+        id: "cmd-implicit-corr".to_string(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".to_string(),
+        intent: ferredge_core::prelude::Intent::Send {
+            channel: BrokerAddress {
+                name: "rpc/request".to_string(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: b"{}".to_vec(),
+            options: BrokerMessageOptions {
+                delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
+                headers: Vec::new(),
+                reply_to: Some("rpc/reply".to_string()),
+                correlation_id: None,
+            },
+        },
+        correlation: None,
+    };
+
+    let packet = MqttPacketRequest::try_from(MqttCommandRef {
+        device: &driver.dvc,
+        command: &command,
+    })
+    .expect("v5 publish should build");
+
+    match packet.packet {
+        MqttWirePacket::V5Publish(packet) => {
+            let mut saw_corr = false;
+            for prop in packet.props() {
+                if let mqtt::packet::Property::CorrelationData(prop) = prop {
+                    saw_corr = prop.val() == b"cmd-implicit-corr";
+                }
+            }
+            assert!(saw_corr);
+        }
+        other => panic!("expected v5 publish packet, got {other:?}"),
+    }
+}
+
+#[test]
 fn inbound_publish_packet_converts_to_routed_event() {
     let publish = mqtt::packet::v5_0::Publish::builder()
         .topic_name("sensors/temp")
@@ -399,6 +442,7 @@ fn inbound_publish_packet_converts_to_routed_event() {
         .unwrap();
 
     let message = routed_message_from_packet(
+        &mut HashMap::new(),
         &mut HashMap::new(),
         "mqtt-device-1",
         mqtt::packet::Packet::V5_0Publish(publish),
@@ -431,6 +475,53 @@ fn inbound_publish_packet_converts_to_routed_event() {
             }
         }
         other => panic!("expected routed event, got {other:?}"),
+    }
+}
+
+#[test]
+fn inbound_reply_publish_converts_to_routed_result_when_correlation_matches() {
+    let publish = mqtt::packet::v5_0::Publish::builder()
+        .topic_name("rpc/reply")
+        .unwrap()
+        .payload("done")
+        .props({
+            let mut props = mqtt::packet::Properties::new();
+            props.push(mqtt::packet::Property::CorrelationData(
+                mqtt::packet::CorrelationData::new(b"corr-77".to_vec()).unwrap(),
+            ));
+            props
+        })
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::new(),
+        &mut HashMap::from([(
+            "corr-77".to_string(),
+            crate::runtime::PendingReplyRoute {
+                command_id: "cmd-77".to_string(),
+                reply_to: Some(Address::Channel("rpc/reply".to_string())),
+            },
+        )]),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Publish(publish),
+    )
+    .expect("reply publish should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "cmd-77");
+            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Completed);
+            assert_eq!(result.result.payload, Some(b"done".to_vec()));
+            assert_eq!(
+                result.result.correlation,
+                Some(Correlation {
+                    request_id: "cmd-77".to_string(),
+                    reply_to: Some(Address::Channel("rpc/reply".to_string())),
+                })
+            );
+        }
+        other => panic!("expected routed result, got {other:?}"),
     }
 }
 

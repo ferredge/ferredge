@@ -229,7 +229,15 @@ pub fn build_v5_publish_props(
                 .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
         ));
     }
-    if let Some(correlation_id) = &publish.correlation_id {
+    if let Some(correlation_id) = publish
+        .correlation_id
+        .as_ref()
+        .or(if publish.reply_to.is_some() {
+            Some(&publish.command_id)
+        } else {
+            None
+        })
+    {
         props.push(mqtt::packet::Property::CorrelationData(
             mqtt::packet::CorrelationData::new(correlation_id.as_bytes().to_vec())
                 .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
