@@ -206,6 +206,14 @@ impl MqttDriver {
     }
 
     #[cfg(feature = "std")]
+    fn reconnect_config(&self) -> Result<BrokerReconnectConfig, String> {
+        match &self.dvc.endpoint {
+            DeviceEndpoint::Mqtt(config) => Ok(config.reconnect.clone()),
+            _ => Err("device endpoint is not MQTT".to_string()),
+        }
+    }
+
+    #[cfg(feature = "std")]
     fn stop_listener(&self) -> Result<(), String> {
         self.listener_running.store(false, Ordering::SeqCst);
         let mut handle_guard = self
@@ -525,12 +533,14 @@ impl EventSource for MqttDriver {
             let device_id = self.dvc.id.clone();
             let driver = self.clone();
             let runtime = self.runtime.clone();
+            let reconnect = self.reconnect_config()?;
             self.clear_listener_error()?;
             self.broadcast_listener_status(MqttListenerStatus::Running)?;
             let handle = runtime.clone().spawn(async move {
                 let mut sink = sink;
+                let mut reconnect_attempt = 0u32;
 
-                while running.load(Ordering::SeqCst) {
+                'listen: while running.load(Ordering::SeqCst) {
                     let mut session_value = match {
                         let mut guard = match session.lock() {
                             Ok(guard) => guard,
@@ -566,6 +576,7 @@ impl EventSource for MqttDriver {
 
                     match messages {
                         Ok(messages) => {
+                            reconnect_attempt = 0;
                             if let Ok(mut guard) = session.lock() {
                                 *guard = Some(session_value);
                             }
@@ -589,17 +600,44 @@ impl EventSource for MqttDriver {
                                 }
                             }
                         }
-                        Err(error) => {
+                        Err(mut error) => {
                             if let Ok(mut guard) = session.lock() {
                                 *guard = None;
                             }
-                            if running.load(Ordering::SeqCst)
-                                && driver.ensure_connected_async().await.is_ok()
-                            {
-                                if let Ok(mut error_guard) = listener_error.lock() {
-                                    *error_guard = None;
+                            while running.load(Ordering::SeqCst) {
+                                reconnect_attempt = reconnect_attempt.saturating_add(1);
+                                if !reconnect.allows_attempt(reconnect_attempt) {
+                                    break;
                                 }
+
+                                runtime
+                                    .sleep(core::time::Duration::from_millis(
+                                        reconnect.delay_ms_for_attempt(reconnect_attempt),
+                                    ))
+                                    .await;
+
+                                if !running.load(Ordering::SeqCst) {
+                                    break;
+                                }
+
+                                match driver.ensure_connected_async().await {
+                                    Ok(()) => {
+                                        reconnect_attempt = 0;
+                                        if let Ok(mut error_guard) = listener_error.lock() {
+                                            *error_guard = None;
+                                        }
+                                        continue 'listen;
+                                    }
+                                    Err(connect_error) => {
+                                        error = connect_error;
+                                    }
+                                }
+                            }
+                            if reconnect_attempt == 0 && running.load(Ordering::SeqCst) {
                                 continue;
+                            }
+                            if !running.load(Ordering::SeqCst) {
+                                break;
                             }
                             if let Ok(mut error_guard) = listener_error.lock() {
                                 *error_guard = Some(error.clone());
