@@ -1,3 +1,13 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+//! MQTT protocol adapter for ferredge.
+//!
+//! With the default `std` feature, this crate provides a live TCP-backed MQTT client runtime,
+//! publish/subscribe operations, and background event listening.
+//!
+//! Without `std`, this crate still supports routed-command conversion into MQTT-native packet
+//! types through `TryFrom`, but transport runtime methods return explicit
+//! `requires the "std" feature` errors.
+
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
@@ -7,6 +17,12 @@ use std::sync::{
     mpsc,
     Arc, Mutex,
 };
+
+#[cfg(feature = "std")]
+use std::string::{String, ToString};
+
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
 
 use ferredge_core::prelude::*;
 
@@ -40,7 +56,11 @@ pub enum MqttListenerStatus {
     Failed(String),
 }
 
-/// MQTT adapter scaffold backed by `mqtt_protocol_core` packet builders.
+/// MQTT adapter backed by `mqtt_protocol_core` packet builders.
+///
+/// In `std` builds this type also owns the live TCP session and background listener runtime.
+/// In `no_std` builds it remains useful for packet conversion, but transport operations fail
+/// with explicit runtime-availability errors.
 #[derive(Clone)]
 pub struct MqttDriver {
     /// Device metadata and broker configuration served by this driver.
@@ -256,7 +276,7 @@ impl Lifecycle for MqttDriver {
 
     #[cfg(not(feature = "std"))]
     async fn start(&self) -> Result<(), Self::Error> {
-        Ok(())
+        Err("MQTT runtime requires the \"std\" feature".to_string())
     }
 
     #[cfg(feature = "std")]
@@ -273,7 +293,7 @@ impl Lifecycle for MqttDriver {
 
     #[cfg(not(feature = "std"))]
     async fn stop(&self) -> Result<(), Self::Error> {
-        Ok(())
+        Err("MQTT runtime requires the \"std\" feature".to_string())
     }
 }
 
@@ -304,7 +324,7 @@ impl PubSub for MqttDriver {
 
     #[cfg(not(feature = "std"))]
     async fn publish(&self, _request: Self::PublishRequest) -> Result<(), Self::Error> {
-        Err("MQTT transport runtime not implemented yet".to_string())
+        Err("MQTT runtime requires the \"std\" feature".to_string())
     }
 
     #[cfg(feature = "std")]
@@ -350,7 +370,7 @@ impl PubSub for MqttDriver {
     where
         S: EventSink<Event = RoutedEvent> + Send,
     {
-        Err("MQTT transport runtime not implemented yet".to_string())
+        Err("MQTT runtime requires the \"std\" feature".to_string())
     }
 
     #[cfg(feature = "std")]
@@ -375,7 +395,7 @@ impl PubSub for MqttDriver {
 
     #[cfg(not(feature = "std"))]
     async fn unsubscribe(&self, _subscription: Self::Subscription) -> Result<(), Self::Error> {
-        Err("MQTT transport runtime not implemented yet".to_string())
+        Err("MQTT runtime requires the \"std\" feature".to_string())
     }
 }
 
@@ -508,12 +528,12 @@ impl EventSource for MqttDriver {
     where
         S: EventSink<Event = Self::Event> + Send + 'static,
     {
-        Err("MQTT event source not implemented for no_std environment".to_string())
+        Err("MQTT runtime requires the \"std\" feature".to_string())
     }
 
     #[cfg(not(feature = "std"))]
     async fn stop_listening(&self) -> Result<(), Self::Error> {
-        Err("MQTT event source not implemented for no_std environment".to_string())
+        Err("MQTT runtime requires the \"std\" feature".to_string())
     }
 }
 

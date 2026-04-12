@@ -8,6 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
+# `std` enables the live TCP MQTT runtime. Without it, the crate remains available for
+# conversion into MQTT-native packets but transport operations are not available.
 default = ["std"]
 std = ["ferredge-core/std", "mqtt_protocol_core/std", "serde/std"]
 
