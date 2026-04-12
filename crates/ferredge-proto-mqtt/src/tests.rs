@@ -766,6 +766,108 @@ fn inbound_reply_publish_converts_to_routed_result_when_correlation_matches() {
 }
 
 #[test]
+fn v5_puback_failure_converts_to_rejected_result_with_reason_codes() {
+    let puback = mqtt::packet::v5_0::Puback::builder()
+        .packet_id(42u16)
+        .reason_code(mqtt::result_code::PubackReasonCode::QuotaExceeded)
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::from([(42u16, "cmd-42".to_string())]),
+        &mut HashMap::new(),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Puback(puback),
+    )
+    .expect("puback packet should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "cmd-42");
+            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Rejected);
+            assert_eq!(result.result.error, Some("QuotaExceeded".to_string()));
+            match result.transport {
+                Some(TransportMeta::Mqtt(meta)) => {
+                    assert_eq!(meta.packet_id, Some(42));
+                    assert_eq!(meta.reason_codes, vec!["QuotaExceeded".to_string()]);
+                }
+                other => panic!("expected MQTT transport metadata, got {other:?}"),
+            }
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
+}
+
+#[test]
+fn v5_suback_partial_failure_converts_to_rejected_result_with_reason_codes() {
+    let suback = mqtt::packet::v5_0::Suback::builder()
+        .packet_id(7u16)
+        .reason_codes(vec![
+            mqtt::result_code::SubackReasonCode::GrantedQos1,
+            mqtt::result_code::SubackReasonCode::NotAuthorized,
+        ])
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::from([(7u16, "cmd-sub-7".to_string())]),
+        &mut HashMap::new(),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Suback(suback),
+    )
+    .expect("suback packet should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "cmd-sub-7");
+            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Rejected);
+            assert_eq!(result.result.error, Some("NotAuthorized".to_string()));
+            match result.transport {
+                Some(TransportMeta::Mqtt(meta)) => {
+                    assert_eq!(
+                        meta.reason_codes,
+                        vec!["GrantedQos1".to_string(), "NotAuthorized".to_string()]
+                    );
+                }
+                other => panic!("expected MQTT transport metadata, got {other:?}"),
+            }
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
+}
+
+#[test]
+fn v5_disconnect_failure_converts_to_rejected_transport_result() {
+    let disconnect = mqtt::packet::v5_0::Disconnect::builder()
+        .reason_code(mqtt::result_code::DisconnectReasonCode::ServerBusy)
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Disconnect(disconnect),
+    )
+    .expect("disconnect packet should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "__mqtt_disconnect__");
+            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Rejected);
+            assert_eq!(result.result.error, Some("ServerBusy".to_string()));
+            match result.transport {
+                Some(TransportMeta::Mqtt(meta)) => {
+                    assert_eq!(meta.reason_codes, vec!["ServerBusy".to_string()]);
+                }
+                other => panic!("expected MQTT transport metadata, got {other:?}"),
+            }
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
+}
+
+#[test]
 fn mqtt_listener_status_starts_stopped() {
     let driver = make_default_driver();
 

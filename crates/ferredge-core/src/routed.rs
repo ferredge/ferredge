@@ -57,6 +57,8 @@ pub struct MqttMeta {
     pub subscription_identifiers: Vec<u32>,
     /// Optional MQTT v5 user properties preserved from packet metadata.
     pub user_properties: Vec<(String, String)>,
+    /// Optional MQTT v5 reason code list for ack or disconnect packets.
+    pub reason_codes: Vec<String>,
 }
 
 /// Transport-specific message metadata preserved during routing.

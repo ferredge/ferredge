@@ -449,12 +449,10 @@ pub(crate) fn routed_message_from_packet(
             routed_event_from_v3_publish(device_id, &packet),
         )),
         mqtt::packet::Packet::V5_0Puback(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_packet_id(
+            Some(RoutedMessage::Result(routed_result_from_v5_puback(
                 pending_command_ids,
                 device_id,
-                packet.packet_id(),
-                DeliveryState::Completed,
-                true,
+                &packet,
             )))
         }
         mqtt::packet::Packet::V3_1_1Puback(packet) => {
@@ -467,12 +465,10 @@ pub(crate) fn routed_message_from_packet(
             )))
         }
         mqtt::packet::Packet::V5_0Pubrec(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_packet_id(
+            Some(RoutedMessage::Result(routed_result_from_v5_pubrec(
                 pending_command_ids,
                 device_id,
-                packet.packet_id(),
-                DeliveryState::Dispatched,
-                false,
+                &packet,
             )))
         }
         mqtt::packet::Packet::V3_1_1Pubrec(packet) => {
@@ -485,12 +481,10 @@ pub(crate) fn routed_message_from_packet(
             )))
         }
         mqtt::packet::Packet::V5_0Pubcomp(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_packet_id(
+            Some(RoutedMessage::Result(routed_result_from_v5_pubcomp(
                 pending_command_ids,
                 device_id,
-                packet.packet_id(),
-                DeliveryState::Completed,
-                true,
+                &packet,
             )))
         }
         mqtt::packet::Packet::V3_1_1Pubcomp(packet) => {
@@ -503,12 +497,10 @@ pub(crate) fn routed_message_from_packet(
             )))
         }
         mqtt::packet::Packet::V5_0Suback(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_packet_id(
+            Some(RoutedMessage::Result(routed_result_from_v5_suback(
                 pending_command_ids,
                 device_id,
-                packet.packet_id(),
-                DeliveryState::Completed,
-                true,
+                &packet,
             )))
         }
         mqtt::packet::Packet::V3_1_1Suback(packet) => {
@@ -521,12 +513,10 @@ pub(crate) fn routed_message_from_packet(
             )))
         }
         mqtt::packet::Packet::V5_0Unsuback(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_packet_id(
+            Some(RoutedMessage::Result(routed_result_from_v5_unsuback(
                 pending_command_ids,
                 device_id,
-                packet.packet_id(),
-                DeliveryState::Completed,
-                true,
+                &packet,
             )))
         }
         mqtt::packet::Packet::V3_1_1Unsuback(packet) => {
@@ -538,6 +528,9 @@ pub(crate) fn routed_message_from_packet(
                 true,
             )))
         }
+        mqtt::packet::Packet::V5_0Disconnect(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_disconnect(device_id, &packet),
+        )),
         _ => None,
     }
 }
@@ -642,6 +635,7 @@ pub(crate) fn routed_event_from_v5_publish(
             correlation_data: correlation_id.clone(),
             subscription_identifiers,
             user_properties,
+            reason_codes: Vec::new(),
         })),
     }
 }
@@ -709,6 +703,7 @@ fn routed_reply_or_event_from_v5_publish(
                         _ => None,
                     })
                     .collect(),
+                reason_codes: Vec::new(),
             })),
         }));
     }
@@ -739,7 +734,213 @@ pub(crate) fn routed_event_from_v3_publish(
             correlation_data: None,
             subscription_identifiers: Vec::new(),
             user_properties: Vec::new(),
+            reason_codes: Vec::new(),
         })),
+    }
+}
+
+#[cfg(feature = "std")]
+fn routed_result_from_v5_puback(
+    pending_command_ids: &mut HashMap<u16, String>,
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Puback,
+) -> RoutedResult {
+    let reason_code = packet.reason_code();
+    routed_result_from_packet_id_with_transport(
+        pending_command_ids,
+        device_id,
+        packet.packet_id(),
+        reason_code.map_or(DeliveryState::Completed, |code| {
+            if code.is_success() {
+                DeliveryState::Completed
+            } else {
+                DeliveryState::Rejected
+            }
+        }),
+        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        true,
+        Some(TransportMeta::Mqtt(mqtt_result_meta(
+            Some(packet.packet_id()),
+            reason_code.into_iter().map(|code| code.to_string()).collect(),
+        ))),
+    )
+}
+
+#[cfg(feature = "std")]
+fn routed_result_from_v5_pubrec(
+    pending_command_ids: &mut HashMap<u16, String>,
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Pubrec,
+) -> RoutedResult {
+    let reason_code = packet.reason_code();
+    routed_result_from_packet_id_with_transport(
+        pending_command_ids,
+        device_id,
+        packet.packet_id(),
+        reason_code.map_or(DeliveryState::Dispatched, |code| {
+            if code.is_success() {
+                DeliveryState::Dispatched
+            } else {
+                DeliveryState::Rejected
+            }
+        }),
+        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        false,
+        Some(TransportMeta::Mqtt(mqtt_result_meta(
+            Some(packet.packet_id()),
+            reason_code.into_iter().map(|code| code.to_string()).collect(),
+        ))),
+    )
+}
+
+#[cfg(feature = "std")]
+fn routed_result_from_v5_pubcomp(
+    pending_command_ids: &mut HashMap<u16, String>,
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Pubcomp,
+) -> RoutedResult {
+    let reason_code = packet.reason_code();
+    routed_result_from_packet_id_with_transport(
+        pending_command_ids,
+        device_id,
+        packet.packet_id(),
+        reason_code.map_or(DeliveryState::Completed, |code| {
+            if code.is_success() {
+                DeliveryState::Completed
+            } else {
+                DeliveryState::Rejected
+            }
+        }),
+        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        true,
+        Some(TransportMeta::Mqtt(mqtt_result_meta(
+            Some(packet.packet_id()),
+            reason_code.into_iter().map(|code| code.to_string()).collect(),
+        ))),
+    )
+}
+
+#[cfg(feature = "std")]
+fn routed_result_from_v5_suback(
+    pending_command_ids: &mut HashMap<u16, String>,
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Suback,
+) -> RoutedResult {
+    let reason_codes = packet.reason_codes();
+    let failed_codes: Vec<String> = reason_codes
+        .iter()
+        .filter(|code| code.is_failure())
+        .map(ToString::to_string)
+        .collect();
+    routed_result_from_packet_id_with_transport(
+        pending_command_ids,
+        device_id,
+        packet.packet_id(),
+        if failed_codes.is_empty() {
+            DeliveryState::Completed
+        } else {
+            DeliveryState::Rejected
+        },
+        if failed_codes.is_empty() {
+            None
+        } else {
+            Some(failed_codes.join(","))
+        },
+        true,
+        Some(TransportMeta::Mqtt(mqtt_result_meta(
+            Some(packet.packet_id()),
+            reason_codes.into_iter().map(|code| code.to_string()).collect(),
+        ))),
+    )
+}
+
+#[cfg(feature = "std")]
+fn routed_result_from_v5_unsuback(
+    pending_command_ids: &mut HashMap<u16, String>,
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Unsuback,
+) -> RoutedResult {
+    let reason_codes = packet.reason_codes();
+    let failed_codes: Vec<String> = reason_codes
+        .iter()
+        .filter(|code| code.is_failure())
+        .map(ToString::to_string)
+        .collect();
+    routed_result_from_packet_id_with_transport(
+        pending_command_ids,
+        device_id,
+        packet.packet_id(),
+        if failed_codes.is_empty() {
+            DeliveryState::Completed
+        } else {
+            DeliveryState::Rejected
+        },
+        if failed_codes.is_empty() {
+            None
+        } else {
+            Some(failed_codes.join(","))
+        },
+        true,
+        Some(TransportMeta::Mqtt(mqtt_result_meta(
+            Some(packet.packet_id()),
+            reason_codes.into_iter().map(|code| code.to_string()).collect(),
+        ))),
+    )
+}
+
+#[cfg(feature = "std")]
+fn routed_result_from_v5_disconnect(
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Disconnect,
+) -> RoutedResult {
+    let reason_code = packet.reason_code();
+    let reason_code_text = reason_code.map(|code| code.to_string());
+    let state = match reason_code {
+        None
+        | Some(mqtt::result_code::DisconnectReasonCode::NormalDisconnection)
+        | Some(mqtt::result_code::DisconnectReasonCode::DisconnectWithWillMessage) => {
+            DeliveryState::Completed
+        }
+        Some(_) => DeliveryState::Rejected,
+    };
+    RoutedResult {
+        source: mqtt_source(device_id),
+        result: CommandResult {
+            command_id: "__mqtt_disconnect__".to_string(),
+            device_id: device_id.to_string(),
+            state: state.clone(),
+            payload: None,
+            error: if state == DeliveryState::Rejected {
+                reason_code_text.clone()
+            } else {
+                None
+            },
+            correlation: None,
+        },
+        transport: Some(TransportMeta::Mqtt(mqtt_result_meta(
+            None,
+            reason_code_text.into_iter().collect(),
+        ))),
+    }
+}
+
+#[cfg(feature = "std")]
+fn mqtt_result_meta(
+    packet_id: Option<u16>,
+    reason_codes: Vec<String>,
+) -> MqttMeta {
+    MqttMeta {
+        topic: String::new(),
+        qos: 0,
+        retain: false,
+        duplicate: false,
+        packet_id,
+        content_type: None,
+        response_topic: None,
+        correlation_data: None,
+        subscription_identifiers: Vec::new(),
+        user_properties: Vec::new(),
+        reason_codes,
     }
 }
 
@@ -750,6 +951,27 @@ pub(crate) fn routed_result_from_packet_id(
     packet_id: u16,
     state: DeliveryState,
     remove: bool,
+) -> RoutedResult {
+    routed_result_from_packet_id_with_transport(
+        pending_command_ids,
+        device_id,
+        packet_id,
+        state,
+        None,
+        remove,
+        None,
+    )
+}
+
+#[cfg(feature = "std")]
+fn routed_result_from_packet_id_with_transport(
+    pending_command_ids: &mut HashMap<u16, String>,
+    device_id: &str,
+    packet_id: u16,
+    state: DeliveryState,
+    error: Option<String>,
+    remove: bool,
+    transport: Option<TransportMeta>,
 ) -> RoutedResult {
     let command_id = if remove {
         pending_command_ids
@@ -768,9 +990,9 @@ pub(crate) fn routed_result_from_packet_id(
             device_id: device_id.to_string(),
             state,
             payload: None,
-            error: None,
+            error,
             correlation: None,
         },
-        transport: None,
+        transport,
     }
 }
