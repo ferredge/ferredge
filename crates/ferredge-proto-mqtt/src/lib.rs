@@ -58,7 +58,7 @@ use types::{MqttPacketRequest, MqttResourceAttributes};
 #[cfg(feature = "std")]
 use runtime::{
     MqttClientSession, build_connect_packet, handle_connection_events, mqtt_version_from_core,
-    normalize_broker_addr, read_from_session, send_packet_request,
+    normalize_broker_addr, read_from_session, send_packet_request, disconnect_session,
 };
 
 pub use types::{
@@ -76,9 +76,6 @@ pub enum MqttListenerStatus {
     Failed(String),
 }
 
-#[cfg(feature = "std")]
-const MQTT_LISTENER_EVENT_BUFFER_CAPACITY: usize = 256;
-
 /// MQTT adapter backed by `mqtt_protocol_core` packet builders.
 ///
 /// In `std` builds this type also owns the live TCP session and background listener runtime.
@@ -94,7 +91,7 @@ pub struct MqttDriver {
     /// Background listener run flag.
     #[cfg(feature = "std")]
     listener_running: Arc<AtomicBool>,
-    /// Background listener thread handle.
+    /// Background listener task handle.
     #[cfg(feature = "std")]
     listener_handle: Arc<Mutex<Option<RuntimeTask<()>>>>,
     /// Last background listener failure, if any.
@@ -103,10 +100,10 @@ pub struct MqttDriver {
     /// Subscribers interested in listener status transitions.
     #[cfg(feature = "std")]
     listener_status_subscribers: Arc<Mutex<Vec<mpsc::Sender<MqttListenerStatus>>>>,
-    /// Std compatibility runtime used for background tasks and bounded channels.
+    /// Selected runtime used for background tasks.
     #[cfg(feature = "std")]
     runtime: Arc<StackRuntime>,
-    /// Std compatibility network adapter used for outbound sockets.
+    /// Selected network adapter used for outbound sockets.
     #[cfg(feature = "std")]
     net: StackNet,
 }
@@ -203,6 +200,10 @@ impl MqttDriver {
         let mut session = MqttClientSession {
             stream,
             connection,
+            protocol_version: config.preferred_protocol_version(),
+            keepalive_secs: config.keepalive_secs,
+            last_activity: std::time::Instant::now(),
+            awaiting_pingresp: false,
             pending_command_ids: std::collections::HashMap::new(),
             pending_reply_routes: std::collections::HashMap::new(),
         };
@@ -234,7 +235,7 @@ impl MqttDriver {
                     .lock()
                     .map_err(|_| "failed to lock MQTT listener error".to_string())?;
                 if error_guard.is_none() {
-                    *error_guard = Some("MQTT listener thread panicked".to_string());
+                    *error_guard = Some("MQTT listener task panicked".to_string());
                 }
             }
         }
@@ -243,36 +244,58 @@ impl MqttDriver {
     }
 
     /// Returns the last background listener error captured by the runtime, if any.
-    #[cfg(feature = "std")]
     pub fn last_listener_error(&self) -> Result<Option<String>, String> {
-        self.listener_error
-            .lock()
-            .map(|error| error.clone())
-            .map_err(|_| "failed to lock MQTT listener error".to_string())
+        #[cfg(feature = "std")]
+        {
+            return self
+                .listener_error
+                .lock()
+                .map(|error| error.clone())
+                .map_err(|_| "failed to lock MQTT listener error".to_string());
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            Ok(None)
+        }
     }
 
     /// Clears any previously captured background listener error.
-    #[cfg(feature = "std")]
     pub fn clear_listener_error(&self) -> Result<(), String> {
-        let mut guard = self
-            .listener_error
-            .lock()
-            .map_err(|_| "failed to lock MQTT listener error".to_string())?;
-        *guard = None;
-        self.broadcast_listener_status(MqttListenerStatus::Stopped)?;
-        Ok(())
+        #[cfg(feature = "std")]
+        {
+            let mut guard = self
+                .listener_error
+                .lock()
+                .map_err(|_| "failed to lock MQTT listener error".to_string())?;
+            *guard = None;
+            self.broadcast_listener_status(MqttListenerStatus::Stopped)?;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            Ok(())
+        }
     }
 
     /// Returns high-level background listener status for this MQTT driver.
-    #[cfg(feature = "std")]
     pub fn listener_status(&self) -> Result<MqttListenerStatus, String> {
-        if self.listener_running.load(Ordering::SeqCst) {
-            return Ok(MqttListenerStatus::Running);
+        #[cfg(feature = "std")]
+        {
+            if self.listener_running.load(Ordering::SeqCst) {
+                return Ok(MqttListenerStatus::Running);
+            }
+
+            return match self.last_listener_error()? {
+                Some(error) => Ok(MqttListenerStatus::Failed(error)),
+                None => Ok(MqttListenerStatus::Stopped),
+            };
         }
 
-        match self.last_listener_error()? {
-            Some(error) => Ok(MqttListenerStatus::Failed(error)),
-            None => Ok(MqttListenerStatus::Stopped),
+        #[cfg(not(feature = "std"))]
+        {
+            Ok(MqttListenerStatus::Stopped)
         }
     }
 
@@ -298,6 +321,18 @@ impl MqttDriver {
             .map_err(|_| "failed to lock MQTT listener subscribers".to_string())?;
         subscribers.retain(|subscriber| subscriber.send(status.clone()).is_ok());
         Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn reconnect_session(&self) -> Result<(), String> {
+        {
+            let mut guard = self
+                .session
+                .lock()
+                .map_err(|_| "failed to lock MQTT session".to_string())?;
+            *guard = None;
+        }
+        self.ensure_connected()
     }
 }
 
@@ -332,6 +367,9 @@ impl Lifecycle for MqttDriver {
                 .session
                 .lock()
                 .map_err(|_| "failed to lock MQTT session".to_string())?;
+            if let Some(session) = guard.as_mut() {
+                let _ = self.runtime.block_on(disconnect_session(session));
+            }
             *guard = None;
             self.broadcast_listener_status(self.listener_status()?)?;
             return Ok(());
@@ -460,41 +498,12 @@ impl EventSource for MqttDriver {
             let listener_error = Arc::clone(&self.listener_error);
             let status_subscribers = Arc::clone(&self.listener_status_subscribers);
             let device_id = self.dvc.id.clone();
+            let driver = self.clone();
             let runtime = self.runtime.clone();
             self.clear_listener_error()?;
             self.broadcast_listener_status(MqttListenerStatus::Running)?;
             let handle = runtime.clone().spawn(async move {
-                let (event_tx, mut event_rx) =
-                    runtime.channel::<RoutedEvent>(MQTT_LISTENER_EVENT_BUFFER_CAPACITY);
-                let sink_running = Arc::clone(&running);
-                let sink_listener_error = Arc::clone(&listener_error);
-                let sink_status_subscribers = Arc::clone(&status_subscribers);
-                let sink_runtime = runtime.clone();
-                let mut sink_handle = sink_runtime.spawn(async move {
-                    let mut sink = sink;
-                    loop {
-                        match event_rx.recv().await {
-                            Ok(event) => {
-                                if sink.handle(event).is_err() {
-                                    if let Ok(mut error_guard) = sink_listener_error.lock() {
-                                        *error_guard =
-                                            Some("failed to forward MQTT event to sink".to_string());
-                                    }
-                                    broadcast_listener_status_to_subscribers(
-                                        &sink_status_subscribers,
-                                        MqttListenerStatus::Failed(
-                                            "failed to forward MQTT event to sink".to_string(),
-                                        ),
-                                    );
-                                    sink_running.store(false, Ordering::SeqCst);
-                                    break;
-                                }
-                            }
-                            Err(ChannelError::Closed | ChannelError::RuntimeUnavailable) => break,
-                            Err(ChannelError::Full) => {}
-                        }
-                    }
-                });
+                let mut sink = sink;
 
                 while running.load(Ordering::SeqCst) {
                     let messages = {
@@ -545,50 +554,31 @@ impl EventSource for MqttDriver {
                         Ok(messages) => {
                             for message in messages {
                                 if let RoutedMessage::Event(event) = message {
-                                    match event_tx.try_send(event) {
-                                        Ok(()) => {}
-                                        Err(ChannelError::Full) => {
-                                            if let Ok(mut error_guard) = listener_error.lock() {
-                                                *error_guard = Some(
-                                                    "MQTT listener event backlog exceeded"
-                                                        .to_string(),
-                                                );
-                                            }
-                                            broadcast_listener_status_to_subscribers(
-                                                &status_subscribers,
-                                                MqttListenerStatus::Failed(
-                                                    "MQTT listener event backlog exceeded"
-                                                        .to_string(),
-                                                ),
+                                    if sink.handle(event).is_err() {
+                                        if let Ok(mut error_guard) = listener_error.lock() {
+                                            *error_guard = Some(
+                                                "failed to forward MQTT event to sink".to_string(),
                                             );
-                                            running.store(false, Ordering::SeqCst);
-                                            break;
                                         }
-                                        Err(
-                                            ChannelError::Closed
-                                                | ChannelError::RuntimeUnavailable,
-                                        ) => {
-                                            if let Ok(mut error_guard) = listener_error.lock() {
-                                                *error_guard = Some(
-                                                    "MQTT listener sink worker disconnected"
-                                                        .to_string(),
-                                                );
-                                            }
-                                            broadcast_listener_status_to_subscribers(
-                                                &status_subscribers,
-                                                MqttListenerStatus::Failed(
-                                                    "MQTT listener sink worker disconnected"
-                                                        .to_string(),
-                                                ),
-                                            );
-                                            running.store(false, Ordering::SeqCst);
-                                            break;
-                                        }
+                                        broadcast_listener_status_to_subscribers(
+                                            &status_subscribers,
+                                            MqttListenerStatus::Failed(
+                                                "failed to forward MQTT event to sink".to_string(),
+                                            ),
+                                        );
+                                        running.store(false, Ordering::SeqCst);
+                                        break;
                                     }
                                 }
                             }
                         }
                         Err(error) => {
+                            if running.load(Ordering::SeqCst) && driver.reconnect_session().is_ok() {
+                                if let Ok(mut error_guard) = listener_error.lock() {
+                                    *error_guard = None;
+                                }
+                                continue;
+                            }
                             if let Ok(mut error_guard) = listener_error.lock() {
                                 *error_guard = Some(error.clone());
                             }
@@ -602,8 +592,6 @@ impl EventSource for MqttDriver {
                     }
                 }
                 running.store(false, Ordering::SeqCst);
-                drop(event_tx);
-                let _ = runtime.block_on(sink_handle.join());
                 let final_status = match listener_error.lock() {
                     Ok(error_guard) => match error_guard.clone() {
                         Some(error) => MqttListenerStatus::Failed(error),

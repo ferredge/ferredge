@@ -3,21 +3,23 @@ use std::{
     future::Future,
     io::{Read, Write},
     net::TcpListener,
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     task::{Context, Poll, Waker},
     thread,
     time::Duration,
 };
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions, BrokerSubscriptionOptions, EventSink,
-    EventSource, Correlation, Device, DeviceEndpoint, DeviceStatus, Lifecycle, Map,
-    MqttEndpointConfig, MqttProtocolVersion, RoutedEvent, RoutedMessage, TransportMeta,
+    ActionEmitter, Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
+    BrokerSubscriptionOptions, Command, Correlation, Device, DeviceEndpoint, DeviceStatus,
+    EventSink, EventSource, HttpEndpointConfig, Intent, Lifecycle, Map, MqttEndpointConfig,
+    MqttProtocolVersion, ProtocolBridge, RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
 };
 use mqtt_protocol_core::mqtt;
+use ferredge_proto_http::{attributes::HttpResourceAttributes, HttpCommandRef, HttpDriver, HttpRequest};
 
 use crate::{
-    runtime::routed_message_from_packet,
+    runtime::{build_connect_packet, routed_message_from_packet},
     types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
     MqttDriver, MqttListenerStatus,
 };
@@ -140,6 +142,118 @@ fn spawn_test_broker_v5_with_publishes(
     (format!("mqtt://{addr}"), shutdown_tx, handle)
 }
 
+fn spawn_reconnecting_test_broker_v5(
+    publish_after_reconnect: mqtt::packet::v5_0::Publish,
+) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
+    let addr = listener.local_addr().expect("test broker should have local addr");
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+    let handle = thread::spawn(move || {
+        for connection_idx in 0..2 {
+            let (mut stream, _) = listener.accept().expect("broker should accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("broker should set read timeout");
+
+            let mut connect_buffer = [0u8; 4096];
+            let _ = stream.read(&mut connect_buffer);
+
+            let connack = mqtt::packet::v5_0::Connack::builder()
+                .session_present(false)
+                .reason_code(mqtt::result_code::ConnectReasonCode::Success)
+                .props(Vec::new())
+                .build()
+                .expect("connack should build");
+            stream
+                .write_all(&connack.to_continuous_buffer())
+                .expect("broker should send connack");
+
+            if connection_idx == 0 {
+                continue;
+            }
+
+            thread::sleep(Duration::from_millis(150));
+            stream
+                .write_all(&publish_after_reconnect.to_continuous_buffer())
+                .expect("broker should send publish after reconnect");
+
+            loop {
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+                let mut buffer = [0u8; 4096];
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    (format!("mqtt://{addr}"), shutdown_tx, handle)
+}
+
+fn spawn_keepalive_test_broker_v5() -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
+    let addr = listener.local_addr().expect("test broker should have local addr");
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("broker should accept client");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("broker should set read timeout");
+
+        let mut connect_buffer = [0u8; 4096];
+        let _ = stream.read(&mut connect_buffer);
+
+        let connack = mqtt::packet::v5_0::Connack::builder()
+            .session_present(false)
+            .reason_code(mqtt::result_code::ConnectReasonCode::Success)
+            .props(Vec::new())
+            .build()
+            .expect("connack should build");
+        stream
+            .write_all(&connack.to_continuous_buffer())
+            .expect("broker should send connack");
+
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+            let mut buffer = [0u8; 4096];
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if buffer[..n].starts_with(&[0xC0, 0x00]) {
+                        let pingresp = mqtt::packet::v5_0::Pingresp::builder()
+                            .build()
+                            .expect("pingresp should build");
+                        stream
+                            .write_all(&pingresp.to_continuous_buffer())
+                            .expect("broker should send pingresp");
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    (format!("mqtt://{addr}"), shutdown_tx, handle)
+}
+
 struct NoopSink;
 
 impl EventSink for NoopSink {
@@ -159,6 +273,120 @@ impl EventSink for FailOnEventSink {
 
     fn handle(&mut self, _event: Self::Event) -> Result<(), Self::Error> {
         Err(())
+    }
+}
+
+struct RecordingSink {
+    events: Arc<Mutex<Vec<RoutedEvent>>>,
+}
+
+impl EventSink for RecordingSink {
+    type Event = RoutedEvent;
+    type Error = ();
+
+    fn handle(&mut self, event: Self::Event) -> Result<(), Self::Error> {
+        self.events.lock().expect("recording sink lock").push(event);
+        Ok(())
+    }
+}
+
+struct CollectEmitter(Vec<RoutedMessage>);
+
+impl ActionEmitter for CollectEmitter {
+    type Error = ();
+
+    fn emit(&mut self, action: RoutedMessage) -> Result<(), Self::Error> {
+        self.0.push(action);
+        Ok(())
+    }
+}
+
+struct TestBridge;
+
+impl ProtocolBridge for TestBridge {
+    type Error = ();
+
+    async fn bridge_command<E>(&self, command: &Command, emitter: &mut E) -> Result<(), Self::Error>
+    where
+        E: ActionEmitter + Send,
+    {
+        if let Intent::Read { resource } = &command.intent {
+            emitter.emit(RoutedMessage::Command(Command {
+                id: format!("{}-mqtt", command.id),
+                source_device_id: Some(command.target_device_id.clone()),
+                target_device_id: "mqtt-device-1".to_string(),
+                intent: Intent::Send {
+                    channel: BrokerAddress {
+                        name: format!("requests/{resource}"),
+                        kind: Some(BrokerChannelKind::Topic),
+                    },
+                    payload: Vec::new(),
+                    options: BrokerMessageOptions::default(),
+                },
+                correlation: command.correlation.clone(),
+            })).map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
+    async fn bridge_event<E>(&self, event: &RoutedEvent, emitter: &mut E) -> Result<(), Self::Error>
+    where
+        E: ActionEmitter + Send,
+    {
+        if let Address::Channel(channel) = &event.address
+            && channel == "sensors/temp"
+        {
+            emitter.emit(RoutedMessage::Command(Command {
+                id: "bridge-http-write".to_string(),
+                source_device_id: Some(event.source.device_id.clone()),
+                target_device_id: "http-device-1".to_string(),
+                intent: Intent::Write {
+                    resource: "setpoint".to_string(),
+                    payload: event.payload.clone(),
+                },
+                correlation: event.correlation.clone(),
+            })).map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
+    async fn bridge_result<E>(&self, result: &RoutedResult, emitter: &mut E) -> Result<(), Self::Error>
+    where
+        E: ActionEmitter + Send,
+    {
+        emitter.emit(RoutedMessage::Result(result.clone())).map_err(|_| ())
+    }
+}
+
+fn make_http_driver() -> HttpDriver {
+    let mut resources = Map::default();
+    resources.insert(
+        "setpoint".to_string(),
+        ferredge_core::prelude::DeviceResource {
+            name: "setpoint".to_string(),
+            resource_attributes: HttpResourceAttributes {
+                slug: "/api/setpoint".to_string(),
+                method: "POST".to_string(),
+                headers: Some(vec![("Content-Type".to_string(), "text/plain".to_string())]),
+            },
+            unit: Some("C".to_string()),
+            permission: None,
+        },
+    );
+
+    HttpDriver {
+        dvc: Device {
+            id: "http-device-1".to_string(),
+            name: "HTTP Device".to_string(),
+            status: DeviceStatus::Online,
+            endpoint: DeviceEndpoint::http(HttpEndpointConfig {
+                url: "127.0.0.1:8080".to_string(),
+            }),
+            metadata: None,
+            max_connections: Some(4),
+            resources,
+            message_endpoints: Vec::new(),
+        },
     }
 }
 
@@ -661,6 +889,171 @@ fn mqtt_listener_reports_failed_when_sink_rejects_event() {
 
     block_on(driver.stop()).expect("driver should stop after failure");
 
+    let _ = shutdown_tx.send(());
+    broker_handle.join().expect("broker thread should join");
+}
+
+#[test]
+fn bridge_can_translate_mqtt_event_into_http_request() {
+    let bridge = TestBridge;
+    let http = make_http_driver();
+    let mut emitter = CollectEmitter(Vec::new());
+    let event = RoutedEvent {
+        source: ferredge_core::prelude::EndpointRef {
+            device_id: "mqtt-device-1".to_string(),
+            protocol: ferredge_core::prelude::DeviceProtocol::MQTT,
+        },
+        address: Address::Channel("sensors/temp".to_string()),
+        payload: b"21".to_vec(),
+        correlation: None,
+        transport: None,
+    };
+
+    block_on(bridge.bridge_event(&event, &mut emitter)).expect("bridge should succeed");
+    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command") else {
+        panic!("expected bridged command");
+    };
+    let request = HttpRequest::try_from(HttpCommandRef {
+        device: &http.dvc,
+        command: &command,
+    })
+    .expect("bridged command should convert to http request");
+
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/setpoint");
+    assert_eq!(request.body, Some(b"21".to_vec()));
+}
+
+#[test]
+fn bridge_can_translate_http_command_into_mqtt_publish() {
+    let bridge = TestBridge;
+    let mqtt = make_default_driver();
+    let mut emitter = CollectEmitter(Vec::new());
+    let command = Command {
+        id: "http-read-1".to_string(),
+        source_device_id: Some("http-device-1".to_string()),
+        target_device_id: "http-device-1".to_string(),
+        intent: Intent::Read {
+            resource: "temp".to_string(),
+        },
+        correlation: None,
+    };
+
+    block_on(bridge.bridge_command(&command, &mut emitter)).expect("bridge should succeed");
+    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command") else {
+        panic!("expected bridged command");
+    };
+    let packet = MqttPacketRequest::try_from(MqttCommandRef {
+        device: &mqtt.dvc,
+        command: &command,
+    })
+    .expect("bridged command should convert to mqtt packet");
+
+    match packet.packet {
+        MqttWirePacket::V5Publish(packet) => {
+            assert_eq!(packet.topic_name(), "requests/temp");
+        }
+        other => panic!("expected v5 publish packet, got {other:?}"),
+    }
+}
+
+#[test]
+fn mqtt_connect_packet_maps_v5_session_expiry() {
+    let packet = build_connect_packet(&MqttEndpointConfig {
+        broker: "mqtt://broker".to_string(),
+        client_id: "client-1".to_string(),
+        auth: None,
+        tls: None,
+        keepalive_secs: Some(30),
+        clean_start: true,
+        session_expiry_secs: Some(3600),
+        topic_prefix: None,
+        supported_versions: vec![MqttProtocolVersion::V5_0],
+    })
+    .expect("connect packet should build");
+
+    let mqtt::packet::Packet::V5_0Connect(packet) = packet else {
+        panic!("expected v5 connect packet");
+    };
+    let saw_session_expiry = packet.props().iter().any(|prop| matches!(
+        prop,
+        mqtt::packet::Property::SessionExpiryInterval(value) if value.val() == 3600
+    ));
+    assert!(saw_session_expiry);
+}
+
+#[test]
+fn mqtt_listener_reconnects_after_broker_disconnect() {
+    let publish = mqtt::packet::v5_0::Publish::builder()
+        .topic_name("alerts/reconnected")
+        .expect("publish topic should be valid")
+        .payload("alive")
+        .build()
+        .expect("publish packet should build");
+    let (broker, shutdown_tx, broker_handle) = spawn_reconnecting_test_broker_v5(publish);
+    let driver = make_driver(broker, vec![MqttProtocolVersion::V5_0]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    block_on(driver.start_listening(RecordingSink {
+        events: Arc::clone(&events),
+    }))
+    .expect("listener should start");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !events.lock().expect("events lock").is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "expected event after reconnect");
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    assert_eq!(
+        events.lock().expect("events lock")[0].address,
+        Address::Channel("alerts/reconnected".to_string())
+    );
+    assert_eq!(
+        driver.listener_status().expect("listener status"),
+        MqttListenerStatus::Running
+    );
+
+    block_on(driver.stop()).expect("driver should stop after reconnect test");
+    let _ = shutdown_tx.send(());
+    broker_handle.join().expect("broker thread should join");
+}
+
+#[test]
+fn mqtt_listener_keeps_running_with_ping_response() {
+    let (broker, shutdown_tx, broker_handle) = spawn_keepalive_test_broker_v5();
+    let driver = MqttDriver::new(Device {
+        id: "mqtt-device-keepalive".to_string(),
+        name: "MQTT Keepalive Device".to_string(),
+        status: DeviceStatus::Online,
+        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+            broker,
+            client_id: "client-keepalive".to_string(),
+            auth: None,
+            tls: None,
+            keepalive_secs: Some(1),
+            clean_start: true,
+            session_expiry_secs: None,
+            topic_prefix: None,
+            supported_versions: vec![MqttProtocolVersion::V5_0],
+        }),
+        metadata: None,
+        max_connections: Some(4),
+        resources: Map::default(),
+        message_endpoints: Vec::new(),
+    });
+
+    block_on(driver.start_listening(NoopSink)).expect("listener should start");
+    thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        driver.listener_status().expect("listener status"),
+        MqttListenerStatus::Running
+    );
+
+    block_on(driver.stop()).expect("driver should stop after keepalive test");
     let _ = shutdown_tx.send(());
     broker_handle.join().expect("broker thread should join");
 }
