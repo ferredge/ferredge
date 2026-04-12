@@ -7,10 +7,10 @@ use std::{
 };
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions, BrokerSubscriptionOptions,
-    Command, Correlation, DeliveryGuarantee, Device, DeviceEndpoint, DeviceStatus, EventSink,
-    EventSource, Intent, Lifecycle, Map, MqttEndpointConfig, MqttProtocolVersion, PubSub,
-    RoutedEvent, TransportMeta,
+    Address, BrokerAddress, BrokerBackoffStrategy, BrokerMessageOptions, BrokerReconnectConfig,
+    BrokerSubscriptionOptions, BrokerChannelKind, Command, Correlation, DeliveryGuarantee, Device,
+    DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
+    MqttEndpointConfig, MqttProtocolVersion, PubSub, RoutedEvent, TransportMeta,
 };
 
 use crate::{
@@ -30,6 +30,36 @@ fn make_driver_with_client_id_and_keepalive(
     client_id: String,
     keepalive_secs: Option<u16>,
 ) -> MqttDriver {
+    make_driver_with_config(
+        broker,
+        device_id,
+        client_id,
+        keepalive_secs,
+        BrokerReconnectConfig {
+            enabled: true,
+            initial_delay_ms: 100,
+            max_delay_ms: 1_000,
+            strategy: BrokerBackoffStrategy::Exponential,
+            multiplier: 2,
+            max_attempts: None,
+            replay_subscriptions: true,
+            queue_requests_while_disconnected: true,
+            max_queued_requests: 64,
+        },
+        true,
+        None,
+    )
+}
+
+fn make_driver_with_config(
+    broker: String,
+    device_id: String,
+    client_id: String,
+    keepalive_secs: Option<u16>,
+    reconnect: BrokerReconnectConfig,
+    clean_start: bool,
+    session_expiry_secs: Option<u32>,
+) -> MqttDriver {
     MqttDriver::new(Device {
         id: device_id,
         name: "MQTT Mosquitto Device".to_string(),
@@ -40,9 +70,10 @@ fn make_driver_with_client_id_and_keepalive(
             auth: None,
             tls: None,
             keepalive_secs,
-            clean_start: true,
-            session_expiry_secs: None,
+            clean_start,
+            session_expiry_secs,
             topic_prefix: None,
+            reconnect,
             supported_versions: vec![MqttProtocolVersion::V5_0],
         }),
         metadata: None,
@@ -70,30 +101,43 @@ fn reserve_free_port() -> u16 {
 }
 
 struct MosquittoGuard {
-    child: Child,
+    child: Option<Child>,
     port: u16,
 }
 
 impl MosquittoGuard {
     fn start() -> Self {
         let port = reserve_free_port();
+        let mut guard = Self { child: None, port };
+        guard.start_broker();
+        guard
+    }
+
+    fn start_broker(&mut self) {
+        assert!(self.child.is_none(), "mosquitto broker already running");
         let child = ProcessCommand::new("mosquitto")
-            .args(["-p", &port.to_string(), "-v"])
+            .args(["-p", &self.port.to_string(), "-v"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("mosquitto should spawn");
+        self.child = Some(child);
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
                 break;
             }
             assert!(Instant::now() < deadline, "mosquitto should start before timeout");
             thread::sleep(Duration::from_millis(25));
         }
+    }
 
-        Self { child, port }
+    fn stop_broker(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     fn host(&self) -> String {
@@ -111,8 +155,7 @@ impl MosquittoGuard {
 
 impl Drop for MosquittoGuard {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stop_broker();
     }
 }
 
@@ -524,4 +567,235 @@ fn mosquitto_keepalive_client_flow_thirty_five_seconds() {
     );
 
     block_on(driver.stop()).expect("driver should stop cleanly");
+}
+
+#[test]
+#[ignore = "requires local mosquitto process and escalated execution"]
+fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
+    let mut broker = MosquittoGuard::start();
+    let driver = make_driver_with_config(
+        broker.broker_url(),
+        "mqtt-mosquitto-reconnect-device".to_string(),
+        "ferredge-mosquitto-reconnect".to_string(),
+        Some(2),
+        BrokerReconnectConfig {
+            enabled: true,
+            initial_delay_ms: 100,
+            max_delay_ms: 500,
+            strategy: BrokerBackoffStrategy::Exponential,
+            multiplier: 2,
+            max_attempts: None,
+            replay_subscriptions: true,
+            queue_requests_while_disconnected: true,
+            max_queued_requests: 64,
+        },
+        true,
+        None,
+    );
+
+    block_on(driver.start()).expect("driver should connect");
+    block_on(driver.start_listening(RecordingSink {
+        events: Arc::new(Mutex::new(Vec::new())),
+    }))
+    .expect("listener should start");
+
+    broker.stop_broker();
+    thread::sleep(Duration::from_millis(400));
+    broker.start_broker();
+
+    let sub_child = ProcessCommand::new("mosquitto_sub")
+        .args([
+            "-h",
+            broker.host().as_str(),
+            "-p",
+            broker.port_string().as_str(),
+            "-V",
+            "mqttv5",
+            "-t",
+            "ferredge/it/reconnect/out",
+            "-C",
+            "1",
+            "-W",
+            "10",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("mosquitto_sub should spawn");
+
+    thread::sleep(Duration::from_millis(1200));
+
+    block_on(driver.publish(publish_packet(
+        &driver,
+        "pub-reconnect-1",
+        "ferredge/it/reconnect/out",
+        b"reconnected-outbound-ok",
+        BrokerMessageOptions::default(),
+    )))
+    .expect("driver should publish after reconnect");
+
+    let output = sub_child
+        .wait_with_output()
+        .expect("mosquitto_sub should finish after reconnect");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "reconnected-outbound-ok"
+    );
+    assert_eq!(
+        driver.listener_status().expect("listener status should be readable"),
+        MqttListenerStatus::Running
+    );
+
+    block_on(driver.stop()).expect("driver should stop cleanly");
+}
+
+#[test]
+#[ignore = "requires local mosquitto process and escalated execution"]
+fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
+    let mut broker = MosquittoGuard::start();
+    let driver = make_driver_with_config(
+        broker.broker_url(),
+        "mqtt-mosquitto-reconnect-fail-device".to_string(),
+        "ferredge-mosquitto-reconnect-fail".to_string(),
+        Some(2),
+        BrokerReconnectConfig {
+            enabled: true,
+            initial_delay_ms: 100,
+            max_delay_ms: 100,
+            strategy: BrokerBackoffStrategy::Fixed,
+            multiplier: 1,
+            max_attempts: Some(2),
+            replay_subscriptions: true,
+            queue_requests_while_disconnected: true,
+            max_queued_requests: 64,
+        },
+        true,
+        None,
+    );
+
+    block_on(driver.start()).expect("driver should connect");
+    block_on(driver.start_listening(RecordingSink {
+        events: Arc::new(Mutex::new(Vec::new())),
+    }))
+    .expect("listener should start");
+
+    broker.stop_broker();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = driver
+            .listener_status()
+            .expect("listener status should be readable");
+        if matches!(status, MqttListenerStatus::Failed(_)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "listener should fail after reconnect attempts are exhausted"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    match driver
+        .listener_status()
+        .expect("listener status should be readable")
+    {
+        MqttListenerStatus::Failed(error) => {
+            assert!(!error.is_empty(), "failed listener should retain reconnect error");
+        }
+        other => panic!("expected failed listener status, got {other:?}"),
+    }
+
+    block_on(driver.stop()).expect("driver should stop cleanly");
+}
+
+#[test]
+#[ignore = "requires local mosquitto process and escalated execution"]
+fn mosquitto_replays_subscriptions_and_queued_publish_after_restart() {
+    let mut broker = MosquittoGuard::start();
+    let reconnect = BrokerReconnectConfig {
+        enabled: true,
+        initial_delay_ms: 100,
+        max_delay_ms: 500,
+        strategy: BrokerBackoffStrategy::Exponential,
+        multiplier: 2,
+        max_attempts: None,
+        replay_subscriptions: true,
+        queue_requests_while_disconnected: true,
+        max_queued_requests: 64,
+    };
+    let publisher = make_driver_with_config(
+        broker.broker_url(),
+        "mqtt-mosquitto-recovery-publisher".to_string(),
+        "ferredge-mosquitto-recovery-publisher".to_string(),
+        Some(2),
+        reconnect.clone(),
+        true,
+        None,
+    );
+    let subscriber = make_driver_with_config(
+        broker.broker_url(),
+        "mqtt-mosquitto-recovery-subscriber".to_string(),
+        "ferredge-mosquitto-recovery-subscriber".to_string(),
+        Some(2),
+        reconnect,
+        true,
+        None,
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    block_on(subscriber.start()).expect("subscriber should connect");
+    block_on(subscriber.subscribe(
+        subscribe_packet(&subscriber, "sub-recovery-1", "ferredge/it/recovery"),
+        RecordingSink {
+            events: Arc::clone(&events),
+        },
+    ))
+    .expect("subscriber should subscribe before outage");
+    block_on(subscriber.start_listening(RecordingSink {
+        events: Arc::clone(&events),
+    }))
+    .expect("subscriber listener should start");
+
+    block_on(publisher.start()).expect("publisher should connect");
+    block_on(publisher.start_listening(RecordingSink {
+        events: Arc::new(Mutex::new(Vec::new())),
+    }))
+    .expect("publisher listener should start");
+
+    broker.stop_broker();
+    thread::sleep(Duration::from_millis(400));
+
+    block_on(publisher.publish(publish_packet(
+        &publisher,
+        "pub-recovery-1",
+        "ferredge/it/recovery",
+        b"queued-recovery-ok",
+        BrokerMessageOptions::default(),
+    )))
+    .expect("publisher should queue publish during outage");
+
+    broker.start_broker();
+
+    let event = wait_for_event_payload(&events, b"queued-recovery-ok");
+    assert_eq!(
+        event.address,
+        Address::Channel("ferredge/it/recovery".to_string())
+    );
+    assert_eq!(
+        subscriber
+            .listener_status()
+            .expect("subscriber listener status should be readable"),
+        MqttListenerStatus::Running
+    );
+    assert_eq!(
+        publisher
+            .listener_status()
+            .expect("publisher listener status should be readable"),
+        MqttListenerStatus::Running
+    );
+
+    block_on(publisher.stop()).expect("publisher should stop cleanly");
+    block_on(subscriber.stop()).expect("subscriber should stop cleanly");
 }

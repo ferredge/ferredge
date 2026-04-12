@@ -5,7 +5,7 @@ extern crate alloc;
 use std::{string::String, vec::Vec};
 
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap as StdlessMap, string::String, vec::Vec};
+use alloc::{collections::BTreeMap as StdlessMap, collections::VecDeque, string::String, vec::Vec};
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::command::BrokerAddress;
 
 #[cfg(feature = "std")]
-pub use std::collections::HashMap as Map;
+pub use std::collections::{HashMap as Map, VecDeque};
 
 #[cfg(not(feature = "std"))]
 pub type Map<K, V> = StdlessMap<K, V>;
@@ -85,6 +85,12 @@ pub struct BrokerReconnectConfig {
     pub multiplier: u32,
     /// Optional maximum reconnect attempts before surfacing failure.
     pub max_attempts: Option<u32>,
+    /// Whether broker subscriptions should be replayed after reconnect succeeds.
+    pub replay_subscriptions: bool,
+    /// Whether outbound requests should be queued while reconnect is in progress.
+    pub queue_requests_while_disconnected: bool,
+    /// Maximum number of queued outbound recovery requests retained in memory.
+    pub max_queued_requests: u32,
 }
 
 impl Default for BrokerReconnectConfig {
@@ -96,6 +102,9 @@ impl Default for BrokerReconnectConfig {
             strategy: BrokerBackoffStrategy::Exponential,
             multiplier: 2,
             max_attempts: None,
+            replay_subscriptions: true,
+            queue_requests_while_disconnected: true,
+            max_queued_requests: 128,
         }
     }
 }
@@ -438,6 +447,9 @@ mod tests {
             strategy: BrokerBackoffStrategy::Exponential,
             multiplier: 3,
             max_attempts: Some(3),
+            replay_subscriptions: true,
+            queue_requests_while_disconnected: true,
+            max_queued_requests: 16,
         };
 
         assert!(config.allows_attempt(1));
