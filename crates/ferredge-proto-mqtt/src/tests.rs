@@ -25,6 +25,12 @@ use crate::{
     MqttDriver, MqttListenerStatus,
 };
 
+const TEST_STATUS_TIMEOUT_SECS: u64 = 5;
+const TEST_BROKER_READ_TIMEOUT_MS: u64 = 100;
+const TEST_BROKER_PUBLISH_DELAY_MS: u64 = 150;
+const TEST_EVENT_WAIT_POLL_MS: u64 = 25;
+const TEST_KEEPALIVE_ASSERT_DELAY_MS: u64 = 1_500;
+
 fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> MqttDriver {
     MqttDriver::new(Device {
         id: "mqtt-device-1".to_string(),
@@ -62,7 +68,7 @@ fn wait_for_status(
     rx: &mpsc::Receiver<MqttListenerStatus>,
     matcher: impl Fn(&MqttListenerStatus) -> bool,
 ) -> MqttListenerStatus {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(TEST_STATUS_TIMEOUT_SECS);
     loop {
         let timeout = deadline.saturating_duration_since(std::time::Instant::now());
         let status = rx
@@ -78,7 +84,10 @@ fn spawn_test_broker_v5(
     publish_after_connack: Option<mqtt::packet::v5_0::Publish>,
 ) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
     let publishes = publish_after_connack.into_iter().collect::<Vec<_>>();
-    spawn_test_broker_v5_with_publishes(publishes, Duration::from_millis(150))
+    spawn_test_broker_v5_with_publishes(
+        publishes,
+        Duration::from_millis(TEST_BROKER_PUBLISH_DELAY_MS),
+    )
 }
 
 fn spawn_test_broker_v5_with_publishes(
@@ -92,7 +101,7 @@ fn spawn_test_broker_v5_with_publishes(
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("broker should accept client");
         stream
-            .set_read_timeout(Some(Duration::from_millis(100)))
+            .set_read_timeout(Some(Duration::from_millis(TEST_BROKER_READ_TIMEOUT_MS)))
             .expect("broker should set read timeout");
 
         let mut connect_buffer = [0u8; 4096];
@@ -148,7 +157,7 @@ fn spawn_reconnecting_test_broker_v5(
         for connection_idx in 0..2 {
             let (mut stream, _) = listener.accept().expect("broker should accept client");
             stream
-                .set_read_timeout(Some(Duration::from_millis(100)))
+                .set_read_timeout(Some(Duration::from_millis(TEST_BROKER_READ_TIMEOUT_MS)))
                 .expect("broker should set read timeout");
 
             let mut connect_buffer = [0u8; 4096];
@@ -168,7 +177,7 @@ fn spawn_reconnecting_test_broker_v5(
                 continue;
             }
 
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(TEST_BROKER_PUBLISH_DELAY_MS));
             stream
                 .write_all(&publish_after_reconnect.to_continuous_buffer())
                 .expect("broker should send publish after reconnect");
@@ -203,7 +212,7 @@ fn spawn_keepalive_test_broker_v5() -> (String, mpsc::Sender<()>, thread::JoinHa
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("broker should accept client");
         stream
-            .set_read_timeout(Some(Duration::from_millis(100)))
+            .set_read_timeout(Some(Duration::from_millis(TEST_BROKER_READ_TIMEOUT_MS)))
             .expect("broker should set read timeout");
 
         let mut connect_buffer = [0u8; 4096];
@@ -995,13 +1004,13 @@ fn mqtt_listener_reconnects_after_broker_disconnect() {
     }))
     .expect("listener should start");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(TEST_STATUS_TIMEOUT_SECS);
     loop {
         if !events.lock().expect("events lock").is_empty() {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "expected event after reconnect");
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(TEST_EVENT_WAIT_POLL_MS));
     }
 
     assert_eq!(
@@ -1044,7 +1053,7 @@ fn mqtt_listener_keeps_running_with_ping_response() {
     });
 
     block_on(driver.start_listening(NoopSink)).expect("listener should start");
-    thread::sleep(Duration::from_millis(1500));
+    thread::sleep(Duration::from_millis(TEST_KEEPALIVE_ASSERT_DELAY_MS));
     assert_eq!(
         driver.listener_status().expect("listener status"),
         MqttListenerStatus::Running
@@ -1095,9 +1104,30 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
     })
     .expect("unsubscribe packet should build");
 
+    let publish_packet = MqttPacketRequest::try_from(MqttCommandRef {
+        device: &driver.dvc,
+        command: &Command {
+            id: "same-driver-pub".to_string(),
+            source_device_id: None,
+            target_device_id: driver.dvc.id.clone(),
+            intent: Intent::Send {
+                channel: BrokerAddress {
+                    name: "ferredge/control".to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                payload: b"same-driver".to_vec(),
+                options: BrokerMessageOptions::default(),
+            },
+            correlation: None,
+        },
+    })
+    .expect("publish packet should build");
+
     block_on(driver.start_listening(NoopSink)).expect("listener should start");
     block_on(driver.subscribe(subscribe_packet, NoopSink))
         .expect("same driver should subscribe while listening");
+    block_on(driver.publish(publish_packet))
+        .expect("same driver should publish while listening");
     block_on(driver.unsubscribe(unsubscribe_packet))
         .expect("same driver should unsubscribe while listening");
 
