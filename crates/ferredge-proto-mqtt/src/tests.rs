@@ -1,9 +1,18 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    future::Future,
+    io::{Read, Write},
+    net::TcpListener,
+    sync::mpsc,
+    task::{Context, Poll, Waker},
+    thread,
+    time::Duration,
+};
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions, BrokerSubscriptionOptions,
-    Correlation, Device, DeviceEndpoint, DeviceStatus, Map, MqttEndpointConfig,
-    MqttProtocolVersion, RoutedMessage,
+    Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions, BrokerSubscriptionOptions, EventSink,
+    EventSource, Correlation, Device, DeviceEndpoint, DeviceStatus, Lifecycle, Map,
+    MqttEndpointConfig, MqttProtocolVersion, RoutedEvent, RoutedMessage,
 };
 use mqtt_protocol_core::mqtt;
 
@@ -13,13 +22,13 @@ use crate::{
     MqttDriver, MqttListenerStatus,
 };
 
-fn make_driver(supported_versions: Vec<MqttProtocolVersion>) -> MqttDriver {
+fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> MqttDriver {
     MqttDriver::new(Device {
         id: "mqtt-device-1".to_string(),
         name: "MQTT Device".to_string(),
         status: DeviceStatus::Online,
         endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
-            broker: "mqtt://broker".to_string(),
+            broker,
             client_id: "client-1".to_string(),
             auth: None,
             tls: None,
@@ -36,9 +45,121 @@ fn make_driver(supported_versions: Vec<MqttProtocolVersion>) -> MqttDriver {
     })
 }
 
+fn make_default_driver() -> MqttDriver {
+    make_driver("mqtt://broker".to_string(), vec![MqttProtocolVersion::V5_0])
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => thread::yield_now(),
+        }
+    }
+}
+
+fn wait_for_status(
+    rx: &mpsc::Receiver<MqttListenerStatus>,
+    matcher: impl Fn(&MqttListenerStatus) -> bool,
+) -> MqttListenerStatus {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        let status = rx
+            .recv_timeout(timeout)
+            .expect("listener status should arrive before timeout");
+        if matcher(&status) {
+            return status;
+        }
+    }
+}
+
+fn spawn_test_broker_v5(
+    publish_after_connack: Option<mqtt::packet::v5_0::Publish>,
+) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
+    let addr = listener.local_addr().expect("test broker should have local addr");
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("broker should accept client");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("broker should set read timeout");
+
+        let mut connect_buffer = [0u8; 4096];
+        let _ = stream.read(&mut connect_buffer);
+
+        let connack = mqtt::packet::v5_0::Connack::builder()
+            .session_present(false)
+            .reason_code(mqtt::result_code::ConnectReasonCode::Success)
+            .props(Vec::new())
+            .build()
+            .expect("connack should build");
+        stream
+            .write_all(&connack.to_continuous_buffer())
+            .expect("broker should send connack");
+
+        if let Some(publish) = publish_after_connack {
+            thread::sleep(Duration::from_millis(150));
+            stream
+                .write_all(&publish.to_continuous_buffer())
+                .expect("broker should send publish");
+        }
+
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+
+            let mut buffer = [0u8; 4096];
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    (format!("mqtt://{addr}"), shutdown_tx, handle)
+}
+
+struct NoopSink;
+
+impl EventSink for NoopSink {
+    type Event = RoutedEvent;
+    type Error = ();
+
+    fn handle(&mut self, _event: Self::Event) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+struct FailOnEventSink;
+
+impl EventSink for FailOnEventSink {
+    type Event = RoutedEvent;
+    type Error = ();
+
+    fn handle(&mut self, _event: Self::Event) -> Result<(), Self::Error> {
+        Err(())
+    }
+}
+
 #[test]
 fn mqtt_send_prefers_v5_packet_when_available() {
-    let driver = make_driver(vec![MqttProtocolVersion::V3_1_1, MqttProtocolVersion::V5_0]);
+    let driver = make_driver(
+        "mqtt://broker".to_string(),
+        vec![MqttProtocolVersion::V3_1_1, MqttProtocolVersion::V5_0],
+    );
     let command = ferredge_core::prelude::Command {
         id: "cmd-1".to_string(),
         source_device_id: None,
@@ -71,7 +192,7 @@ fn mqtt_send_prefers_v5_packet_when_available() {
 
 #[test]
 fn mqtt_send_falls_back_to_v3_when_v5_not_available() {
-    let driver = make_driver(vec![MqttProtocolVersion::V3_1_1]);
+    let driver = make_driver("mqtt://broker".to_string(), vec![MqttProtocolVersion::V3_1_1]);
     let command = ferredge_core::prelude::Command {
         id: "cmd-2".to_string(),
         source_device_id: None,
@@ -99,7 +220,7 @@ fn mqtt_send_falls_back_to_v3_when_v5_not_available() {
 
 #[test]
 fn mqtt_subscribe_builds_version_specific_packet() {
-    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+    let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
         id: "cmd-3".to_string(),
         source_device_id: None,
@@ -130,7 +251,7 @@ fn mqtt_subscribe_builds_version_specific_packet() {
 
 #[test]
 fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
-    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+    let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
         id: "cmd-4".to_string(),
         source_device_id: None,
@@ -228,7 +349,7 @@ fn inbound_publish_packet_converts_to_routed_event() {
 
 #[test]
 fn mqtt_listener_status_starts_stopped() {
-    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+    let driver = make_default_driver();
 
     assert_eq!(
         driver.listener_status().expect("listener status should be readable"),
@@ -244,7 +365,7 @@ fn mqtt_listener_status_starts_stopped() {
 
 #[test]
 fn mqtt_listener_error_can_be_cleared_without_runtime() {
-    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+    let driver = make_default_driver();
 
     driver
         .clear_listener_error()
@@ -257,7 +378,7 @@ fn mqtt_listener_error_can_be_cleared_without_runtime() {
 
 #[test]
 fn mqtt_listener_status_subscription_receives_initial_state() {
-    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+    let driver = make_default_driver();
 
     let rx = driver
         .subscribe_listener_status()
@@ -271,7 +392,7 @@ fn mqtt_listener_status_subscription_receives_initial_state() {
 
 #[test]
 fn mqtt_listener_status_subscription_receives_clear_transition() {
-    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+    let driver = make_default_driver();
     let rx = driver
         .subscribe_listener_status()
         .expect("listener status subscription should succeed");
@@ -285,4 +406,75 @@ fn mqtt_listener_status_subscription_receives_clear_transition() {
         rx.recv().expect("listener status transition should be sent"),
         MqttListenerStatus::Stopped
     );
+}
+
+#[test]
+fn mqtt_listener_can_start_stop_and_restart() {
+    let (broker, shutdown_tx, broker_handle) = spawn_test_broker_v5(None);
+    let driver = make_driver(broker, vec![MqttProtocolVersion::V5_0]);
+    let rx = driver
+        .subscribe_listener_status()
+        .expect("listener status subscription should succeed");
+    let _ = rx.recv().expect("initial listener status should be sent");
+
+    block_on(driver.start_listening(NoopSink)).expect("listener should start");
+    assert_eq!(
+        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Running)),
+        MqttListenerStatus::Running
+    );
+
+    block_on(driver.stop_listening()).expect("listener should stop");
+    assert_eq!(
+        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Stopped)),
+        MqttListenerStatus::Stopped
+    );
+
+    block_on(driver.start_listening(NoopSink)).expect("listener should restart");
+    assert_eq!(
+        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Running)),
+        MqttListenerStatus::Running
+    );
+
+    block_on(driver.stop()).expect("driver should stop cleanly");
+    assert!(matches!(
+        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Stopped)),
+        MqttListenerStatus::Stopped
+    ));
+
+    let _ = shutdown_tx.send(());
+    broker_handle.join().expect("broker thread should join");
+}
+
+#[test]
+fn mqtt_listener_reports_failed_when_sink_rejects_event() {
+    let publish = mqtt::packet::v5_0::Publish::builder()
+        .topic_name("alerts/test")
+        .expect("publish topic should be valid")
+        .payload("boom")
+        .build()
+        .expect("publish packet should build");
+    let (broker, shutdown_tx, broker_handle) = spawn_test_broker_v5(Some(publish));
+    let driver = make_driver(broker, vec![MqttProtocolVersion::V5_0]);
+    let rx = driver
+        .subscribe_listener_status()
+        .expect("listener status subscription should succeed");
+    let _ = rx.recv().expect("initial listener status should be sent");
+
+    block_on(driver.start_listening(FailOnEventSink)).expect("listener should start");
+    let failed = wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Failed(_)));
+    assert_eq!(
+        failed,
+        MqttListenerStatus::Failed("failed to forward MQTT event to sink".to_string())
+    );
+    assert_eq!(
+        driver
+            .last_listener_error()
+            .expect("listener error should be readable"),
+        Some("failed to forward MQTT event to sink".to_string())
+    );
+
+    block_on(driver.stop()).expect("driver should stop after failure");
+
+    let _ = shutdown_tx.send(());
+    broker_handle.join().expect("broker thread should join");
 }
