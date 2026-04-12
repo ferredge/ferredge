@@ -3,8 +3,7 @@ use std::{
     future::Future,
     io::{Read, Write},
     net::TcpListener,
-    sync::{Arc, Mutex, mpsc},
-    task::{Context, Poll, Waker},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
     time::Duration,
 };
@@ -14,11 +13,13 @@ use ferredge_core::prelude::{
     BrokerSubscriptionOptions, Command, Correlation, Device, DeviceEndpoint, DeviceStatus,
     EventSink, EventSource, HttpEndpointConfig, Intent, Lifecycle, Map, MqttEndpointConfig,
     MqttProtocolVersion, ProtocolBridge, RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
+    PubSub,
 };
 use mqtt_protocol_core::mqtt;
 use ferredge_proto_http::{attributes::HttpResourceAttributes, HttpCommandRef, HttpDriver, HttpRequest};
 
 use crate::{
+    runtime_stack::StackRuntime,
     runtime::{build_connect_packet, routed_message_from_packet},
     types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
     MqttDriver, MqttListenerStatus,
@@ -52,15 +53,8 @@ fn make_default_driver() -> MqttDriver {
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = std::pin::pin!(future);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => thread::yield_now(),
-        }
-    }
+    static RUNTIME: OnceLock<StackRuntime> = OnceLock::new();
+    RUNTIME.get_or_init(StackRuntime::default).block_on(future)
 }
 
 fn wait_for_status(
@@ -1054,6 +1048,62 @@ fn mqtt_listener_keeps_running_with_ping_response() {
     );
 
     block_on(driver.stop()).expect("driver should stop after keepalive test");
+    let _ = shutdown_tx.send(());
+    broker_handle.join().expect("broker thread should join");
+}
+
+#[test]
+fn mqtt_same_driver_can_listen_and_control_subscriptions() {
+    let (broker, shutdown_tx, broker_handle) = spawn_keepalive_test_broker_v5();
+    let driver = make_driver(broker, vec![MqttProtocolVersion::V5_0]);
+
+    let subscribe_packet = MqttPacketRequest::try_from(MqttCommandRef {
+        device: &driver.dvc,
+        command: &Command {
+            id: "same-driver-sub".to_string(),
+            source_device_id: None,
+            target_device_id: driver.dvc.id.clone(),
+            intent: Intent::Subscribe {
+                channel: BrokerAddress {
+                    name: "ferredge/control".to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                options: BrokerSubscriptionOptions::default(),
+            },
+            correlation: None,
+        },
+    })
+    .expect("subscribe packet should build");
+
+    let unsubscribe_packet = MqttPacketRequest::try_from(MqttCommandRef {
+        device: &driver.dvc,
+        command: &Command {
+            id: "same-driver-unsub".to_string(),
+            source_device_id: None,
+            target_device_id: driver.dvc.id.clone(),
+            intent: Intent::Unsubscribe {
+                channel: BrokerAddress {
+                    name: "ferredge/control".to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+            },
+            correlation: None,
+        },
+    })
+    .expect("unsubscribe packet should build");
+
+    block_on(driver.start_listening(NoopSink)).expect("listener should start");
+    block_on(driver.subscribe(subscribe_packet, NoopSink))
+        .expect("same driver should subscribe while listening");
+    block_on(driver.unsubscribe(unsubscribe_packet))
+        .expect("same driver should unsubscribe while listening");
+
+    assert_eq!(
+        driver.listener_status().expect("listener status"),
+        MqttListenerStatus::Running
+    );
+
+    block_on(driver.stop()).expect("driver should stop after same-driver control test");
     let _ = shutdown_tx.send(());
     broker_handle.join().expect("broker thread should join");
 }
