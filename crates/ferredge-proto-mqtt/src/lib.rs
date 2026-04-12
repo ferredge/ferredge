@@ -108,6 +108,9 @@ pub struct MqttDriver {
     /// Live MQTT client session for std-enabled runtime transport.
     #[cfg(feature = "std")]
     session: Arc<Mutex<Option<MqttClientSession>>>,
+    /// Last negotiated CONNACK capabilities and identifiers observed from broker.
+    #[cfg(feature = "std")]
+    negotiated_connack: Arc<Mutex<Option<MqttConnackProperties>>>,
     /// Background listener run flag.
     #[cfg(feature = "std")]
     listener_running: Arc<AtomicBool>,
@@ -152,6 +155,8 @@ impl MqttDriver {
             dvc,
             #[cfg(feature = "std")]
             session: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "std")]
+            negotiated_connack: Arc::new(Mutex::new(None)),
             #[cfg(feature = "std")]
             listener_running: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "std")]
@@ -224,10 +229,17 @@ impl MqttDriver {
             pending_reply_routes: std::collections::HashMap::new(),
         };
         let events = session.connection.checked_send(connect_packet);
-        runtime::handle_connection_events_async(&mut session, &self.dvc.id, events).await?;
+        runtime::handle_connection_events_async(
+            &mut session,
+            &self.dvc.id,
+            Some(&self.negotiated_connack),
+            events,
+        )
+        .await?;
         let _ = read_from_session_async(
             &mut session,
             &self.dvc.id,
+            Some(&self.negotiated_connack),
             Some(std::time::Duration::from_millis(MQTT_CONNECT_IO_TIMEOUT_MS)),
         )
         .await?;
@@ -240,6 +252,15 @@ impl MqttDriver {
             *guard = Some(session);
         }
         Ok(())
+    }
+
+    /// Returns the most recent broker CONNACK negotiation snapshot, if available.
+    #[cfg(feature = "std")]
+    pub fn negotiated_connack(&self) -> Result<Option<MqttConnackProperties>, String> {
+        self.negotiated_connack
+            .lock()
+            .map(|guard| (*guard).clone())
+            .map_err(|_| "failed to lock negotiated MQTT CONNACK state".to_string())
     }
 
     #[cfg(feature = "std")]
@@ -333,6 +354,7 @@ impl MqttDriver {
                     let messages = read_from_session_async(
                         session,
                         &self.dvc.id,
+                        Some(&self.negotiated_connack),
                         Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                     )
                     .await?;
@@ -355,6 +377,7 @@ impl MqttDriver {
                 let messages = read_from_session_async(
                     session,
                     &self.dvc.id,
+                    Some(&self.negotiated_connack),
                     Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -616,6 +639,7 @@ async fn process_session_command(
             let _ = read_from_session_async(
                 session,
                 device_id,
+                None,
                 Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
             )
             .await?;
@@ -627,6 +651,7 @@ async fn process_session_command(
             let messages = read_from_session_async(
                 session,
                 device_id,
+                None,
                 Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
             )
             .await?;
@@ -646,6 +671,7 @@ async fn process_session_command(
             let _ = read_from_session_async(
                 session,
                 device_id,
+                None,
                 Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
             )
             .await?;
@@ -731,6 +757,7 @@ impl PubSub for MqttDriver {
                 let _ = read_from_session_async(
                     &mut session,
                     &self.dvc.id,
+                    Some(&self.negotiated_connack),
                     Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -799,6 +826,7 @@ impl PubSub for MqttDriver {
                 read_from_session_async(
                     &mut session,
                     &self.dvc.id,
+                    Some(&self.negotiated_connack),
                     Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await
@@ -860,6 +888,7 @@ impl PubSub for MqttDriver {
                 let _ = read_from_session_async(
                     &mut session,
                     &self.dvc.id,
+                    Some(&self.negotiated_connack),
                     Some(std::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -904,6 +933,7 @@ impl EventSource for MqttDriver {
             let listener_error = Arc::clone(&self.listener_error);
             let status_subscribers = Arc::clone(&self.listener_status_subscribers);
             let listener_command_sender = Arc::clone(&self.listener_command_sender);
+            let negotiated_connack = Arc::clone(&self.negotiated_connack);
             let device_id = self.dvc.id.clone();
             let driver = self.clone();
             let runtime = self.runtime.clone();
@@ -1075,6 +1105,7 @@ impl EventSource for MqttDriver {
                     let messages = read_from_session_async(
                         &mut session_value,
                         &device_id,
+                        Some(&negotiated_connack),
                         Some(std::time::Duration::from_millis(MQTT_LISTENER_IDLE_POLL_MS)),
                     )
                     .await;
