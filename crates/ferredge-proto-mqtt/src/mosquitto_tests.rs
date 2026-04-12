@@ -10,7 +10,8 @@ use ferredge_core::prelude::{
     Address, BrokerAddress, BrokerBackoffStrategy, BrokerMessageOptions, BrokerReconnectConfig,
     BrokerSubscriptionOptions, BrokerChannelKind, Command, Correlation, DeliveryGuarantee, Device,
     DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
-    MqttEndpointConfig, MqttProtocolVersion, PubSub, RoutedEvent, TransportMeta,
+    MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion, PubSub, RoutedEvent,
+    TransportMeta,
 };
 
 use crate::{
@@ -84,6 +85,7 @@ fn make_driver_with_config(
             clean_start,
             session_expiry_secs,
             topic_prefix: None,
+            connect_properties: MqttConnectProperties::default(),
             reconnect,
             supported_versions: vec![MqttProtocolVersion::V5_0],
         }),

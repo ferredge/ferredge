@@ -71,6 +71,60 @@ pub(crate) fn build_connect_packet(
                         .map_err(|e| e.to_string())?,
                 ));
             }
+            if let Some(receive_maximum) = config.connect_properties.receive_maximum {
+                props.push(mqtt::packet::Property::ReceiveMaximum(
+                    mqtt::packet::ReceiveMaximum::new(receive_maximum)
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(maximum_packet_size) = config.connect_properties.maximum_packet_size {
+                props.push(mqtt::packet::Property::MaximumPacketSize(
+                    mqtt::packet::MaximumPacketSize::new(maximum_packet_size)
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(topic_alias_maximum) = config.connect_properties.topic_alias_maximum {
+                props.push(mqtt::packet::Property::TopicAliasMaximum(
+                    mqtt::packet::TopicAliasMaximum::new(topic_alias_maximum)
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(request_problem_information) =
+                config.connect_properties.request_problem_information
+            {
+                props.push(mqtt::packet::Property::RequestProblemInformation(
+                    mqtt::packet::RequestProblemInformation::new(request_problem_information as u8)
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(request_response_information) =
+                config.connect_properties.request_response_information
+            {
+                props.push(mqtt::packet::Property::RequestResponseInformation(
+                    mqtt::packet::RequestResponseInformation::new(
+                        request_response_information as u8,
+                    )
+                    .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(authentication_method) = &config.connect_properties.authentication_method {
+                props.push(mqtt::packet::Property::AuthenticationMethod(
+                    mqtt::packet::AuthenticationMethod::new(authentication_method.as_str())
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(authentication_data) = &config.connect_properties.authentication_data {
+                props.push(mqtt::packet::Property::AuthenticationData(
+                    mqtt::packet::AuthenticationData::new(authentication_data.clone())
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            for (key, value) in &config.connect_properties.user_properties {
+                props.push(mqtt::packet::Property::UserProperty(
+                    mqtt::packet::UserProperty::new(key.as_str(), value.as_str())
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
             let mut builder = mqtt::packet::v5_0::Connect::builder()
                 .client_id(config.client_id.as_str())
                 .map_err(|e| e.to_string())?
@@ -165,7 +219,7 @@ pub(crate) async fn send_packet_request_async(
     let events = session
         .connection
         .checked_send(packet_request_into_packet(request));
-    let _ = handle_connection_events_async(session, device_id, events).await?;
+    let _ = handle_connection_events_async(session, device_id, None, events).await?;
     Ok(())
 }
 
@@ -282,6 +336,7 @@ fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<
 pub(crate) async fn read_from_session_async(
     session: &mut MqttClientSession,
     device_id: &str,
+    negotiated_connack: Option<&std::sync::Arc<std::sync::Mutex<Option<MqttConnackProperties>>>>,
     timeout: Option<Duration>,
 ) -> Result<Vec<RoutedMessage>, String> {
     session
@@ -297,7 +352,7 @@ pub(crate) async fn read_from_session_async(
             session.awaiting_pingresp = false;
             let mut cursor = mqtt::common::Cursor::new(&buffer[..n]);
             let events = session.connection.recv(&mut cursor);
-            handle_connection_events_async(session, device_id, events).await
+            handle_connection_events_async(session, device_id, negotiated_connack, events).await
         }
         Err(NetError::TimedOut) => {
             send_keepalive_ping_if_due(session, device_id).await?;
@@ -311,6 +366,7 @@ pub(crate) async fn read_from_session_async(
 pub(crate) async fn handle_connection_events_async(
     session: &mut MqttClientSession,
     device_id: &str,
+    negotiated_connack: Option<&std::sync::Arc<std::sync::Mutex<Option<MqttConnackProperties>>>>,
     events: Vec<mqtt::connection::Event>,
 ) -> Result<Vec<RoutedMessage>, String> {
     let mut routed = Vec::new();
@@ -330,6 +386,9 @@ pub(crate) async fn handle_connection_events_async(
                 session.last_activity = Instant::now();
             }
             mqtt::connection::Event::NotifyPacketReceived(packet) => {
+                if let Some(negotiated_connack) = negotiated_connack {
+                    update_negotiated_connack(negotiated_connack, &packet)?;
+                }
                 if let Some(message) = routed_message_from_packet(
                     &mut session.pending_command_ids,
                     &mut session.pending_reply_routes,
@@ -372,7 +431,7 @@ pub(crate) async fn disconnect_session(session: &mut MqttClientSession) -> Resul
             session.connection.checked_send(disconnect)
         }
     };
-    let _ = handle_connection_events_async(session, "", events).await?;
+    let _ = handle_connection_events_async(session, "", None, events).await?;
     session
         .stream
         .close()
@@ -414,7 +473,7 @@ async fn send_keepalive_ping_if_due(
         }
     };
     session.awaiting_pingresp = true;
-    let _ = handle_connection_events_async(session, device_id, events).await?;
+    let _ = handle_connection_events_async(session, device_id, None, events).await?;
     Ok(())
 }
 
@@ -431,6 +490,122 @@ async fn write_all_socket_async(
         buf = &buf[written..];
     }
     Ok(())
+}
+
+#[cfg(feature = "std")]
+fn update_negotiated_connack(
+    negotiated_connack: &std::sync::Arc<std::sync::Mutex<Option<MqttConnackProperties>>>,
+    packet: &mqtt::packet::Packet,
+) -> Result<(), String> {
+    let snapshot = match packet {
+        mqtt::packet::Packet::V5_0Connack(packet) => Some(connack_snapshot_from_v5(packet)?),
+        mqtt::packet::Packet::V3_1_1Connack(packet) => Some(MqttConnackProperties {
+            session_present: packet.session_present(),
+            reason_code: Some(packet.return_code().to_string()),
+            ..MqttConnackProperties::default()
+        }),
+        _ => None,
+    };
+
+    if let Some(snapshot) = snapshot {
+        let mut guard = negotiated_connack
+            .lock()
+            .map_err(|_| "failed to lock negotiated MQTT CONNACK state".to_string())?;
+        *guard = Some(snapshot);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn connack_snapshot_from_v5(
+    packet: &mqtt::packet::v5_0::Connack,
+) -> Result<MqttConnackProperties, String> {
+    let mut assigned_client_identifier = None;
+    let mut response_information = None;
+    let mut server_reference = None;
+    let mut receive_maximum = None;
+    let mut maximum_packet_size = None;
+    let mut topic_alias_maximum = None;
+    let mut maximum_qos = None;
+    let mut retain_available = None;
+    let mut server_keep_alive = None;
+    let mut wildcard_subscription_available = None;
+    let mut subscription_identifier_available = None;
+    let mut shared_subscription_available = None;
+    let mut authentication_method = None;
+    let mut authentication_data = None;
+    let mut user_properties = Vec::new();
+
+    for prop in packet.props() {
+        match prop {
+            mqtt::packet::Property::AssignedClientIdentifier(prop) => {
+                assigned_client_identifier = Some(prop.val().to_string());
+            }
+            mqtt::packet::Property::ResponseInformation(prop) => {
+                response_information = Some(prop.val().to_string());
+            }
+            mqtt::packet::Property::ServerReference(prop) => {
+                server_reference = Some(prop.val().to_string());
+            }
+            mqtt::packet::Property::ReceiveMaximum(prop) => {
+                receive_maximum = Some(prop.val());
+            }
+            mqtt::packet::Property::MaximumPacketSize(prop) => {
+                maximum_packet_size = Some(prop.val());
+            }
+            mqtt::packet::Property::TopicAliasMaximum(prop) => {
+                topic_alias_maximum = Some(prop.val());
+            }
+            mqtt::packet::Property::MaximumQos(prop) => {
+                maximum_qos = Some(prop.val());
+            }
+            mqtt::packet::Property::RetainAvailable(prop) => {
+                retain_available = Some(prop.val() != 0);
+            }
+            mqtt::packet::Property::ServerKeepAlive(prop) => {
+                server_keep_alive = Some(prop.val());
+            }
+            mqtt::packet::Property::WildcardSubscriptionAvailable(prop) => {
+                wildcard_subscription_available = Some(prop.val() != 0);
+            }
+            mqtt::packet::Property::SubscriptionIdentifierAvailable(prop) => {
+                subscription_identifier_available = Some(prop.val() != 0);
+            }
+            mqtt::packet::Property::SharedSubscriptionAvailable(prop) => {
+                shared_subscription_available = Some(prop.val() != 0);
+            }
+            mqtt::packet::Property::AuthenticationMethod(prop) => {
+                authentication_method = Some(prop.val().to_string());
+            }
+            mqtt::packet::Property::AuthenticationData(prop) => {
+                authentication_data = Some(prop.val().to_vec());
+            }
+            mqtt::packet::Property::UserProperty(prop) => {
+                user_properties.push((prop.key().to_string(), prop.val().to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(MqttConnackProperties {
+        session_present: packet.session_present(),
+        reason_code: Some(packet.reason_code().to_string()),
+        assigned_client_identifier,
+        response_information,
+        server_reference,
+        receive_maximum,
+        maximum_packet_size,
+        topic_alias_maximum,
+        maximum_qos,
+        retain_available,
+        server_keep_alive,
+        wildcard_subscription_available,
+        subscription_identifier_available,
+        shared_subscription_available,
+        authentication_method,
+        authentication_data,
+        user_properties,
+    })
 }
 
 
