@@ -61,6 +61,74 @@ pub struct TlsConfig {
     pub client_key_pem: Option<String>,
 }
 
+/// Strategy used to compute delay between broker reconnect attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrokerBackoffStrategy {
+    /// Use the same delay for every reconnect attempt.
+    Fixed,
+    /// Multiply the delay by `multiplier` for each later attempt, capped by `max_delay_ms`.
+    Exponential,
+}
+
+/// Shared reconnect policy for broker-oriented transports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerReconnectConfig {
+    /// Whether automatic reconnect attempts are enabled.
+    pub enabled: bool,
+    /// Delay before the first reconnect attempt in milliseconds.
+    pub initial_delay_ms: u64,
+    /// Maximum delay between reconnect attempts in milliseconds.
+    pub max_delay_ms: u64,
+    /// Backoff strategy used to compute retry delay.
+    pub strategy: BrokerBackoffStrategy,
+    /// Multiplier used by exponential backoff. Ignored for fixed backoff.
+    pub multiplier: u32,
+    /// Optional maximum reconnect attempts before surfacing failure.
+    pub max_attempts: Option<u32>,
+}
+
+impl Default for BrokerReconnectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            initial_delay_ms: 250,
+            max_delay_ms: 5_000,
+            strategy: BrokerBackoffStrategy::Exponential,
+            multiplier: 2,
+            max_attempts: None,
+        }
+    }
+}
+
+impl BrokerReconnectConfig {
+    /// Returns whether the given 1-based reconnect attempt is permitted.
+    pub fn allows_attempt(&self, attempt: u32) -> bool {
+        self.enabled && self.max_attempts.is_none_or(|max_attempts| attempt <= max_attempts)
+    }
+
+    /// Returns the backoff delay in milliseconds for the given 1-based reconnect attempt.
+    pub fn delay_ms_for_attempt(&self, attempt: u32) -> u64 {
+        if attempt <= 1 {
+            return self.initial_delay_ms.min(self.max_delay_ms);
+        }
+
+        match self.strategy {
+            BrokerBackoffStrategy::Fixed => self.initial_delay_ms.min(self.max_delay_ms),
+            BrokerBackoffStrategy::Exponential => {
+                let multiplier = u64::from(self.multiplier.max(1));
+                let mut delay = self.initial_delay_ms.max(1);
+                for _ in 1..attempt {
+                    delay = delay.saturating_mul(multiplier);
+                    if delay >= self.max_delay_ms {
+                        return self.max_delay_ms;
+                    }
+                }
+                delay.min(self.max_delay_ms)
+            }
+        }
+    }
+}
+
 /// MQTT-specific endpoint configuration required for real broker connections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MqttEndpointConfig {
@@ -80,6 +148,8 @@ pub struct MqttEndpointConfig {
     pub session_expiry_secs: Option<u32>,
     /// Optional default topic prefix or namespace.
     pub topic_prefix: Option<String>,
+    /// Reconnect policy shared with broker-oriented transports.
+    pub reconnect: BrokerReconnectConfig,
     /// MQTT protocol versions supported by broker or deployment policy.
     pub supported_versions: Vec<MqttProtocolVersion>,
 }
@@ -289,6 +359,7 @@ mod tests {
                 clean_start: true,
                 session_expiry_secs: None,
                 topic_prefix: None,
+                reconnect: BrokerReconnectConfig::default(),
                 supported_versions: vec![MqttProtocolVersion::V5_0, MqttProtocolVersion::V3_1_1],
             })
             .protocol(),
@@ -330,6 +401,7 @@ mod tests {
             clean_start: true,
             session_expiry_secs: None,
             topic_prefix: None,
+            reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V3_1_1, MqttProtocolVersion::V5_0],
         };
         assert_eq!(
@@ -346,6 +418,7 @@ mod tests {
             clean_start: true,
             session_expiry_secs: None,
             topic_prefix: None,
+            reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V3_1_1],
         };
         assert_eq!(
@@ -354,5 +427,25 @@ mod tests {
         );
         assert!(fallback_v3.supports_protocol_version(MqttProtocolVersion::V3_1_1));
         assert!(!fallback_v3.supports_protocol_version(MqttProtocolVersion::V5_0));
+    }
+
+    #[test]
+    fn broker_reconnect_backoff_caps_and_respects_attempt_limit() {
+        let config = BrokerReconnectConfig {
+            enabled: true,
+            initial_delay_ms: 100,
+            max_delay_ms: 1_000,
+            strategy: BrokerBackoffStrategy::Exponential,
+            multiplier: 3,
+            max_attempts: Some(3),
+        };
+
+        assert!(config.allows_attempt(1));
+        assert!(config.allows_attempt(3));
+        assert!(!config.allows_attempt(4));
+        assert_eq!(config.delay_ms_for_attempt(1), 100);
+        assert_eq!(config.delay_ms_for_attempt(2), 300);
+        assert_eq!(config.delay_ms_for_attempt(3), 900);
+        assert_eq!(config.delay_ms_for_attempt(4), 1_000);
     }
 }
