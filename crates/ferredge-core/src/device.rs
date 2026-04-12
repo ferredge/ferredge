@@ -1,19 +1,27 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+#[cfg(feature = "std")]
+use std::{string::String, vec::Vec};
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap as StdlessMap, string::String, vec::Vec};
+
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
+
+use crate::command::BrokerAddress;
 
 #[cfg(feature = "std")]
 pub use std::collections::HashMap as Map;
 
 #[cfg(not(feature = "std"))]
-pub use alloc::collections::BTreeMap as Map;
+pub type Map<K, V> = StdlessMap<K, V>;
 
-use crate::router::Driver;
-
+/// Stable identifier for registered device.
 pub type DeviceId = String;
 
+/// High-level device liveness and availability state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceStatus {
     Online,
@@ -22,7 +30,8 @@ pub enum DeviceStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Transport protocol supported by device endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceProtocol {
     MQTT,
     HTTP,
@@ -30,62 +39,166 @@ pub enum DeviceProtocol {
     CoAP,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Optional credential set for protocol endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// Username or principal used for authentication.
+    pub username: Option<String>,
+    /// Password or secret associated with username.
+    pub password: Option<String>,
+}
+
+/// TLS material and flags associated with secure protocol endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Whether TLS is enabled for endpoint.
+    pub enabled: bool,
+    /// Optional PEM-encoded CA certificate.
+    pub ca_certificate_pem: Option<String>,
+    /// Optional PEM-encoded client certificate.
+    pub client_certificate_pem: Option<String>,
+    /// Optional PEM-encoded private key for client certificate.
+    pub client_key_pem: Option<String>,
+}
+
+/// MQTT-specific endpoint configuration required for real broker connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqttEndpointConfig {
+    /// Broker host or address string.
+    pub broker: String,
+    /// MQTT client identifier.
+    pub client_id: String,
+    /// Optional username/password authentication.
+    pub auth: Option<AuthConfig>,
+    /// Optional TLS configuration.
+    pub tls: Option<TlsConfig>,
+    /// Optional keepalive interval in seconds.
+    pub keepalive_secs: Option<u16>,
+    /// Whether session starts clean on new connection.
+    pub clean_start: bool,
+    /// Optional session expiry interval in seconds.
+    pub session_expiry_secs: Option<u32>,
+    /// Optional default topic prefix or namespace.
+    pub topic_prefix: Option<String>,
+}
+
+/// HTTP-specific endpoint configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpEndpointConfig {
+    /// Base URL or host:port target for device.
+    pub url: String,
+}
+
+/// Modbus TCP-specific endpoint configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusTcpEndpointConfig {
+    /// Remote device address or hostname.
+    pub addr: String,
+    /// Remote Modbus TCP port.
+    pub port: u16,
+}
+
+/// Modbus RTU-specific endpoint configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusRtuEndpointConfig {
+    /// Serial port device path.
+    pub port: String,
+    /// Serial baudrate used for connection.
+    pub baudrate: u32,
+}
+
+/// CoAP-specific endpoint configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoapEndpointConfig {
+    /// Base CoAP URL for device.
+    pub url: String,
+}
+
+/// Concrete connection endpoint for one device transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceEndpoint {
-    Http { url: String },
-    Mqtt { broker: String },
-    ModbusTCP { addr: String, port: u16 },
-    ModbusRTU { port: String, baudrate: u32 },
-    CoAP { url: String },
+    Http(HttpEndpointConfig),
+    Mqtt(MqttEndpointConfig),
+    ModbusTCP(ModbusTcpEndpointConfig),
+    ModbusRTU(ModbusRtuEndpointConfig),
+    CoAP(CoapEndpointConfig),
 }
 
 impl DeviceEndpoint {
+    /// Returns protocol implied by endpoint variant.
     pub fn protocol(&self) -> DeviceProtocol {
         match self {
-            DeviceEndpoint::Http { .. } => DeviceProtocol::HTTP,
-            DeviceEndpoint::Mqtt { .. } => DeviceProtocol::MQTT,
-            DeviceEndpoint::ModbusTCP { .. } => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusRTU { .. } => DeviceProtocol::Modbus,
-            DeviceEndpoint::CoAP { .. } => DeviceProtocol::CoAP,
+            DeviceEndpoint::Http(_) => DeviceProtocol::HTTP,
+            DeviceEndpoint::Mqtt(_) => DeviceProtocol::MQTT,
+            DeviceEndpoint::ModbusTCP(_) => DeviceProtocol::Modbus,
+            DeviceEndpoint::ModbusRTU(_) => DeviceProtocol::Modbus,
+            DeviceEndpoint::CoAP(_) => DeviceProtocol::CoAP,
         }
     }
 }
 
-// marker trait for device resource types
-pub trait DeviceResourceAttributes: for<'de> Deserialize<'de> + Serialize {}
+/// Marker trait for protocol-specific device resource metadata.
+pub trait DeviceResourceAttributes: Clone + core::fmt::Debug + for<'de> Deserialize<'de> + Serialize {}
 
 bitflags! {
+    /// Allowed operations for device resource or channel descriptors.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub struct DeviceResourceAccessPermission: u8 {
-        const READ    = 0b0000_0001;
-        const WRITE   = 0b0000_0010;
-        const EXECUTE = 0b0000_0100;
+        const READ      = 0b0000_0001;
+        const WRITE     = 0b0000_0010;
+        const EXECUTE   = 0b0000_0100;
+        const PUBLISH   = 0b0000_1000;
+        const SUBSCRIBE = 0b0001_0000;
     }
 }
 
+/// Protocol-specific resource descriptor attached to one device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(deserialize = "T: DeviceResourceAttributes"))]
 pub struct DeviceResource<T>
 where
     T: DeviceResourceAttributes,
 {
+    /// Human-readable resource name.
     pub name: String,
+    /// Protocol-specific resource metadata.
     pub resource_attributes: T,
+    /// Optional engineering unit for resource value.
     pub unit: Option<String>,
+    /// Optional allowed operations for this resource.
+    pub permission: Option<DeviceResourceAccessPermission>,
+}
+
+/// Broker-oriented destination or subscription descriptor attached to one device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceMessageEndpoint {
+    /// Human-readable endpoint name.
+    pub name: String,
+    /// Concrete broker address such as topic, queue, subject, or stream.
+    pub address: BrokerAddress,
+    /// Optional transport-agnostic broker metadata entries.
+    pub metadata: Option<Map<String, String>>,
+    /// Optional allowed operations for this broker endpoint.
     pub permission: Option<DeviceResourceAccessPermission>,
 }
 
 /// Represents the metadata and state of a connected device.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Device<T: DeviceResourceAttributes> {
+    /// Stable device identifier.
     pub id: DeviceId,
+    /// Human-readable device name.
     pub name: String,
+    /// Current reported device status.
     pub status: DeviceStatus,
+    /// Concrete transport endpoint details.
     pub endpoint: DeviceEndpoint,
-    // Additional metadata can be stored as a generic map or specific struct
-    // depending on future needs.
+    /// Optional free-form metadata entries.
     pub metadata: Option<Map<String, String>>,
-    // max resources the device can handle
+    /// Optional maximum concurrent connections supported by device.
     pub max_connections: Option<u32>,
+    /// Resource descriptors addressable through request/response style protocols.
     pub resources: Map<String, DeviceResource<T>>,
+    /// Broker endpoint descriptors addressable through message-oriented protocols.
+    pub message_endpoints: Vec<DeviceMessageEndpoint>,
 }

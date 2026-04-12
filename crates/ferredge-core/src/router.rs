@@ -1,56 +1,123 @@
 use crate::command::{Command, CommandResult};
-use crate::device::{Device, DeviceId, DeviceResourceAttributes};
+use crate::device::{Device, DeviceResourceAttributes};
+use crate::routed::{RoutedEvent, RoutedMessage, RoutedResult};
 
-/// A generic message that flows through the system.
-#[derive(Debug, Clone)]
-pub enum Message {
-    Command(Command),
-    Event(DeviceEvent),
-    Response(CommandResult),
+/// Receives protocol-native or routed events emitted by drivers.
+pub trait EventSink: Send {
+    /// Event type accepted by this sink.
+    type Event;
+    /// Error returned when sink processing fails.
+    type Error;
+
+    /// Handles one event emitted from driver ingress.
+    fn handle(&mut self, event: Self::Event) -> Result<(), Self::Error>;
 }
 
-#[derive(Debug, Clone)]
-pub struct DeviceEvent {
-    pub device_id: String,
-    pub timestamp: u64,
-    pub data: Vec<u8>,
+/// Lifecycle hooks shared by all protocol drivers.
+pub trait Lifecycle: Send + Sync {
+    /// Driver-specific startup or shutdown error.
+    type Error;
+
+    /// Starts protocol resources such as connections, polling loops, or subscriptions.
+    fn start(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    /// Stops protocol resources and performs cleanup.
+    fn stop(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-/// The main trait for the Core logic.
-/// It routes messages between the external world (API), Drivers, and Storage.
+/// Capability for request/response style protocols such as HTTP or Modbus.
+pub trait RequestResponse: Send + Sync {
+    /// Native outbound request type understood by concrete driver.
+    type Request;
+    /// Native response type returned by concrete driver.
+    type Response;
+    /// Driver-specific request execution error.
+    type Error;
 
-pub trait Router<T: DeviceResourceAttributes, Dr: Driver>: Send + Sync {
-    /// Register a new device with the core.
-    fn register_device(&self, device: Device<T>) -> impl Future<Output = Result<(), String>> + Send;
+    /// Executes one native request against underlying transport.
+    fn execute(
+        &self,
+        request: Self::Request,
+    ) -> impl Future<Output = Result<Self::Response, Self::Error>> + Send;
+}
 
-    /// Route a command to a specific device.
+/// Capability for drivers that can emit unsolicited inbound events.
+pub trait EventSource: Send + Sync {
+    /// Event emitted by protocol ingress.
+    type Event;
+    /// Driver-specific listening error.
+    type Error;
+
+    /// Starts listening and forwards inbound events into provided sink.
+    fn start_listening<S>(&self, sink: S) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        S: EventSink<Event = Self::Event> + Send;
+}
+
+/// Capability for publish/subscribe protocols such as MQTT.
+pub trait PubSub: Send + Sync {
+    /// Native publish request type.
+    type PublishRequest;
+    /// Native subscription descriptor type.
+    type Subscription;
+    /// Driver-specific pub/sub error.
+    type Error;
+
+    /// Publishes one message to transport.
+    fn publish(
+        &self,
+        request: Self::PublishRequest,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Registers one subscription and forwards matching messages into provided sink.
+    fn subscribe<S>(
+        &self,
+        subscription: Self::Subscription,
+        sink: S,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        S: EventSink<Event = RoutedEvent> + Send;
+
+    /// Removes one subscription from transport.
+    fn unsubscribe(
+        &self,
+        subscription: Self::Subscription,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+/// Protocol-neutral router for commands, events, and results.
+pub trait Router: Send + Sync {
+    /// Router-specific error type.
+    type Error;
+
+    /// Registers one device and its metadata with router state.
+    fn register_device<T>(
+        &self,
+        device: Device<T>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        T: DeviceResourceAttributes;
+
+    /// Routes already-normalized message through router pipeline.
+    fn route_message(
+        &self,
+        message: RoutedMessage,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Routes one command and returns command-level result state.
     fn route_command(
         &self,
         command: Command,
-    ) -> impl Future<Output = Result<CommandResult, String>> + Send;
+    ) -> impl Future<Output = Result<CommandResult, Self::Error>> + Send;
 
-    /// Handle an incoming event from a device (e.g., sensor reading).
-    /// This typically involves routing to storage or triggering other actions.
-    fn handle_event(&self, event: DeviceEvent) -> impl Future<Output = Result<(), String>> + Send;
-
-    /// Route a command from one device to another
-    fn route_device_to_device(
+    /// Handles one routed event emitted from protocol ingress.
+    fn handle_event(
         &self,
-        source_device_id: DeviceId,
-        command: Command,
-    ) -> impl Future<Output = Result<CommandResult, String>> + Send;
-}
+        event: RoutedEvent,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-/// Trait for Device Drivers to implement.
-/// The Core uses this to communicate with the actual hardware/protocol.
-pub trait Driver: Send + Sync {
-    /// Execute a command on the hardware.
-    fn execute(&self, command: Command) -> impl Future<Output = CommandResult> + Send;
-
-    /// Start listening for events from the hardware.
-    /// This usually spawns a task that feeds events back to the Core.
-    fn start(&self) -> impl Future<Output = Result<(), String>> + Send;
-
-    /// Stop the driver.
-    fn stop(&self) -> impl Future<Output = Result<(), String>> + Send;
+    /// Handles one routed result or completion update.
+    fn handle_result(
+        &self,
+        result: RoutedResult,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
