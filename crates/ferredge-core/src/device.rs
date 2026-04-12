@@ -125,6 +125,31 @@ pub enum DeviceEndpoint {
 }
 
 impl DeviceEndpoint {
+    /// Creates an HTTP endpoint from dedicated config.
+    pub fn http(config: HttpEndpointConfig) -> Self {
+        Self::Http(config)
+    }
+
+    /// Creates an MQTT endpoint from dedicated config.
+    pub fn mqtt(config: MqttEndpointConfig) -> Self {
+        Self::Mqtt(config)
+    }
+
+    /// Creates a Modbus TCP endpoint from dedicated config.
+    pub fn modbus_tcp(config: ModbusTcpEndpointConfig) -> Self {
+        Self::ModbusTCP(config)
+    }
+
+    /// Creates a Modbus RTU endpoint from dedicated config.
+    pub fn modbus_rtu(config: ModbusRtuEndpointConfig) -> Self {
+        Self::ModbusRTU(config)
+    }
+
+    /// Creates a CoAP endpoint from dedicated config.
+    pub fn coap(config: CoapEndpointConfig) -> Self {
+        Self::CoAP(config)
+    }
+
     /// Returns protocol implied by endpoint variant.
     pub fn protocol(&self) -> DeviceProtocol {
         match self {
@@ -201,4 +226,57 @@ pub struct Device<T: DeviceResourceAttributes> {
     pub resources: Map<String, DeviceResource<T>>,
     /// Broker endpoint descriptors addressable through message-oriented protocols.
     pub message_endpoints: Vec<DeviceMessageEndpoint>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_endpoint_creators_return_expected_protocols() {
+        assert_eq!(
+            DeviceEndpoint::http(HttpEndpointConfig {
+                url: "127.0.0.1:8080".to_string(),
+            })
+            .protocol(),
+            DeviceProtocol::HTTP
+        );
+        assert_eq!(
+            DeviceEndpoint::mqtt(MqttEndpointConfig {
+                broker: "mqtt://broker".to_string(),
+                client_id: "client-1".to_string(),
+                auth: None,
+                tls: None,
+                keepalive_secs: Some(30),
+                clean_start: true,
+                session_expiry_secs: None,
+                topic_prefix: None,
+            })
+            .protocol(),
+            DeviceProtocol::MQTT
+        );
+        assert_eq!(
+            DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+                addr: "127.0.0.1".to_string(),
+                port: 502,
+            })
+            .protocol(),
+            DeviceProtocol::Modbus
+        );
+        assert_eq!(
+            DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+                port: "/dev/ttyUSB0".to_string(),
+                baudrate: 9600,
+            })
+            .protocol(),
+            DeviceProtocol::Modbus
+        );
+        assert_eq!(
+            DeviceEndpoint::coap(CoapEndpointConfig {
+                url: "coap://127.0.0.1".to_string(),
+            })
+            .protocol(),
+            DeviceProtocol::CoAP
+        );
+    }
 }
