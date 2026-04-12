@@ -1,0 +1,12 @@
+[package]
+name = "ferredge-runtime-async-std"
+description = "async-std runtime and network adapters for ferredge core traits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ferredge-core = { workspace = true, features = ["std"] }
+async-std = { workspace = true }
