@@ -19,6 +19,14 @@ pub(crate) struct MqttClientSession {
     pub(crate) stream: TcpStream,
     pub(crate) connection: mqtt::Connection<mqtt::role::Client>,
     pub(crate) pending_command_ids: HashMap<u16, String>,
+    pub(crate) pending_reply_routes: HashMap<String, PendingReplyRoute>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub(crate) struct PendingReplyRoute {
+    pub(crate) command_id: String,
+    pub(crate) reply_to: Option<Address>,
 }
 
 #[cfg(feature = "std")]
@@ -121,6 +129,9 @@ pub(crate) fn send_packet_request(
     request: MqttPacketRequest,
 ) -> Result<(), String> {
     let request = assign_runtime_packet_id(session, request)?;
+    if let Some((correlation_key, route)) = pending_reply_route_from_packet(&request) {
+        session.pending_reply_routes.insert(correlation_key, route);
+    }
     if let Some(packet_id) = packet_request_packet_id(&request.packet) {
         session
             .pending_command_ids
@@ -302,9 +313,12 @@ pub(crate) fn handle_connection_events(
                     .map_err(|e| format!("failed to write MQTT packet: {e}"))?;
             }
             mqtt::connection::Event::NotifyPacketReceived(packet) => {
-                if let Some(message) =
-                    routed_message_from_packet(&mut session.pending_command_ids, device_id, packet)
-                {
+                if let Some(message) = routed_message_from_packet(
+                    &mut session.pending_command_ids,
+                    &mut session.pending_reply_routes,
+                    device_id,
+                    packet,
+                ) {
                     routed.push(message);
                 }
             }
@@ -326,13 +340,14 @@ pub(crate) fn handle_connection_events(
 #[cfg(feature = "std")]
 pub(crate) fn routed_message_from_packet(
     pending_command_ids: &mut HashMap<u16, String>,
+    pending_reply_routes: &mut HashMap<String, PendingReplyRoute>,
     device_id: &str,
     packet: mqtt::packet::Packet,
 ) -> Option<RoutedMessage> {
     match packet {
-        mqtt::packet::Packet::V5_0Publish(packet) => Some(RoutedMessage::Event(
-            routed_event_from_v5_publish(device_id, &packet),
-        )),
+        mqtt::packet::Packet::V5_0Publish(packet) => {
+            routed_reply_or_event_from_v5_publish(pending_reply_routes, device_id, &packet)
+        }
         mqtt::packet::Packet::V3_1_1Publish(packet) => Some(RoutedMessage::Event(
             routed_event_from_v3_publish(device_id, &packet),
         )),
@@ -431,6 +446,41 @@ pub(crate) fn routed_message_from_packet(
 }
 
 #[cfg(feature = "std")]
+fn pending_reply_route_from_packet(
+    request: &MqttPacketRequest,
+) -> Option<(String, PendingReplyRoute)> {
+    match &request.packet {
+        MqttWirePacket::V5Publish(packet) => {
+            let mut correlation_key = None;
+            let mut reply_to = None;
+            for prop in packet.props() {
+                match prop {
+                    mqtt::packet::Property::CorrelationData(prop) => {
+                        correlation_key =
+                            Some(String::from_utf8_lossy(prop.val()).into_owned());
+                    }
+                    mqtt::packet::Property::ResponseTopic(prop) => {
+                        reply_to = Some(Address::Channel(prop.val().to_string()));
+                    }
+                    _ => {}
+                }
+            }
+
+            correlation_key.map(|correlation_key| {
+                (
+                    correlation_key,
+                    PendingReplyRoute {
+                        command_id: request.command_id.clone(),
+                        reply_to,
+                    },
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "std")]
 pub(crate) fn mqtt_source(device_id: &str) -> EndpointRef {
     EndpointRef {
         device_id: device_id.to_string(),
@@ -497,6 +547,78 @@ pub(crate) fn routed_event_from_v5_publish(
             user_properties,
         })),
     }
+}
+
+#[cfg(feature = "std")]
+fn routed_reply_or_event_from_v5_publish(
+    pending_reply_routes: &mut HashMap<String, PendingReplyRoute>,
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Publish,
+) -> Option<RoutedMessage> {
+    let mut correlation_key = None;
+    for prop in packet.props() {
+        if let mqtt::packet::Property::CorrelationData(prop) = prop {
+            correlation_key = Some(String::from_utf8_lossy(prop.val()).into_owned());
+            break;
+        }
+    }
+
+    if let Some(correlation_key) = correlation_key
+        && let Some(route) = pending_reply_routes.remove(&correlation_key)
+    {
+        return Some(RoutedMessage::Result(RoutedResult {
+            source: mqtt_source(device_id),
+            result: CommandResult {
+                command_id: route.command_id.clone(),
+                device_id: device_id.to_string(),
+                state: DeliveryState::Completed,
+                payload: Some(packet.payload().as_slice().to_vec()),
+                error: None,
+                correlation: Some(Correlation {
+                    request_id: route.command_id,
+                    reply_to: route.reply_to,
+                }),
+            },
+            transport: Some(TransportMeta::Mqtt(MqttMeta {
+                topic: packet.topic_name().to_string(),
+                qos: packet.qos() as u8,
+                retain: packet.retain(),
+                duplicate: packet.dup(),
+                packet_id: packet.packet_id(),
+                content_type: packet.props().iter().find_map(|prop| match prop {
+                    mqtt::packet::Property::ContentType(prop) => Some(prop.val().to_string()),
+                    _ => None,
+                }),
+                response_topic: packet.props().iter().find_map(|prop| match prop {
+                    mqtt::packet::Property::ResponseTopic(prop) => Some(prop.val().to_string()),
+                    _ => None,
+                }),
+                correlation_data: Some(correlation_key),
+                subscription_identifiers: packet
+                    .props()
+                    .iter()
+                    .filter_map(|prop| match prop {
+                        mqtt::packet::Property::SubscriptionIdentifier(prop) => Some(prop.val()),
+                        _ => None,
+                    })
+                    .collect(),
+                user_properties: packet
+                    .props()
+                    .iter()
+                    .filter_map(|prop| match prop {
+                        mqtt::packet::Property::UserProperty(prop) => {
+                            Some((prop.key().to_string(), prop.val().to_string()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            })),
+        }));
+    }
+
+    Some(RoutedMessage::Event(routed_event_from_v5_publish(
+        device_id, packet,
+    )))
 }
 
 #[cfg(feature = "std")]

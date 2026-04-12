@@ -162,6 +162,7 @@ impl MqttDriver {
             stream,
             connection,
             pending_command_ids: std::collections::HashMap::new(),
+            pending_reply_routes: std::collections::HashMap::new(),
         };
         let events = session.connection.checked_send(connect_packet);
         handle_connection_events(&mut session, &self.dvc.id, events)?;
