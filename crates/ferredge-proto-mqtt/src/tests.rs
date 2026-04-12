@@ -254,3 +254,35 @@ fn mqtt_listener_error_can_be_cleared_without_runtime() {
         MqttListenerStatus::Stopped
     );
 }
+
+#[test]
+fn mqtt_listener_status_subscription_receives_initial_state() {
+    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+
+    let rx = driver
+        .subscribe_listener_status()
+        .expect("listener status subscription should succeed");
+
+    assert_eq!(
+        rx.recv().expect("initial listener status should be sent"),
+        MqttListenerStatus::Stopped
+    );
+}
+
+#[test]
+fn mqtt_listener_status_subscription_receives_clear_transition() {
+    let driver = make_driver(vec![MqttProtocolVersion::V5_0]);
+    let rx = driver
+        .subscribe_listener_status()
+        .expect("listener status subscription should succeed");
+    let _ = rx.recv().expect("initial listener status should be sent");
+
+    driver
+        .clear_listener_error()
+        .expect("clearing empty listener error should succeed");
+
+    assert_eq!(
+        rx.recv().expect("listener status transition should be sent"),
+        MqttListenerStatus::Stopped
+    );
+}
