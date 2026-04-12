@@ -50,17 +50,17 @@ mod runtime_stack {
 #[cfg(feature = "std")]
 use runtime_stack::{RuntimeTask, StackNet, StackRuntime};
 
-#[cfg(test)]
-mod tests;
 #[cfg(all(test, feature = "mosquitto-tests"))]
 mod mosquitto_tests;
+#[cfg(test)]
+mod tests;
 
 use types::{MqttPacketRequest, MqttResourceAttributes};
 
 #[cfg(feature = "std")]
 use runtime::{
-    MqttClientSession, build_connect_packet, mqtt_version_from_core, normalize_broker_addr,
-    read_from_session_async, send_packet_request_async, disconnect_session,
+    MqttClientSession, build_connect_packet, disconnect_session, mqtt_version_from_core,
+    normalize_broker_addr, read_from_session_async, send_packet_request_async,
 };
 
 pub use types::{
@@ -108,6 +108,12 @@ pub struct MqttDriver {
     /// Selected network adapter used for outbound sockets.
     #[cfg(feature = "std")]
     net: StackNet,
+    /// Desired subscription state to replay after reconnect.
+    #[cfg(feature = "std")]
+    desired_subscriptions: Arc<Mutex<Map<String, MqttPacketRequest>>>,
+    /// Queued outbound requests waiting for broker recovery.
+    #[cfg(feature = "std")]
+    recovery_queue: Arc<Mutex<VecDeque<MqttPacketRequest>>>,
 }
 
 impl core::fmt::Debug for MqttDriver {
@@ -137,6 +143,10 @@ impl MqttDriver {
             runtime: Arc::new(StackRuntime::default()),
             #[cfg(feature = "std")]
             net: StackNet::default(),
+            #[cfg(feature = "std")]
+            desired_subscriptions: Arc::new(Mutex::new(Map::new())),
+            #[cfg(feature = "std")]
+            recovery_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -211,6 +221,120 @@ impl MqttDriver {
             DeviceEndpoint::Mqtt(config) => Ok(config.reconnect.clone()),
             _ => Err("device endpoint is not MQTT".to_string()),
         }
+    }
+
+    #[cfg(feature = "std")]
+    fn request_topic_key(request: &MqttPacketRequest) -> Option<String> {
+        match &request.packet {
+            MqttWirePacket::V5Subscribe(packet) => packet
+                .entries()
+                .first()
+                .map(|entry| entry.topic_filter().to_string()),
+            MqttWirePacket::V3Subscribe(packet) => packet
+                .entries()
+                .first()
+                .map(|entry| entry.topic_filter().to_string()),
+            MqttWirePacket::V5Unsubscribe(packet) => packet
+                .entries()
+                .first()
+                .map(|entry| entry.as_str().to_string()),
+            MqttWirePacket::V3Unsubscribe(packet) => packet
+                .entries()
+                .first()
+                .map(|entry| entry.as_str().to_string()),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn track_subscription_intent(&self, request: &MqttPacketRequest) -> Result<(), String> {
+        let Some(topic) = Self::request_topic_key(request) else {
+            return Ok(());
+        };
+        let mut desired = self
+            .desired_subscriptions
+            .lock()
+            .map_err(|_| "failed to lock MQTT desired subscriptions".to_string())?;
+        match request.packet {
+            MqttWirePacket::V5Subscribe(_) | MqttWirePacket::V3Subscribe(_) => {
+                desired.insert(topic, request.clone());
+            }
+            MqttWirePacket::V5Unsubscribe(_) | MqttWirePacket::V3Unsubscribe(_) => {
+                desired.remove(&topic);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn enqueue_recovery_request(&self, request: MqttPacketRequest) -> Result<(), String> {
+        let reconnect = self.reconnect_config()?;
+        if !reconnect.queue_requests_while_disconnected {
+            return Err("MQTT recovery queue is disabled".to_string());
+        }
+
+        let mut queue = self
+            .recovery_queue
+            .lock()
+            .map_err(|_| "failed to lock MQTT recovery queue".to_string())?;
+        if queue.len() >= reconnect.max_queued_requests as usize {
+            queue.pop_front();
+        }
+        queue.push_back(request);
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    async fn replay_recovery_state_async(&self) -> Result<(), String> {
+        let reconnect = self.reconnect_config()?;
+        let mut session = self.take_session_wait_async().await?;
+        let result = async {
+            if reconnect.replay_subscriptions {
+                let desired = self
+                    .desired_subscriptions
+                    .lock()
+                    .map_err(|_| "failed to lock MQTT desired subscriptions".to_string())?
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for request in desired {
+                    send_packet_request_async(&mut session, &self.dvc.id, request).await?;
+                    let _ = read_from_session_async(
+                        &mut session,
+                        &self.dvc.id,
+                        Some(std::time::Duration::from_millis(250)),
+                    )
+                    .await?;
+                }
+            }
+
+            let queued = {
+                let mut queue = self
+                    .recovery_queue
+                    .lock()
+                    .map_err(|_| "failed to lock MQTT recovery queue".to_string())?;
+                queue.drain(..).collect::<Vec<_>>()
+            };
+            for request in queued {
+                send_packet_request_async(&mut session, &self.dvc.id, request).await?;
+                let _ = read_from_session_async(
+                    &mut session,
+                    &self.dvc.id,
+                    Some(std::time::Duration::from_millis(250)),
+                )
+                .await?;
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+
+        if result.is_ok() {
+            self.restore_session(session)?;
+        } else {
+            self.clear_session()?;
+        }
+        result
     }
 
     #[cfg(feature = "std")]
@@ -413,10 +537,17 @@ impl PubSub for MqttDriver {
     async fn publish(&self, request: Self::PublishRequest) -> Result<(), Self::Error> {
         #[cfg(feature = "std")]
         {
-            self.ensure_connected_async().await?;
+            if let Err(error) = self.ensure_connected_async().await {
+                if self.listener_running.load(Ordering::SeqCst)
+                    && self.enqueue_recovery_request(request.clone()).is_ok()
+                {
+                    return Ok(());
+                }
+                return Err(error);
+            }
             let mut session = self.take_session_wait_async().await?;
             let result = async {
-                send_packet_request_async(&mut session, &self.dvc.id, request).await?;
+                send_packet_request_async(&mut session, &self.dvc.id, request.clone()).await?;
                 let _ = read_from_session_async(
                     &mut session,
                     &self.dvc.id,
@@ -430,6 +561,10 @@ impl PubSub for MqttDriver {
                 self.restore_session(session)?;
             } else {
                 self.clear_session()?;
+                if self.listener_running.load(Ordering::SeqCst) {
+                    let _ = self.enqueue_recovery_request(request);
+                    return Ok(());
+                }
             }
             result?;
             return Ok(());
@@ -449,10 +584,18 @@ impl PubSub for MqttDriver {
     {
         #[cfg(feature = "std")]
         {
-            self.ensure_connected_async().await?;
+            self.track_subscription_intent(&subscription)?;
+            if let Err(error) = self.ensure_connected_async().await {
+                if self.listener_running.load(Ordering::SeqCst)
+                    && self.enqueue_recovery_request(subscription.clone()).is_ok()
+                {
+                    return Ok(());
+                }
+                return Err(error);
+            }
             let mut session = self.take_session_wait_async().await?;
             let result = async {
-                send_packet_request_async(&mut session, &self.dvc.id, subscription).await?;
+                send_packet_request_async(&mut session, &self.dvc.id, subscription.clone()).await?;
                 read_from_session_async(
                     &mut session,
                     &self.dvc.id,
@@ -465,6 +608,10 @@ impl PubSub for MqttDriver {
                 self.restore_session(session)?;
             } else {
                 self.clear_session()?;
+                if self.listener_running.load(Ordering::SeqCst) {
+                    let _ = self.enqueue_recovery_request(subscription);
+                    return Ok(());
+                }
             }
             let messages = result?;
             let mut sink = sink;
@@ -484,10 +631,18 @@ impl PubSub for MqttDriver {
     async fn unsubscribe(&self, subscription: Self::Subscription) -> Result<(), Self::Error> {
         #[cfg(feature = "std")]
         {
-            self.ensure_connected_async().await?;
+            self.track_subscription_intent(&subscription)?;
+            if let Err(error) = self.ensure_connected_async().await {
+                if self.listener_running.load(Ordering::SeqCst)
+                    && self.enqueue_recovery_request(subscription.clone()).is_ok()
+                {
+                    return Ok(());
+                }
+                return Err(error);
+            }
             let mut session = self.take_session_wait_async().await?;
             let result = async {
-                send_packet_request_async(&mut session, &self.dvc.id, subscription).await?;
+                send_packet_request_async(&mut session, &self.dvc.id, subscription.clone()).await?;
                 let _ = read_from_session_async(
                     &mut session,
                     &self.dvc.id,
@@ -501,6 +656,10 @@ impl PubSub for MqttDriver {
                 self.restore_session(session)?;
             } else {
                 self.clear_session()?;
+                if self.listener_running.load(Ordering::SeqCst) {
+                    let _ = self.enqueue_recovery_request(subscription);
+                    return Ok(());
+                }
             }
             result?;
             return Ok(());
@@ -622,6 +781,12 @@ impl EventSource for MqttDriver {
 
                                 match driver.ensure_connected_async().await {
                                     Ok(()) => {
+                                        if let Err(recovery_error) =
+                                            driver.replay_recovery_state_async().await
+                                        {
+                                            error = recovery_error;
+                                            continue;
+                                        }
                                         reconnect_attempt = 0;
                                         if let Ok(mut error_guard) = listener_error.lock() {
                                             *error_guard = None;

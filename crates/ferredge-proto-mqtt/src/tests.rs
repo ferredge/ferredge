@@ -10,10 +10,10 @@ use std::{
 
 use ferredge_core::prelude::{
     ActionEmitter, Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
-    BrokerSubscriptionOptions, Command, Correlation, Device, DeviceEndpoint, DeviceStatus,
-    EventSink, EventSource, HttpEndpointConfig, Intent, Lifecycle, Map, MqttEndpointConfig,
-    MqttProtocolVersion, ProtocolBridge, RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
-    PubSub,
+    BrokerReconnectConfig, BrokerSubscriptionOptions, Command, Correlation, Device,
+    DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent, Lifecycle,
+    Map, MqttEndpointConfig, MqttProtocolVersion, ProtocolBridge, PubSub, RoutedEvent,
+    RoutedMessage, RoutedResult, TransportMeta,
 };
 use mqtt_protocol_core::mqtt;
 use ferredge_proto_http::{attributes::HttpResourceAttributes, HttpCommandRef, HttpDriver, HttpRequest};
@@ -39,6 +39,7 @@ fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> 
             clean_start: true,
             session_expiry_secs: None,
             topic_prefix: Some("ferredge".to_string()),
+            reconnect: BrokerReconnectConfig::default(),
             supported_versions,
         }),
         metadata: None,
@@ -962,6 +963,7 @@ fn mqtt_connect_packet_maps_v5_session_expiry() {
         clean_start: true,
         session_expiry_secs: Some(3600),
         topic_prefix: None,
+        reconnect: BrokerReconnectConfig::default(),
         supported_versions: vec![MqttProtocolVersion::V5_0],
     })
     .expect("connect packet should build");
@@ -1032,6 +1034,7 @@ fn mqtt_listener_keeps_running_with_ping_response() {
             clean_start: true,
             session_expiry_secs: None,
             topic_prefix: None,
+            reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V5_0],
         }),
         metadata: None,
