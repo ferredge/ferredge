@@ -80,6 +80,44 @@ pub struct MqttEndpointConfig {
     pub session_expiry_secs: Option<u32>,
     /// Optional default topic prefix or namespace.
     pub topic_prefix: Option<String>,
+    /// MQTT protocol versions supported by broker or deployment policy.
+    pub supported_versions: Vec<MqttProtocolVersion>,
+}
+
+/// MQTT protocol versions supported by core broker configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MqttProtocolVersion {
+    /// MQTT 3.1.1.
+    V3_1_1,
+    /// MQTT 5.0.
+    V5_0,
+}
+
+impl MqttEndpointConfig {
+    /// Returns highest-preference MQTT version available in config.
+    ///
+    /// Preference order is MQTT 5.0 first, then MQTT 3.1.1. If no explicit
+    /// versions are configured, MQTT 5.0 is assumed by default.
+    pub fn preferred_protocol_version(&self) -> MqttProtocolVersion {
+        if self
+            .supported_versions
+            .contains(&MqttProtocolVersion::V5_0)
+        {
+            MqttProtocolVersion::V5_0
+        } else if self
+            .supported_versions
+            .contains(&MqttProtocolVersion::V3_1_1)
+        {
+            MqttProtocolVersion::V3_1_1
+        } else {
+            MqttProtocolVersion::V5_0
+        }
+    }
+
+    /// Returns whether broker config supports requested MQTT protocol version.
+    pub fn supports_protocol_version(&self, version: MqttProtocolVersion) -> bool {
+        self.supported_versions.is_empty() || self.supported_versions.contains(&version)
+    }
 }
 
 /// HTTP-specific endpoint configuration.
@@ -251,6 +289,7 @@ mod tests {
                 clean_start: true,
                 session_expiry_secs: None,
                 topic_prefix: None,
+                supported_versions: vec![MqttProtocolVersion::V5_0, MqttProtocolVersion::V3_1_1],
             })
             .protocol(),
             DeviceProtocol::MQTT
@@ -278,5 +317,42 @@ mod tests {
             .protocol(),
             DeviceProtocol::CoAP
         );
+    }
+
+    #[test]
+    fn mqtt_endpoint_prefers_v5_then_falls_back_to_v3() {
+        let preferred_v5 = MqttEndpointConfig {
+            broker: "mqtt://broker".to_string(),
+            client_id: "client-v5".to_string(),
+            auth: None,
+            tls: None,
+            keepalive_secs: Some(30),
+            clean_start: true,
+            session_expiry_secs: None,
+            topic_prefix: None,
+            supported_versions: vec![MqttProtocolVersion::V3_1_1, MqttProtocolVersion::V5_0],
+        };
+        assert_eq!(
+            preferred_v5.preferred_protocol_version(),
+            MqttProtocolVersion::V5_0
+        );
+
+        let fallback_v3 = MqttEndpointConfig {
+            broker: "mqtt://broker".to_string(),
+            client_id: "client-v3".to_string(),
+            auth: None,
+            tls: None,
+            keepalive_secs: Some(30),
+            clean_start: true,
+            session_expiry_secs: None,
+            topic_prefix: None,
+            supported_versions: vec![MqttProtocolVersion::V3_1_1],
+        };
+        assert_eq!(
+            fallback_v3.preferred_protocol_version(),
+            MqttProtocolVersion::V3_1_1
+        );
+        assert!(fallback_v3.supports_protocol_version(MqttProtocolVersion::V3_1_1));
+        assert!(!fallback_v3.supports_protocol_version(MqttProtocolVersion::V5_0));
     }
 }
