@@ -2,10 +2,13 @@
 extern crate alloc;
 
 #[cfg(feature = "std")]
-use std::string::String;
+use std::string::{String, ToString};
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec,
+};
 
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
