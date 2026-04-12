@@ -1,0 +1,19 @@
+[package]
+name = "ferredge-proto-mqtt"
+description = "MQTT protocol support for ferredge - device and data aggregator for edge devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["std"]
+std = ["ferredge-core/std", "mqtt_protocol_core/std", "serde/std"]
+
+[dependencies]
+ferredge-core = { workspace = true }
+mqtt_protocol_core = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]

@@ -50,7 +50,10 @@ pub trait EventSource: Send + Sync {
     /// Starts listening and forwards inbound events into provided sink.
     fn start_listening<S>(&self, sink: S) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
-        S: EventSink<Event = Self::Event> + Send;
+        S: EventSink<Event = Self::Event> + Send + 'static;
+
+    /// Stops active listening loop without requiring full driver shutdown.
+    fn stop_listening(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 /// Capability for publish/subscribe protocols such as MQTT.
