@@ -139,6 +139,15 @@ pub(crate) fn packet_request_packet_id(packet: &MqttWirePacket) -> Option<u16> {
 }
 
 #[cfg(feature = "std")]
+fn publish_requires_packet_id(packet: &MqttWirePacket) -> bool {
+    match packet {
+        MqttWirePacket::V5Publish(packet) => packet.qos() != mqtt::packet::Qos::AtMostOnce,
+        MqttWirePacket::V3Publish(packet) => packet.qos() != mqtt::packet::Qos::AtMostOnce,
+        _ => false,
+    }
+}
+
+#[cfg(feature = "std")]
 pub(crate) async fn send_packet_request_async(
     session: &mut MqttClientSession,
     device_id: &str,
@@ -166,29 +175,13 @@ fn assign_runtime_packet_id(
     request: MqttPacketRequest,
 ) -> Result<MqttPacketRequest, String> {
     let maybe_packet_id = match &request.packet {
-        MqttWirePacket::V5Publish(packet) if packet.qos() != mqtt::packet::Qos::AtMostOnce => {
-            if packet.packet_id().is_some() {
-                None
-            } else {
-                Some(
-                    session
-                        .connection
-                        .acquire_packet_id()
-                        .map_err(|e| e.to_string())?,
-                )
-            }
-        }
-        MqttWirePacket::V3Publish(packet) if packet.qos() != mqtt::packet::Qos::AtMostOnce => {
-            if packet.packet_id().is_some() {
-                None
-            } else {
-                Some(
-                    session
-                        .connection
-                        .acquire_packet_id()
-                        .map_err(|e| e.to_string())?,
-                )
-            }
+        packet if publish_requires_packet_id(packet) => {
+            Some(
+                session
+                    .connection
+                    .acquire_packet_id()
+                    .map_err(|e| e.to_string())?,
+            )
         }
         MqttWirePacket::V5Subscribe(_)
         | MqttWirePacket::V3Subscribe(_)
