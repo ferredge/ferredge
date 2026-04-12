@@ -59,15 +59,22 @@ pub struct HttpDriver {
     pub dvc: Device<attributes::HttpResourceAttributes>,
 }
 
-impl HttpDriver {
-    /// Builds a concrete HTTP request from routed command and device resource metadata.
-    pub fn try_request_from_command(
-        &self,
-        command: &Command,
-    ) -> Result<HttpRequest, HttpCommandConversionError> {
-        match &command.intent {
-            Intent::Read { resource } | Intent::Invoke { operation: resource, .. } => self
-                .dvc
+/// Viewer that carries enough context to convert routed command into native HTTP request.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpCommandRef<'a> {
+    /// Driver-side device metadata used to resolve resources.
+    pub device: &'a Device<attributes::HttpResourceAttributes>,
+    /// Routed command to convert.
+    pub command: &'a Command,
+}
+
+impl TryFrom<HttpCommandRef<'_>> for HttpRequest {
+    type Error = HttpCommandConversionError;
+
+    fn try_from(value: HttpCommandRef<'_>) -> Result<Self, Self::Error> {
+        match &value.command.intent {
+            Intent::Read { resource } | Intent::Invoke { operation: resource, .. } => value
+                .device
                 .resources
                 .get(resource)
                 .map(|resource| HttpRequest {
@@ -81,8 +88,8 @@ impl HttpDriver {
                         .unwrap_or_default(),
                 })
                 .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.clone())),
-            Intent::Write { resource, payload } => self
-                .dvc
+            Intent::Write { resource, payload } => value
+                .device
                 .resources
                 .get(resource)
                 .map(|resource| HttpRequest {
@@ -135,5 +142,139 @@ impl RequestResponse for HttpDriver {
     #[cfg(not(feature = "std"))]
     async fn execute(&self, _request: Self::Request) -> Result<Self::Response, Self::Error> {
         Err("HTTP driver not implemented for no_std environment".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferredge_core::prelude::{
+        BrokerAddress, BrokerChannelKind, BrokerMessageOptions, DeviceEndpoint,
+        DeviceResourceAccessPermission, DeviceStatus, HttpEndpointConfig, Intent, Map,
+    };
+
+    fn make_driver() -> HttpDriver {
+        let mut resources = Map::default();
+        resources.insert(
+            "temp".to_string(),
+            DeviceResource {
+                name: "temp".to_string(),
+                resource_attributes: attributes::HttpResourceAttributes {
+                    slug: "/api/temp".to_string(),
+                    method: "GET".to_string(),
+                    headers: Some(vec![("Accept".to_string(), "application/json".to_string())]),
+                },
+                unit: Some("C".to_string()),
+                permission: Some(DeviceResourceAccessPermission::READ),
+            },
+        );
+        resources.insert(
+            "setpoint".to_string(),
+            DeviceResource {
+                name: "setpoint".to_string(),
+                resource_attributes: attributes::HttpResourceAttributes {
+                    slug: "/api/setpoint".to_string(),
+                    method: "POST".to_string(),
+                    headers: None,
+                },
+                unit: Some("C".to_string()),
+                permission: Some(DeviceResourceAccessPermission::WRITE),
+            },
+        );
+
+        HttpDriver {
+            dvc: Device {
+                id: "device-1".to_string(),
+                name: "HTTP Device".to_string(),
+                status: DeviceStatus::Online,
+                endpoint: DeviceEndpoint::http(HttpEndpointConfig {
+                    url: "127.0.0.1:8080".to_string(),
+                }),
+                metadata: None,
+                max_connections: Some(4),
+                resources,
+                message_endpoints: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn read_command_converts_to_http_request() {
+        let driver = make_driver();
+        let command = Command {
+            id: "cmd-1".to_string(),
+            source_device_id: None,
+            target_device_id: "device-1".to_string(),
+            intent: Intent::Read {
+                resource: "temp".to_string(),
+            },
+            correlation: None,
+        };
+
+        let request = HttpRequest::try_from(HttpCommandRef {
+            device: &driver.dvc,
+            command: &command,
+        })
+        .expect("read intent should convert");
+
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/api/temp");
+        assert_eq!(request.body, None);
+        assert_eq!(
+            request.headers,
+            vec![("Accept".to_string(), "application/json".to_string())]
+        );
+    }
+
+    #[test]
+    fn write_command_converts_to_http_request_with_body() {
+        let driver = make_driver();
+        let command = Command {
+            id: "cmd-2".to_string(),
+            source_device_id: None,
+            target_device_id: "device-1".to_string(),
+            intent: Intent::Write {
+                resource: "setpoint".to_string(),
+                payload: b"42".to_vec(),
+            },
+            correlation: None,
+        };
+
+        let request = HttpRequest::try_from(HttpCommandRef {
+            device: &driver.dvc,
+            command: &command,
+        })
+        .expect("write intent should convert");
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/setpoint");
+        assert_eq!(request.body, Some(b"42".to_vec()));
+    }
+
+    #[test]
+    fn broker_send_intent_is_rejected_for_http() {
+        let driver = make_driver();
+        let command = Command {
+            id: "cmd-3".to_string(),
+            source_device_id: None,
+            target_device_id: "device-1".to_string(),
+            intent: Intent::Send {
+                channel: BrokerAddress {
+                    name: "sensors.temp".to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                payload: b"42".to_vec(),
+                options: BrokerMessageOptions::default(),
+            },
+            correlation: None,
+        };
+
+        let error = HttpRequest::try_from(HttpCommandRef {
+            device: &driver.dvc,
+            command: &command,
+        })
+        .expect_err("broker send intent should be unsupported");
+
+        assert_eq!(error, HttpCommandConversionError::UnsupportedIntent);
     }
 }
