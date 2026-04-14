@@ -12,7 +12,8 @@ use ferredge_core::prelude::{
     BrokerSubscriptionProtocolOptions, Command, Correlation, DeliveryGuarantee, Device,
     DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
     MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat,
-    MqttProtocolVersion, MqttSubscriptionOptions, PubSub, RoutedEvent, TransportMeta,
+    MqttProtocolVersion, MqttSubscriptionOptions, MqttWillConfig, PubSub, RoutedEvent,
+    TransportMeta,
 };
 
 use crate::{
@@ -575,6 +576,134 @@ fn mosquitto_v5_complex_property_roundtrip() {
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
     block_on(subscriber.stop()).expect("subscriber should stop cleanly");
+}
+
+#[test]
+fn mosquitto_will_publishes_after_ungraceful_driver_drop() {
+    let broker = MosquittoGuard::start();
+    let will_topic = "ferredge/it/will";
+    let subscriber = ProcessCommand::new("mosquitto_sub")
+        .args([
+            "-h",
+            broker.host().as_str(),
+            "-p",
+            broker.port_string().as_str(),
+            "-V",
+            "mqttv5",
+            "-t",
+            will_topic,
+            "-C",
+            "1",
+            "-W",
+            "5",
+            "-F",
+            "%t|%p|%C|%D|%E|%F|%R|%P",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("mosquitto_sub should spawn");
+    thread::sleep(Duration::from_millis(MOSQUITTO_SUBSCRIBER_STARTUP_MS));
+
+    let mut driver = make_named_driver(
+        broker.broker_url(),
+        "mqtt-will-publisher",
+        "ferredge-mosquitto-will-publisher",
+    );
+    if let DeviceEndpoint::Mqtt(config) = &mut driver.dvc.endpoint {
+        config.will = Some(MqttWillConfig {
+            topic: will_topic.to_string(),
+            payload: b"offline".to_vec(),
+            delivery: Some(DeliveryGuarantee::AtLeastOnce),
+            retain: true,
+            delay_interval_secs: Some(1),
+            payload_format: Some(MqttPayloadFormat::Utf8),
+            message_expiry_interval_secs: Some(30),
+            content_type: Some("text/plain".to_string()),
+            response_topic: Some("ferredge/it/will/reply".to_string()),
+            correlation_data: Some(b"will-corr".to_vec()),
+            user_properties: vec![("source".to_string(), "ferredge".to_string())],
+        });
+    }
+
+    block_on(driver.start()).expect("driver should connect with will configured");
+    thread::sleep(Duration::from_millis(MOSQUITTO_SUBSCRIBER_STARTUP_MS));
+    drop(driver);
+
+    let output = subscriber
+        .wait_with_output()
+        .expect("mosquitto_sub should finish after will publish");
+    assert!(output.status.success(), "will subscriber should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(will_topic), "missing will topic: {stdout}");
+    assert!(stdout.contains("offline"), "missing will payload: {stdout}");
+    assert!(stdout.contains("text/plain"), "missing will content type: {stdout}");
+    assert!(stdout.contains("will-corr"), "missing will correlation data: {stdout}");
+    assert!(stdout.contains("30"), "missing will expiry: {stdout}");
+    assert!(
+        stdout.contains("ferredge/it/will/reply"),
+        "missing will response topic: {stdout}"
+    );
+    assert!(stdout.contains("source"), "missing will user property key: {stdout}");
+    assert!(stdout.contains("ferredge"), "missing will user property value: {stdout}");
+}
+
+#[test]
+fn mosquitto_v5_topic_alias_publish_is_accepted_by_broker() {
+    let broker = MosquittoGuard::start();
+    let publisher = make_named_driver(
+        broker.broker_url(),
+        "mqtt-topic-alias-publisher",
+        "ferredge-mosquitto-topic-alias-publisher",
+    );
+    let subscriber = ProcessCommand::new("mosquitto_sub")
+        .args([
+            "-h",
+            broker.host().as_str(),
+            "-p",
+            broker.port_string().as_str(),
+            "-V",
+            "mqttv5",
+            "-t",
+            "ferredge/it/topic-alias",
+            "-C",
+            "1",
+            "-W",
+            "5",
+            "-F",
+            "%A|%t|%p",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("mosquitto_sub should spawn");
+    thread::sleep(Duration::from_millis(MOSQUITTO_SUBSCRIBER_STARTUP_MS));
+
+    block_on(publisher.start()).expect("publisher should connect");
+    block_on(publisher.publish(publish_packet(
+        &publisher,
+        "pub-topic-alias-1",
+        "ferredge/it/topic-alias",
+        b"alias-ok",
+        BrokerMessageOptions {
+            protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
+                topic_alias: Some(7),
+                ..MqttMessageOptions::default()
+            })),
+            ..BrokerMessageOptions::default()
+        },
+    )))
+    .expect("publisher should publish with topic alias");
+
+    let output = subscriber
+        .wait_with_output()
+        .expect("mosquitto_sub should finish after topic alias publish");
+    assert!(output.status.success(), "topic alias subscriber should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ferredge/it/topic-alias"), "missing topic: {stdout}");
+    assert!(stdout.contains("alias-ok"), "missing payload: {stdout}");
+
+    block_on(publisher.stop()).expect("publisher should stop cleanly");
 }
 
 #[test]
