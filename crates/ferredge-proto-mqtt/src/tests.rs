@@ -21,7 +21,7 @@ use ferredge_proto_http::{attributes::HttpResourceAttributes, HttpCommandRef, Ht
 
 use crate::{
     runtime_stack::StackRuntime,
-    runtime::{build_connect_packet, routed_message_from_packet},
+    runtime::{build_connect_packet, normalize_broker_addr, routed_message_from_packet},
     types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
     MqttDriver, MqttListenerStatus,
 };
@@ -516,6 +516,13 @@ fn mqtt_subscribe_builds_version_specific_packet() {
         }
         other => panic!("expected v5 subscribe packet, got {other:?}"),
     }
+}
+
+#[test]
+fn normalize_broker_addr_adds_default_port_for_bracketed_ipv6() {
+    assert_eq!(normalize_broker_addr("mqtt://[::1]"), "[::1]:1883");
+    assert_eq!(normalize_broker_addr("[::1]"), "[::1]:1883");
+    assert_eq!(normalize_broker_addr("mqtt://[::1]:1884"), "[::1]:1884");
 }
 
 #[test]

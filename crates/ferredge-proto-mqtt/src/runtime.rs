@@ -42,6 +42,13 @@ pub(crate) fn normalize_broker_addr(broker: &str) -> String {
         .strip_prefix("mqtt://")
         .or_else(|| broker.strip_prefix("tcp://"))
         .unwrap_or(broker);
+    if without_scheme.starts_with('[') {
+        return if without_scheme.contains("]:") {
+            without_scheme.to_string()
+        } else {
+            format!("{without_scheme}:1883")
+        };
+    }
     if without_scheme.contains(':') {
         without_scheme.to_string()
     } else {
