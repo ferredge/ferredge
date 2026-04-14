@@ -33,6 +33,10 @@ mod runtime_stack {
     };
 }
 
+// compile error when no runtime stack feature is enabled
+#[cfg(not(any(feature = "tokio-runtime", feature = "async-std-runtime")))]
+compile_error!("ferredge-proto-mqtt requires a supported runtime stack feature to be enabled");
+
 use runtime_stack::{RuntimeTask, StackNet, StackRuntime};
 
 type RuntimeSender<T> = <StackRuntime as AsyncRuntime>::Sender<T>;
