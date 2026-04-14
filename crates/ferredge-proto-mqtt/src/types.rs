@@ -204,20 +204,14 @@ pub struct MqttAuthResponse {
 /// Provider for MQTT v5 enhanced authentication steps.
 pub trait MqttAuthProvider: Send + Sync {
     /// Builds next auth response for broker challenge.
-    fn respond(
-        &self,
-        challenge: MqttAuthChallenge,
-    ) -> Result<Option<MqttAuthResponse>, String>;
+    fn respond(&self, challenge: MqttAuthChallenge) -> Result<Option<MqttAuthResponse>, String>;
 }
 
 impl<F> MqttAuthProvider for F
 where
     F: Fn(MqttAuthChallenge) -> Result<Option<MqttAuthResponse>, String> + Send + Sync,
 {
-    fn respond(
-        &self,
-        challenge: MqttAuthChallenge,
-    ) -> Result<Option<MqttAuthResponse>, String> {
+    fn respond(&self, challenge: MqttAuthChallenge) -> Result<Option<MqttAuthResponse>, String> {
         self(challenge)
     }
 }

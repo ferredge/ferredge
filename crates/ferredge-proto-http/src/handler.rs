@@ -1,8 +1,8 @@
 extern crate alloc;
 
-use alloc::vec::Vec;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use ferredge_core::prelude::{AsyncNet, AsyncRuntime, AsyncSocket, NetError};
 
 use crate::HttpRequest;
@@ -92,7 +92,9 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, anyhow::Error> {
 
     if authority.starts_with('[') {
         let Some(bracket_end) = authority.find(']') else {
-            return Err(anyhow::anyhow!("HTTP endpoint has malformed IPv6 authority"));
+            return Err(anyhow::anyhow!(
+                "HTTP endpoint has malformed IPv6 authority"
+            ));
         };
 
         let suffix = &authority[bracket_end + 1..];
@@ -105,7 +107,9 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, anyhow::Error> {
                 connect_target: authority.to_string(),
                 host_header: authority.to_string(),
             }),
-            _ => Err(anyhow::anyhow!("HTTP endpoint has malformed IPv6 authority")),
+            _ => Err(anyhow::anyhow!(
+                "HTTP endpoint has malformed IPv6 authority"
+            )),
         };
     }
 

@@ -176,14 +176,9 @@ pub enum BrokerChannelKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Intent {
     /// Reads current state from named resource.
-    Read {
-        resource: String,
-    },
+    Read { resource: String },
     /// Writes payload bytes to named resource.
-    Write {
-        resource: String,
-        payload: Vec<u8>,
-    },
+    Write { resource: String, payload: Vec<u8> },
     /// Invokes operation with optional argument payload.
     Invoke {
         operation: String,
@@ -201,9 +196,7 @@ pub enum Intent {
         options: BrokerSubscriptionOptions,
     },
     /// Removes prior subscription for channel.
-    Unsubscribe {
-        channel: BrokerAddress,
-    },
+    Unsubscribe { channel: BrokerAddress },
 }
 
 /// Represents a protocol-neutral command sent to a device or the core.

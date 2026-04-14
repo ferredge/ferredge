@@ -33,22 +33,22 @@ impl TryFrom<&Command> for MqttPublishRequest {
                     None => MqttMessageOptions::default(),
                 };
                 Ok(Self {
-                command_id: command.id.clone(),
-                channel: channel.clone(),
-                payload: payload.clone(),
-                delivery: options.delivery,
-                retain: mqtt.retain,
-                payload_format: mqtt.payload_format,
-                content_type: mqtt.content_type,
-                message_expiry_interval_secs: mqtt.message_expiry_interval_secs,
-                topic_alias: mqtt.topic_alias,
-                headers: options.headers.clone(),
-                user_properties: mqtt.user_properties,
-                reply_to: options.reply_to.clone(),
-                response_topic: mqtt.response_topic,
-                correlation_id: options.correlation_id.clone(),
-                correlation_data: mqtt.correlation_data,
-            })
+                    command_id: command.id.clone(),
+                    channel: channel.clone(),
+                    payload: payload.clone(),
+                    delivery: options.delivery,
+                    retain: mqtt.retain,
+                    payload_format: mqtt.payload_format,
+                    content_type: mqtt.content_type,
+                    message_expiry_interval_secs: mqtt.message_expiry_interval_secs,
+                    topic_alias: mqtt.topic_alias,
+                    headers: options.headers.clone(),
+                    user_properties: mqtt.user_properties,
+                    reply_to: options.reply_to.clone(),
+                    response_topic: mqtt.response_topic,
+                    correlation_id: options.correlation_id.clone(),
+                    correlation_data: mqtt.correlation_data,
+                })
             }
             _ => Err(MqttCommandConversionError::UnsupportedIntent),
         }
@@ -66,17 +66,17 @@ impl TryFrom<&Command> for MqttSubscriptionRequest {
                     None => MqttSubscriptionOptions::default(),
                 };
                 Ok(Self {
-                command_id: command.id.clone(),
-                channel: channel.clone(),
-                delivery: options.delivery,
-                durable_name: options.durable_name.clone(),
-                shared_group: options.shared_group.clone(),
-                no_local: mqtt.no_local,
-                retain_as_published: mqtt.retain_as_published,
-                retain_handling: mqtt.retain_handling,
-                subscription_identifier: mqtt.subscription_identifier,
-                user_properties: mqtt.user_properties,
-            })
+                    command_id: command.id.clone(),
+                    channel: channel.clone(),
+                    delivery: options.delivery,
+                    durable_name: options.durable_name.clone(),
+                    shared_group: options.shared_group.clone(),
+                    no_local: mqtt.no_local,
+                    retain_as_published: mqtt.retain_as_published,
+                    retain_handling: mqtt.retain_handling,
+                    subscription_identifier: mqtt.subscription_identifier,
+                    user_properties: mqtt.user_properties,
+                })
             }
             Intent::Unsubscribe { channel } => Ok(Self {
                 command_id: command.id.clone(),
@@ -184,14 +184,15 @@ pub fn build_subscribe_packet(
 ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
     let subscription = MqttSubscriptionRequest::try_from(command)?;
     let topic = mqtt_topic_from_subscription(&subscription)?;
-    let mut sub_opts = mqtt::packet::SubOpts::new().set_qos(qos_from_delivery(subscription.delivery));
+    let mut sub_opts =
+        mqtt::packet::SubOpts::new().set_qos(qos_from_delivery(subscription.delivery));
     sub_opts = sub_opts.set_nl(subscription.no_local);
     sub_opts = sub_opts.set_rap(subscription.retain_as_published);
     if let Some(retain_handling) = subscription.retain_handling {
         sub_opts = sub_opts.set_rh(retain_handling_from_core(retain_handling));
     }
     let entry = mqtt::packet::SubEntry::new(topic.as_str(), sub_opts)
-    .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?;
+        .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?;
 
     match version {
         MqttProtocolVersion::V5_0 => {
@@ -287,7 +288,11 @@ pub fn build_v5_publish_props(
         ));
     }
 
-    if let Some(reply_to) = publish.response_topic.as_ref().or(publish.reply_to.as_ref()) {
+    if let Some(reply_to) = publish
+        .response_topic
+        .as_ref()
+        .or(publish.reply_to.as_ref())
+    {
         props.push(mqtt::packet::Property::ResponseTopic(
             mqtt::packet::ResponseTopic::new(reply_to.as_str())
                 .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
@@ -394,17 +399,13 @@ fn mqtt_topic_from_subscription(
     }
 }
 
-fn retain_handling_from_core(
-    value: MqttRetainHandling,
-) -> mqtt::packet::RetainHandling {
+fn retain_handling_from_core(value: MqttRetainHandling) -> mqtt::packet::RetainHandling {
     match value {
         MqttRetainHandling::SendRetained => mqtt::packet::RetainHandling::SendRetained,
         MqttRetainHandling::SendRetainedIfNotExists => {
             mqtt::packet::RetainHandling::SendRetainedIfNotExists
         }
-        MqttRetainHandling::DoNotSendRetained => {
-            mqtt::packet::RetainHandling::DoNotSendRetained
-        }
+        MqttRetainHandling::DoNotSendRetained => mqtt::packet::RetainHandling::DoNotSendRetained,
     }
 }
 
@@ -440,7 +441,8 @@ fn validate_v3_subscribe_support(
         || subscription.durable_name.is_some()
     {
         return Err(MqttCommandConversionError::InvalidCommand(
-            "MQTT 3.1.1 subscribe does not support requested MQTT v5 subscription options".to_string(),
+            "MQTT 3.1.1 subscribe does not support requested MQTT v5 subscription options"
+                .to_string(),
         ));
     }
     Ok(())

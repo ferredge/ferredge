@@ -2,7 +2,10 @@
 
 extern crate alloc;
 
-use alloc::{string::{String, ToString}, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use ferredge_core::prelude::*;
 
@@ -22,7 +25,9 @@ mod runtime_stack {
 }
 #[cfg(feature = "async-std-runtime")]
 mod runtime_stack {
-    pub use ferredge_runtime_async_std::{AsyncStdNet as StackNet, AsyncStdRuntime as StackRuntime};
+    pub use ferredge_runtime_async_std::{
+        AsyncStdNet as StackNet, AsyncStdRuntime as StackRuntime,
+    };
 }
 #[cfg(feature = "embassy-runtime")]
 mod runtime_stack {
@@ -140,7 +145,11 @@ impl TryFrom<HttpCommandRef<'_>> for HttpRequest {
 
     fn try_from(value: HttpCommandRef<'_>) -> Result<Self, Self::Error> {
         match &value.command.intent {
-            Intent::Read { resource } | Intent::Invoke { operation: resource, .. } => value
+            Intent::Read { resource }
+            | Intent::Invoke {
+                operation: resource,
+                ..
+            } => value
                 .device
                 .resources
                 .get(resource)
@@ -255,17 +264,17 @@ mod tests {
         );
 
         HttpDriver::new(Device {
-                id: "device-1".to_string(),
-                name: "HTTP Device".to_string(),
-                status: DeviceStatus::Online,
-                endpoint: DeviceEndpoint::http(HttpEndpointConfig {
-                    url: "127.0.0.1:8080".to_string(),
-                }),
-                metadata: None,
-                max_connections: Some(4),
-                resources,
-                message_endpoints: Vec::new(),
-            })
+            id: "device-1".to_string(),
+            name: "HTTP Device".to_string(),
+            status: DeviceStatus::Online,
+            endpoint: DeviceEndpoint::http(HttpEndpointConfig {
+                url: "127.0.0.1:8080".to_string(),
+            }),
+            metadata: None,
+            max_connections: Some(4),
+            resources,
+            message_endpoints: Vec::new(),
+        })
     }
 
     #[test]

@@ -137,7 +137,10 @@ impl Default for BrokerReconnectConfig {
 impl BrokerReconnectConfig {
     /// Returns whether the given 1-based reconnect attempt is permitted.
     pub fn allows_attempt(&self, attempt: u32) -> bool {
-        self.enabled && self.max_attempts.is_none_or(|max_attempts| attempt <= max_attempts)
+        self.enabled
+            && self
+                .max_attempts
+                .is_none_or(|max_attempts| attempt <= max_attempts)
     }
 
     /// Returns the backoff delay in milliseconds for the given 1-based reconnect attempt.
@@ -273,10 +276,7 @@ impl MqttEndpointConfig {
     /// Preference order is MQTT 5.0 first, then MQTT 3.1.1. If no explicit
     /// versions are configured, MQTT 5.0 is assumed by default.
     pub fn preferred_protocol_version(&self) -> MqttProtocolVersion {
-        if self
-            .supported_versions
-            .contains(&MqttProtocolVersion::V5_0)
-        {
+        if self.supported_versions.contains(&MqttProtocolVersion::V5_0) {
             MqttProtocolVersion::V5_0
         } else if self
             .supported_versions
@@ -375,7 +375,10 @@ impl DeviceEndpoint {
 }
 
 /// Marker trait for protocol-specific device resource metadata.
-pub trait DeviceResourceAttributes: Clone + core::fmt::Debug + for<'de> Deserialize<'de> + Serialize {}
+pub trait DeviceResourceAttributes:
+    Clone + core::fmt::Debug + for<'de> Deserialize<'de> + Serialize
+{
+}
 
 bitflags! {
     /// Allowed operations for device resource or channel descriptors.

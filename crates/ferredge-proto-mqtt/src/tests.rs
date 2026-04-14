@@ -9,25 +9,27 @@ use std::{
 };
 
 use ferredge_core::prelude::{
-    ActionEmitter, Address, AsyncRuntime, BrokerAddress, BrokerChannelKind,
-    BrokerMessageOptions, BrokerMessageProtocolOptions, BrokerReconnectConfig,
-    BrokerSubscriptionOptions, BrokerSubscriptionProtocolOptions, ChannelReceiver, Command,
-    Correlation, DeliveryGuarantee, Device, DeviceEndpoint, DeviceStatus, EventSink,
-    EventSource, HttpEndpointConfig, Intent, Lifecycle, Map, MqttConnectProperties,
-    MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat, MqttProtocolVersion,
-    MqttRetainHandling, MqttSubscriptionOptions, MqttWillConfig, ProtocolBridge, PubSub,
-    RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
+    ActionEmitter, Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
+    BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
+    BrokerSubscriptionProtocolOptions, ChannelReceiver, Command, Correlation, DeliveryGuarantee,
+    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent,
+    Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions,
+    MqttPayloadFormat, MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions,
+    MqttWillConfig, ProtocolBridge, PubSub, RoutedEvent, RoutedMessage, RoutedResult,
+    TransportMeta,
+};
+use ferredge_proto_http::{
+    HttpCommandRef, HttpDriver, HttpRequest, attributes::HttpResourceAttributes,
 };
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
-use ferredge_proto_http::{attributes::HttpResourceAttributes, HttpCommandRef, HttpDriver, HttpRequest};
 
 use crate::{
-    runtime_stack::StackRuntime,
-    runtime::{build_connect_packet, normalize_broker_addr, routed_message_from_packet},
-    types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthResponse, MqttAuthStage, MqttDriver,
     MqttListenerStatus,
+    runtime::{build_connect_packet, normalize_broker_addr, routed_message_from_packet},
+    runtime_stack::StackRuntime,
+    types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
 };
 
 type RuntimeReceiver<T> = <StackRuntime as AsyncRuntime>::Receiver<T>;
@@ -105,7 +107,9 @@ fn spawn_test_broker_v5_with_publishes(
     publish_delay: Duration,
 ) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
-    let addr = listener.local_addr().expect("test broker should have local addr");
+    let addr = listener
+        .local_addr()
+        .expect("test broker should have local addr");
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
     let handle = thread::spawn(move || {
@@ -160,7 +164,9 @@ fn spawn_reconnecting_test_broker_v5(
     publish_after_reconnect: mqtt::packet::v5_0::Publish,
 ) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
-    let addr = listener.local_addr().expect("test broker should have local addr");
+    let addr = listener
+        .local_addr()
+        .expect("test broker should have local addr");
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
     let handle = thread::spawn(move || {
@@ -216,7 +222,9 @@ fn spawn_reconnecting_test_broker_v5(
 
 fn spawn_keepalive_test_broker_v5() -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
-    let addr = listener.local_addr().expect("test broker should have local addr");
+    let addr = listener
+        .local_addr()
+        .expect("test broker should have local addr");
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
     let handle = thread::spawn(move || {
@@ -371,20 +379,22 @@ impl ProtocolBridge for TestBridge {
         E: ActionEmitter + Send,
     {
         if let Intent::Read { resource } = &command.intent {
-            emitter.emit(RoutedMessage::Command(Command {
-                id: format!("{}-mqtt", command.id),
-                source_device_id: Some(command.target_device_id.clone()),
-                target_device_id: "mqtt-device-1".to_string(),
-                intent: Intent::Send {
-                    channel: BrokerAddress {
-                        name: format!("requests/{resource}"),
-                        kind: Some(BrokerChannelKind::Topic),
+            emitter
+                .emit(RoutedMessage::Command(Command {
+                    id: format!("{}-mqtt", command.id),
+                    source_device_id: Some(command.target_device_id.clone()),
+                    target_device_id: "mqtt-device-1".to_string(),
+                    intent: Intent::Send {
+                        channel: BrokerAddress {
+                            name: format!("requests/{resource}"),
+                            kind: Some(BrokerChannelKind::Topic),
+                        },
+                        payload: Vec::new(),
+                        options: BrokerMessageOptions::default(),
                     },
-                    payload: Vec::new(),
-                    options: BrokerMessageOptions::default(),
-                },
-                correlation: command.correlation.clone(),
-            })).map_err(|_| ())?;
+                    correlation: command.correlation.clone(),
+                }))
+                .map_err(|_| ())?;
         }
         Ok(())
     }
@@ -396,25 +406,33 @@ impl ProtocolBridge for TestBridge {
         if let Address::Channel(channel) = &event.address
             && channel == "sensors/temp"
         {
-            emitter.emit(RoutedMessage::Command(Command {
-                id: "bridge-http-write".to_string(),
-                source_device_id: Some(event.source.device_id.clone()),
-                target_device_id: "http-device-1".to_string(),
-                intent: Intent::Write {
-                    resource: "setpoint".to_string(),
-                    payload: event.payload.clone(),
-                },
-                correlation: event.correlation.clone(),
-            })).map_err(|_| ())?;
+            emitter
+                .emit(RoutedMessage::Command(Command {
+                    id: "bridge-http-write".to_string(),
+                    source_device_id: Some(event.source.device_id.clone()),
+                    target_device_id: "http-device-1".to_string(),
+                    intent: Intent::Write {
+                        resource: "setpoint".to_string(),
+                        payload: event.payload.clone(),
+                    },
+                    correlation: event.correlation.clone(),
+                }))
+                .map_err(|_| ())?;
         }
         Ok(())
     }
 
-    async fn bridge_result<E>(&self, result: &RoutedResult, emitter: &mut E) -> Result<(), Self::Error>
+    async fn bridge_result<E>(
+        &self,
+        result: &RoutedResult,
+        emitter: &mut E,
+    ) -> Result<(), Self::Error>
     where
         E: ActionEmitter + Send,
     {
-        emitter.emit(RoutedMessage::Result(result.clone())).map_err(|_| ())
+        emitter
+            .emit(RoutedMessage::Result(result.clone()))
+            .map_err(|_| ())
     }
 }
 
@@ -435,17 +453,17 @@ fn make_http_driver() -> HttpDriver {
     );
 
     HttpDriver::new(Device {
-            id: "http-device-1".to_string(),
-            name: "HTTP Device".to_string(),
-            status: DeviceStatus::Online,
-            endpoint: DeviceEndpoint::http(HttpEndpointConfig {
-                url: "127.0.0.1:8080".to_string(),
-            }),
-            metadata: None,
-            max_connections: Some(4),
-            resources,
-            message_endpoints: Vec::new(),
-        })
+        id: "http-device-1".to_string(),
+        name: "HTTP Device".to_string(),
+        status: DeviceStatus::Online,
+        endpoint: DeviceEndpoint::http(HttpEndpointConfig {
+            url: "127.0.0.1:8080".to_string(),
+        }),
+        metadata: None,
+        max_connections: Some(4),
+        resources,
+        message_endpoints: Vec::new(),
+    })
 }
 
 #[test]
@@ -484,7 +502,10 @@ fn mqtt_send_prefers_v5_packet_when_available() {
 
 #[test]
 fn mqtt_send_falls_back_to_v3_when_v5_not_available() {
-    let driver = make_driver("mqtt://broker".to_string(), vec![MqttProtocolVersion::V3_1_1]);
+    let driver = make_driver(
+        "mqtt://broker".to_string(),
+        vec![MqttProtocolVersion::V3_1_1],
+    );
     let command = ferredge_core::prelude::Command {
         id: "cmd-2".to_string(),
         source_device_id: None,
@@ -551,7 +572,10 @@ fn mqtt_subscribe_builds_version_specific_packet() {
     match packet.packet {
         MqttWirePacket::V5Subscribe(packet) => {
             let mut saw_subscription_identifier = false;
-            assert_eq!(packet.entries()[0].topic_filter(), "$share/shared-a/alerts/#");
+            assert_eq!(
+                packet.entries()[0].topic_filter(),
+                "$share/shared-a/alerts/#"
+            );
             assert!(packet.entries()[0].sub_opts().nl());
             assert!(packet.entries()[0].sub_opts().rap());
             assert_eq!(
@@ -872,7 +896,10 @@ fn inbound_reply_publish_converts_to_routed_result_when_correlation_matches() {
     match message {
         RoutedMessage::Result(result) => {
             assert_eq!(result.result.command_id, "cmd-77");
-            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Completed);
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Completed
+            );
             assert_eq!(result.result.payload, Some(b"done".to_vec()));
             assert_eq!(
                 result.result.correlation,
@@ -905,7 +932,10 @@ fn v5_puback_failure_converts_to_rejected_result_with_reason_codes() {
     match message {
         RoutedMessage::Result(result) => {
             assert_eq!(result.result.command_id, "cmd-42");
-            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Rejected);
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Rejected
+            );
             assert_eq!(result.result.error, Some("QuotaExceeded".to_string()));
             match result.transport {
                 Some(TransportMeta::Mqtt(meta)) => {
@@ -941,7 +971,10 @@ fn v5_suback_partial_failure_converts_to_rejected_result_with_reason_codes() {
     match message {
         RoutedMessage::Result(result) => {
             assert_eq!(result.result.command_id, "cmd-sub-7");
-            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Rejected);
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Rejected
+            );
             assert_eq!(result.result.error, Some("NotAuthorized".to_string()));
             match result.transport {
                 Some(TransportMeta::Mqtt(meta)) => {
@@ -975,7 +1008,10 @@ fn v5_disconnect_failure_converts_to_rejected_transport_result() {
     match message {
         RoutedMessage::Result(result) => {
             assert_eq!(result.result.command_id, "__mqtt_disconnect__");
-            assert_eq!(result.result.state, ferredge_core::prelude::DeliveryState::Rejected);
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Rejected
+            );
             assert_eq!(result.result.error, Some("ServerBusy".to_string()));
             match result.transport {
                 Some(TransportMeta::Mqtt(meta)) => {
@@ -993,7 +1029,9 @@ fn mqtt_listener_status_starts_stopped() {
     let driver = make_default_driver();
 
     assert_eq!(
-        driver.listener_status().expect("listener status should be readable"),
+        driver
+            .listener_status()
+            .expect("listener status should be readable"),
         MqttListenerStatus::Stopped
     );
     assert_eq!(
@@ -1012,7 +1050,9 @@ fn mqtt_listener_error_can_be_cleared_without_runtime() {
         .clear_listener_error()
         .expect("clearing empty listener error should succeed");
     assert_eq!(
-        driver.listener_status().expect("listener status should be readable"),
+        driver
+            .listener_status()
+            .expect("listener status should be readable"),
         MqttListenerStatus::Stopped
     );
 }
@@ -1060,25 +1100,37 @@ fn mqtt_listener_can_start_stop_and_restart() {
 
     block_on(driver.start_listening(NoopSink)).expect("listener should start");
     assert_eq!(
-        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Running)),
+        wait_for_status(&mut rx, |status| matches!(
+            status,
+            MqttListenerStatus::Running
+        )),
         MqttListenerStatus::Running
     );
 
     block_on(driver.stop_listening()).expect("listener should stop");
     assert_eq!(
-        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Stopped)),
+        wait_for_status(&mut rx, |status| matches!(
+            status,
+            MqttListenerStatus::Stopped
+        )),
         MqttListenerStatus::Stopped
     );
 
     block_on(driver.start_listening(NoopSink)).expect("listener should restart");
     assert_eq!(
-        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Running)),
+        wait_for_status(&mut rx, |status| matches!(
+            status,
+            MqttListenerStatus::Running
+        )),
         MqttListenerStatus::Running
     );
 
     block_on(driver.stop()).expect("driver should stop cleanly");
     assert!(matches!(
-        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Stopped)),
+        wait_for_status(&mut rx, |status| matches!(
+            status,
+            MqttListenerStatus::Stopped
+        )),
         MqttListenerStatus::Stopped
     ));
 
@@ -1102,8 +1154,9 @@ fn mqtt_listener_reports_failed_when_sink_rejects_event() {
     let _ = block_on(rx.recv()).expect("initial listener status should be sent");
 
     block_on(driver.start_listening(FailOnEventSink)).expect("listener should start");
-    let failed =
-        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Failed(_)));
+    let failed = wait_for_status(&mut rx, |status| {
+        matches!(status, MqttListenerStatus::Failed(_))
+    });
     assert_eq!(
         failed,
         MqttListenerStatus::Failed("failed to forward MQTT event to sink".to_string())
@@ -1138,7 +1191,8 @@ fn bridge_can_translate_mqtt_event_into_http_request() {
     };
 
     block_on(bridge.bridge_event(&event, &mut emitter)).expect("bridge should succeed");
-    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command") else {
+    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command")
+    else {
         panic!("expected bridged command");
     };
     let request = HttpRequest::try_from(HttpCommandRef {
@@ -1168,7 +1222,8 @@ fn bridge_can_translate_http_command_into_mqtt_publish() {
     };
 
     block_on(bridge.bridge_command(&command, &mut emitter)).expect("bridge should succeed");
-    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command") else {
+    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command")
+    else {
         panic!("expected bridged command");
     };
     let packet = MqttPacketRequest::try_from(MqttCommandRef {
@@ -1206,10 +1261,12 @@ fn mqtt_connect_packet_maps_v5_session_expiry() {
     let mqtt::packet::Packet::V5_0Connect(packet) = packet else {
         panic!("expected v5 connect packet");
     };
-    let saw_session_expiry = packet.props().iter().any(|prop| matches!(
-        prop,
-        mqtt::packet::Property::SessionExpiryInterval(value) if value.val() == 3600
-    ));
+    let saw_session_expiry = packet.props().iter().any(|prop| {
+        matches!(
+            prop,
+            mqtt::packet::Property::SessionExpiryInterval(value) if value.val() == 3600
+        )
+    });
     assert!(saw_session_expiry);
 }
 
@@ -1282,7 +1339,10 @@ fn mqtt_listener_reconnects_after_broker_disconnect() {
         if !events.lock().expect("events lock").is_empty() {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "expected event after reconnect");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected event after reconnect"
+        );
         thread::sleep(Duration::from_millis(TEST_EVENT_WAIT_POLL_MS));
     }
 
@@ -1401,8 +1461,7 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
     block_on(driver.start_listening(NoopSink)).expect("listener should start");
     block_on(driver.subscribe(subscribe_packet, NoopSink))
         .expect("same driver should subscribe while listening");
-    block_on(driver.publish(publish_packet))
-        .expect("same driver should publish while listening");
+    block_on(driver.publish(publish_packet)).expect("same driver should publish while listening");
     block_on(driver.unsubscribe(unsubscribe_packet))
         .expect("same driver should unsubscribe while listening");
 
@@ -1419,7 +1478,9 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
 #[test]
 fn mqtt_connect_auth_roundtrip_uses_handler_response() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
-    let addr = listener.local_addr().expect("test broker should have local addr");
+    let addr = listener
+        .local_addr()
+        .expect("test broker should have local addr");
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
     let broker_handle = thread::spawn(move || {
@@ -1428,7 +1489,8 @@ fn mqtt_connect_auth_roundtrip_uses_handler_response() {
             .set_read_timeout(Some(Duration::from_millis(TEST_BROKER_READ_TIMEOUT_MS)))
             .expect("broker should set read timeout");
 
-        let mut connection = mqtt::Connection::<mqtt::role::Server>::new(mqtt::Version::Undetermined);
+        let mut connection =
+            mqtt::Connection::<mqtt::role::Server>::new(mqtt::Version::Undetermined);
 
         let connect = recv_server_packet(&mut stream, &mut connection);
         match connect {
@@ -1603,7 +1665,9 @@ fn mqtt_connect_auth_roundtrip_uses_handler_response() {
 #[test]
 fn mqtt_listener_handles_reauthentication_auth_packets() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
-    let addr = listener.local_addr().expect("test broker should have local addr");
+    let addr = listener
+        .local_addr()
+        .expect("test broker should have local addr");
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let (reauth_seen_tx, reauth_seen_rx) = mpsc::channel();
 
@@ -1613,7 +1677,8 @@ fn mqtt_listener_handles_reauthentication_auth_packets() {
             .set_read_timeout(Some(Duration::from_millis(TEST_BROKER_READ_TIMEOUT_MS)))
             .expect("broker should set read timeout");
 
-        let mut connection = mqtt::Connection::<mqtt::role::Server>::new(mqtt::Version::Undetermined);
+        let mut connection =
+            mqtt::Connection::<mqtt::role::Server>::new(mqtt::Version::Undetermined);
 
         let connect = recv_server_packet(&mut stream, &mut connection);
         assert!(matches!(connect, mqtt::packet::Packet::V5_0Connect(_)));

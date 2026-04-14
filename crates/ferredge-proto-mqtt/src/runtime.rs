@@ -1,25 +1,20 @@
-use std::{
-    collections::HashMap,
-    string::String,
-    time::Duration,
-    vec::Vec,
-};
+use std::{collections::HashMap, string::String, time::Duration, vec::Vec};
 
-use ferredge_core::prelude::*;
 use ferredge_core::prelude::RuntimeInstant as RuntimeInstantExt;
-use runtime_stack::StackSocket;
+use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
+use runtime_stack::StackSocket;
 
 use crate::convert::qos_from_delivery;
-use crate::types::{MqttPacketRequest, MqttWirePacket};
-use crate::{
-    MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
-};
 #[cfg(feature = "tokio-runtime")]
 use crate::runtime_stack;
 #[cfg(feature = "async-std-runtime")]
 use crate::runtime_stack;
+use crate::types::{MqttPacketRequest, MqttWirePacket};
+use crate::{
+    MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
+};
 
 type RuntimeMutex<T> = <runtime_stack::StackRuntime as AsyncRuntime>::Mutex<T>;
 type StackInstant = <runtime_stack::StackRuntime as AsyncRuntime>::Instant;
@@ -250,14 +245,12 @@ fn assign_runtime_packet_id(
     request: MqttPacketRequest,
 ) -> Result<MqttPacketRequest, String> {
     let maybe_packet_id = match &request.packet {
-        packet if publish_requires_packet_id(packet) => {
-            Some(
-                session
-                    .connection
-                    .acquire_packet_id()
-                    .map_err(|e| e.to_string())?,
-            )
-        }
+        packet if publish_requires_packet_id(packet) => Some(
+            session
+                .connection
+                .acquire_packet_id()
+                .map_err(|e| e.to_string())?,
+        ),
         MqttWirePacket::V5Subscribe(_)
         | MqttWirePacket::V3Subscribe(_)
         | MqttWirePacket::V5Unsubscribe(_)
@@ -277,7 +270,10 @@ fn assign_runtime_packet_id(
     }
 }
 
-fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<MqttPacketRequest, String> {
+fn rebuild_with_packet_id(
+    request: MqttPacketRequest,
+    packet_id: u16,
+) -> Result<MqttPacketRequest, String> {
     let command_id = request.command_id;
     let packet = match request.packet {
         MqttWirePacket::V5Publish(packet) => {
@@ -325,7 +321,11 @@ fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<
             MqttWirePacket::V3Subscribe(rebuilt)
         }
         MqttWirePacket::V5Unsubscribe(packet) => {
-            let entries: Vec<String> = packet.entries().iter().map(|entry| entry.as_str().to_string()).collect();
+            let entries: Vec<String> = packet
+                .entries()
+                .iter()
+                .map(|entry| entry.as_str().to_string())
+                .collect();
             let entry_refs: Vec<&str> = entries.iter().map(String::as_str).collect();
             let rebuilt = mqtt::packet::v5_0::Unsubscribe::builder()
                 .packet_id(packet_id)
@@ -337,7 +337,11 @@ fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<
             MqttWirePacket::V5Unsubscribe(rebuilt)
         }
         MqttWirePacket::V3Unsubscribe(packet) => {
-            let entries: Vec<String> = packet.entries().iter().map(|entry| entry.as_str().to_string()).collect();
+            let entries: Vec<String> = packet
+                .entries()
+                .iter()
+                .map(|entry| entry.as_str().to_string())
+                .collect();
             let entry_refs: Vec<&str> = entries.iter().map(String::as_str).collect();
             let rebuilt = mqtt::packet::v3_1_1::Unsubscribe::builder()
                 .packet_id(packet_id)
@@ -466,7 +470,10 @@ async fn process_incoming_auth_async(
         .map_err(|_| "failed to lock MQTT auth handler".to_string())?
         .clone();
     let Some(handler) = handler else {
-        return Err("mqtt broker requested enhanced authentication but no auth handler is configured".to_string());
+        return Err(
+            "mqtt broker requested enhanced authentication but no auth handler is configured"
+                .to_string(),
+        );
     };
     let Some(response) = handler.respond(challenge)? else {
         return Err("mqtt auth handler returned no response for broker challenge".to_string());
@@ -497,7 +504,9 @@ async fn process_outbound_auth_events_async(
                 session.last_activity = runtime.now();
             }
             mqtt::connection::Event::NotifyError(error) => {
-                return Err(format!("mqtt protocol error during auth exchange: {error:?}"));
+                return Err(format!(
+                    "mqtt protocol error during auth exchange: {error:?}"
+                ));
             }
             mqtt::connection::Event::RequestClose => {
                 return Err("mqtt auth exchange requested close".to_string());
@@ -586,7 +595,8 @@ fn build_auth_packet(
     }
     if let Some(authentication_data) = response.authentication_data {
         props.push(mqtt::packet::Property::AuthenticationData(
-            mqtt::packet::AuthenticationData::new(authentication_data).map_err(|e| e.to_string())?,
+            mqtt::packet::AuthenticationData::new(authentication_data)
+                .map_err(|e| e.to_string())?,
         ));
     }
     if let Some(reason_string) = &response.reason_string {
@@ -622,16 +632,16 @@ pub(crate) async fn disconnect_session(
     let events = match session.protocol_version {
         MqttProtocolVersion::V5_0 => {
             let disconnect = mqtt::packet::v5_0::Disconnect::builder()
-            .reason_code(mqtt::result_code::DisconnectReasonCode::NormalDisconnection)
-            .props(mqtt::packet::Properties::new())
-            .build()
-            .map_err(|e| e.to_string())?;
+                .reason_code(mqtt::result_code::DisconnectReasonCode::NormalDisconnection)
+                .props(mqtt::packet::Properties::new())
+                .build()
+                .map_err(|e| e.to_string())?;
             session.connection.checked_send(disconnect)
         }
         MqttProtocolVersion::V3_1_1 => {
             let disconnect = mqtt::packet::v3_1_1::Disconnect::builder()
-            .build()
-            .map_err(|e| e.to_string())?;
+                .build()
+                .map_err(|e| e.to_string())?;
             session.connection.checked_send(disconnect)
         }
     };
@@ -665,14 +675,14 @@ async fn send_keepalive_ping_if_due(
     let events = match session.protocol_version {
         MqttProtocolVersion::V5_0 => {
             let pingreq = mqtt::packet::v5_0::Pingreq::builder()
-            .build()
-            .map_err(|e| e.to_string())?;
+                .build()
+                .map_err(|e| e.to_string())?;
             session.connection.checked_send(pingreq)
         }
         MqttProtocolVersion::V3_1_1 => {
             let pingreq = mqtt::packet::v3_1_1::Pingreq::builder()
-            .build()
-            .map_err(|e| e.to_string())?;
+                .build()
+                .map_err(|e| e.to_string())?;
             session.connection.checked_send(pingreq)
         }
     };
@@ -681,10 +691,7 @@ async fn send_keepalive_ping_if_due(
     Ok(())
 }
 
-async fn write_all_socket_async(
-    socket: &mut StackSocket,
-    mut buf: &[u8],
-) -> Result<(), NetError> {
+async fn write_all_socket_async(socket: &mut StackSocket, mut buf: &[u8]) -> Result<(), NetError> {
     while !buf.is_empty() {
         let written = socket.write(buf).await?;
         if written == 0 {
@@ -848,8 +855,7 @@ fn build_v5_will_props(will: &MqttWillConfig) -> Result<mqtt::packet::Properties
     }
     if let Some(response_topic) = &will.response_topic {
         props.push(mqtt::packet::Property::ResponseTopic(
-            mqtt::packet::ResponseTopic::new(response_topic.as_str())
-                .map_err(|e| e.to_string())?,
+            mqtt::packet::ResponseTopic::new(response_topic.as_str()).map_err(|e| e.to_string())?,
         ));
     }
     if let Some(correlation_data) = &will.correlation_data {
@@ -894,7 +900,9 @@ fn mqtt_meta_from_v5_publish(
 
     for prop in packet.props() {
         match prop {
-            mqtt::packet::Property::ContentType(prop) => content_type = Some(prop.val().to_string()),
+            mqtt::packet::Property::ContentType(prop) => {
+                content_type = Some(prop.val().to_string())
+            }
             mqtt::packet::Property::PayloadFormatIndicator(prop) => {
                 payload_format = Some(prop.val().to_string())
             }
@@ -941,7 +949,6 @@ fn mqtt_meta_from_v5_publish(
     }
 }
 
-
 pub(crate) fn routed_message_from_packet(
     pending_command_ids: &mut HashMap<u16, String>,
     pending_reply_routes: &mut HashMap<String, PendingReplyRoute>,
@@ -955,13 +962,9 @@ pub(crate) fn routed_message_from_packet(
         mqtt::packet::Packet::V3_1_1Publish(packet) => Some(RoutedMessage::Event(
             routed_event_from_v3_publish(device_id, &packet),
         )),
-        mqtt::packet::Packet::V5_0Puback(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_v5_puback(
-                pending_command_ids,
-                device_id,
-                &packet,
-            )))
-        }
+        mqtt::packet::Packet::V5_0Puback(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_puback(pending_command_ids, device_id, &packet),
+        )),
         mqtt::packet::Packet::V3_1_1Puback(packet) => {
             Some(RoutedMessage::Result(routed_result_from_packet_id(
                 pending_command_ids,
@@ -971,20 +974,12 @@ pub(crate) fn routed_message_from_packet(
                 true,
             )))
         }
-            mqtt::packet::Packet::V5_0Pubrec(packet) => {
-                Some(RoutedMessage::Result(routed_result_from_v5_pubrec(
-                    pending_command_ids,
-                    device_id,
-                    &packet,
-                )))
-            }
-        mqtt::packet::Packet::V5_0Pubrel(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_v5_pubrel(
-                pending_command_ids,
-                device_id,
-                &packet,
-            )))
-        }
+        mqtt::packet::Packet::V5_0Pubrec(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_pubrec(pending_command_ids, device_id, &packet),
+        )),
+        mqtt::packet::Packet::V5_0Pubrel(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_pubrel(pending_command_ids, device_id, &packet),
+        )),
         mqtt::packet::Packet::V3_1_1Pubrec(packet) => {
             Some(RoutedMessage::Result(routed_result_from_packet_id(
                 pending_command_ids,
@@ -1003,13 +998,9 @@ pub(crate) fn routed_message_from_packet(
                 false,
             )))
         }
-        mqtt::packet::Packet::V5_0Pubcomp(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_v5_pubcomp(
-                pending_command_ids,
-                device_id,
-                &packet,
-            )))
-        }
+        mqtt::packet::Packet::V5_0Pubcomp(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_pubcomp(pending_command_ids, device_id, &packet),
+        )),
         mqtt::packet::Packet::V3_1_1Pubcomp(packet) => {
             Some(RoutedMessage::Result(routed_result_from_packet_id(
                 pending_command_ids,
@@ -1019,13 +1010,9 @@ pub(crate) fn routed_message_from_packet(
                 true,
             )))
         }
-        mqtt::packet::Packet::V5_0Suback(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_v5_suback(
-                pending_command_ids,
-                device_id,
-                &packet,
-            )))
-        }
+        mqtt::packet::Packet::V5_0Suback(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_suback(pending_command_ids, device_id, &packet),
+        )),
         mqtt::packet::Packet::V3_1_1Suback(packet) => {
             Some(RoutedMessage::Result(routed_result_from_packet_id(
                 pending_command_ids,
@@ -1035,13 +1022,9 @@ pub(crate) fn routed_message_from_packet(
                 true,
             )))
         }
-        mqtt::packet::Packet::V5_0Unsuback(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_v5_unsuback(
-                pending_command_ids,
-                device_id,
-                &packet,
-            )))
-        }
+        mqtt::packet::Packet::V5_0Unsuback(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_unsuback(pending_command_ids, device_id, &packet),
+        )),
         mqtt::packet::Packet::V3_1_1Unsuback(packet) => {
             Some(RoutedMessage::Result(routed_result_from_packet_id(
                 pending_command_ids,
@@ -1071,8 +1054,7 @@ fn pending_reply_route_from_packet(
             for prop in packet.props() {
                 match prop {
                     mqtt::packet::Property::CorrelationData(prop) => {
-                        correlation_key =
-                            Some(String::from_utf8_lossy(prop.val()).into_owned());
+                        correlation_key = Some(String::from_utf8_lossy(prop.val()).into_owned());
                     }
                     mqtt::packet::Property::ResponseTopic(prop) => {
                         reply_to = Some(Address::Channel(prop.val().to_string()));
@@ -1270,11 +1252,16 @@ fn routed_result_from_v5_puback(
                 DeliveryState::Rejected
             }
         }),
-        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        reason_code
+            .filter(|code| code.is_failure())
+            .map(|code| code.to_string()),
         true,
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
-            reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_code
+                .into_iter()
+                .map(|code| code.to_string())
+                .collect(),
             reason_string_from_props_opt(packet.props()),
         ))),
     )
@@ -1297,11 +1284,16 @@ fn routed_result_from_v5_pubrec(
                 DeliveryState::Rejected
             }
         }),
-        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        reason_code
+            .filter(|code| code.is_failure())
+            .map(|code| code.to_string()),
         false,
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
-            reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_code
+                .into_iter()
+                .map(|code| code.to_string())
+                .collect(),
             reason_string_from_props_opt(packet.props()),
         ))),
     )
@@ -1324,11 +1316,16 @@ fn routed_result_from_v5_pubrel(
                 DeliveryState::Rejected
             }
         }),
-        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        reason_code
+            .filter(|code| code.is_failure())
+            .map(|code| code.to_string()),
         false,
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
-            reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_code
+                .into_iter()
+                .map(|code| code.to_string())
+                .collect(),
             reason_string_from_props_opt(packet.props()),
         ))),
     )
@@ -1351,11 +1348,16 @@ fn routed_result_from_v5_pubcomp(
                 DeliveryState::Rejected
             }
         }),
-        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        reason_code
+            .filter(|code| code.is_failure())
+            .map(|code| code.to_string()),
         true,
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
-            reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_code
+                .into_iter()
+                .map(|code| code.to_string())
+                .collect(),
             reason_string_from_props_opt(packet.props()),
         ))),
     )
@@ -1389,7 +1391,10 @@ fn routed_result_from_v5_suback(
         true,
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
-            reason_codes.into_iter().map(|code| code.to_string()).collect(),
+            reason_codes
+                .into_iter()
+                .map(|code| code.to_string())
+                .collect(),
             reason_string_from_props(packet.props()),
         ))),
     )
@@ -1423,7 +1428,10 @@ fn routed_result_from_v5_unsuback(
         true,
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
-            reason_codes.into_iter().map(|code| code.to_string()).collect(),
+            reason_codes
+                .into_iter()
+                .map(|code| code.to_string())
+                .collect(),
             reason_string_from_props(packet.props()),
         ))),
     )
@@ -1465,10 +1473,7 @@ fn routed_result_from_v5_disconnect(
     }
 }
 
-fn routed_result_from_v5_auth(
-    device_id: &str,
-    packet: &mqtt::packet::v5_0::Auth,
-) -> RoutedResult {
+fn routed_result_from_v5_auth(device_id: &str, packet: &mqtt::packet::v5_0::Auth) -> RoutedResult {
     let reason_code = packet.reason_code();
     let reason_code_text = reason_code.map(|code| code.to_string());
     let state = reason_code.map_or(DeliveryState::Accepted, |code| {
