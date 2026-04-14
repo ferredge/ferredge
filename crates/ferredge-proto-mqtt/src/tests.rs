@@ -2,28 +2,32 @@ use std::{
     collections::HashMap,
     future::Future,
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
     time::Duration,
 };
 
 use ferredge_core::prelude::{
-    ActionEmitter, Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
-    BrokerReconnectConfig, BrokerSubscriptionOptions, ChannelReceiver, Command, Correlation,
-    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent,
-    Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion,
-    ProtocolBridge, PubSub, RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
-    AsyncRuntime,
+    ActionEmitter, Address, AsyncRuntime, BrokerAddress, BrokerChannelKind,
+    BrokerMessageOptions, BrokerMessageProtocolOptions, BrokerReconnectConfig,
+    BrokerSubscriptionOptions, BrokerSubscriptionProtocolOptions, ChannelReceiver, Command,
+    Correlation, DeliveryGuarantee, Device, DeviceEndpoint, DeviceStatus, EventSink,
+    EventSource, HttpEndpointConfig, Intent, Lifecycle, Map, MqttConnectProperties,
+    MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat, MqttProtocolVersion,
+    MqttRetainHandling, MqttSubscriptionOptions, MqttWillConfig, ProtocolBridge, PubSub,
+    RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
 };
 use mqtt_protocol_core::mqtt;
+use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 use ferredge_proto_http::{attributes::HttpResourceAttributes, HttpCommandRef, HttpDriver, HttpRequest};
 
 use crate::{
     runtime_stack::StackRuntime,
     runtime::{build_connect_packet, normalize_broker_addr, routed_message_from_packet},
     types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
-    MqttDriver, MqttListenerStatus,
+    MqttAuthChallenge, MqttAuthFlowReason, MqttAuthResponse, MqttAuthStage, MqttDriver,
+    MqttListenerStatus,
 };
 
 type RuntimeReceiver<T> = <StackRuntime as AsyncRuntime>::Receiver<T>;
@@ -49,6 +53,7 @@ fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> 
             session_expiry_secs: None,
             topic_prefix: Some("ferredge".to_string()),
             connect_properties: MqttConnectProperties::default(),
+            will: None,
             reconnect: BrokerReconnectConfig::default(),
             supported_versions,
         }),
@@ -263,6 +268,52 @@ fn spawn_keepalive_test_broker_v5() -> (String, mpsc::Sender<()>, thread::JoinHa
     (format!("mqtt://{addr}"), shutdown_tx, handle)
 }
 
+fn recv_server_packet(
+    stream: &mut TcpStream,
+    connection: &mut mqtt::Connection<mqtt::role::Server>,
+) -> mqtt::packet::Packet {
+    let deadline = std::time::Instant::now() + Duration::from_secs(TEST_STATUS_TIMEOUT_SECS);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "broker should receive MQTT packet before timeout"
+        );
+        let mut buffer = [0u8; 4096];
+        match stream.read(&mut buffer) {
+            Ok(0) => panic!("client closed before expected MQTT packet"),
+            Ok(n) => {
+                let events = connection.recv(&mut mqtt::common::Cursor::new(&buffer[..n]));
+                for event in events {
+                    if let mqtt::connection::Event::NotifyPacketReceived(packet) = event {
+                        return packet;
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("broker read failed: {error}"),
+        }
+    }
+}
+
+fn send_server_packet(
+    stream: &mut TcpStream,
+    connection: &mut mqtt::Connection<mqtt::role::Server>,
+    packet: mqtt::packet::Packet,
+) {
+    let events = connection.checked_send(packet);
+    for event in events {
+        if let mqtt::connection::Event::RequestSendPacket { packet, .. } = event {
+            stream
+                .write_all(&packet.to_continuous_buffer())
+                .expect("broker should send MQTT packet");
+        }
+    }
+}
+
 struct NoopSink;
 
 impl EventSink for NoopSink {
@@ -415,9 +466,7 @@ fn mqtt_send_prefers_v5_packet_when_available() {
             payload: b"42".to_vec(),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                headers: Vec::new(),
-                reply_to: None,
-                correlation_id: None,
+                ..BrokerMessageOptions::default()
             },
         },
         correlation: None,
@@ -477,6 +526,16 @@ fn mqtt_subscribe_builds_version_specific_packet() {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
                 durable_name: Some("durable-a".to_string()),
                 shared_group: Some("shared-a".to_string()),
+                protocol: Some(BrokerSubscriptionProtocolOptions::Mqtt(
+                    MqttSubscriptionOptions {
+                        no_local: true,
+                        retain_as_published: true,
+                        retain_handling: Some(MqttRetainHandling::DoNotSendRetained),
+                        subscription_identifier: Some(7),
+                        ..MqttSubscriptionOptions::default()
+                    },
+                )),
+                ..BrokerSubscriptionOptions::default()
             },
         },
         correlation: None,
@@ -492,29 +551,78 @@ fn mqtt_subscribe_builds_version_specific_packet() {
     match packet.packet {
         MqttWirePacket::V5Subscribe(packet) => {
             let mut saw_subscription_identifier = false;
-            let mut saw_durable = false;
-            let mut saw_shared = false;
+            assert_eq!(packet.entries()[0].topic_filter(), "$share/shared-a/alerts/#");
+            assert!(packet.entries()[0].sub_opts().nl());
+            assert!(packet.entries()[0].sub_opts().rap());
+            assert_eq!(
+                packet.entries()[0].sub_opts().rh(),
+                mqtt::packet::RetainHandling::DoNotSendRetained
+            );
             for prop in packet.props() {
                 match prop {
                     mqtt::packet::Property::SubscriptionIdentifier(prop) => {
-                        saw_subscription_identifier = prop.val() == 1;
-                    }
-                    mqtt::packet::Property::UserProperty(prop) => {
-                        if prop.key() == "ferredge-durable-name" && prop.val() == "durable-a" {
-                            saw_durable = true;
-                        }
-                        if prop.key() == "ferredge-shared-group" && prop.val() == "shared-a" {
-                            saw_shared = true;
-                        }
+                        saw_subscription_identifier = prop.val() == 7;
                     }
                     _ => {}
                 }
             }
             assert!(saw_subscription_identifier);
-            assert!(saw_durable);
-            assert!(saw_shared);
         }
         other => panic!("expected v5 subscribe packet, got {other:?}"),
+    }
+}
+
+#[test]
+fn mqtt_v5_publish_maps_retain_alias_and_expiry_properties() {
+    let driver = make_default_driver();
+    let command = ferredge_core::prelude::Command {
+        id: "cmd-retain-1".to_string(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".to_string(),
+        intent: ferredge_core::prelude::Intent::Send {
+            channel: BrokerAddress {
+                name: "state/device".to_string(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: b"online".to_vec(),
+            options: BrokerMessageOptions {
+                delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
+                protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
+                    retain: true,
+                    payload_format: Some(MqttPayloadFormat::Utf8),
+                    message_expiry_interval_secs: Some(30),
+                    topic_alias: Some(4),
+                    ..MqttMessageOptions::default()
+                })),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    let packet = MqttPacketRequest::try_from(MqttCommandRef {
+        device: &driver.dvc,
+        command: &command,
+    })
+    .expect("v5 publish should build");
+
+    match packet.packet {
+        MqttWirePacket::V5Publish(packet) => {
+            assert!(packet.retain());
+            assert!(packet.props().iter().any(|prop| matches!(
+                prop,
+                mqtt::packet::Property::PayloadFormatIndicator(value) if value.val() == 1
+            )));
+            assert!(packet.props().iter().any(|prop| matches!(
+                prop,
+                mqtt::packet::Property::MessageExpiryInterval(value) if value.val() == 30
+            )));
+            assert!(packet.props().iter().any(|prop| matches!(
+                prop,
+                mqtt::packet::Property::TopicAlias(value) if value.val() == 4
+            )));
+        }
+        other => panic!("expected v5 publish packet, got {other:?}"),
     }
 }
 
@@ -579,9 +687,13 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
             payload: b"{}".to_vec(),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                headers: vec![("content-type".to_string(), "application/json".to_string())],
                 reply_to: Some("rpc/reply".to_string()),
                 correlation_id: Some("corr-123".to_string()),
+                protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
+                    content_type: Some("application/json".to_string()),
+                    ..MqttMessageOptions::default()
+                })),
+                ..BrokerMessageOptions::default()
             },
         },
         correlation: None,
@@ -635,9 +747,8 @@ fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
             payload: b"{}".to_vec(),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                headers: Vec::new(),
                 reply_to: Some("rpc/reply".to_string()),
-                correlation_id: None,
+                ..BrokerMessageOptions::default()
             },
         },
         correlation: None,
@@ -1086,6 +1197,7 @@ fn mqtt_connect_packet_maps_v5_session_expiry() {
         session_expiry_secs: Some(3600),
         topic_prefix: None,
         connect_properties: MqttConnectProperties::default(),
+        will: None,
         reconnect: BrokerReconnectConfig::default(),
         supported_versions: vec![MqttProtocolVersion::V5_0],
     })
@@ -1099,6 +1211,53 @@ fn mqtt_connect_packet_maps_v5_session_expiry() {
         mqtt::packet::Property::SessionExpiryInterval(value) if value.val() == 3600
     ));
     assert!(saw_session_expiry);
+}
+
+#[test]
+fn mqtt_connect_packet_maps_v5_will_properties() {
+    let packet = build_connect_packet(&MqttEndpointConfig {
+        broker: "mqtt://broker".to_string(),
+        client_id: "client-with-will".to_string(),
+        auth: None,
+        tls: None,
+        keepalive_secs: Some(30),
+        clean_start: true,
+        session_expiry_secs: None,
+        topic_prefix: None,
+        connect_properties: MqttConnectProperties::default(),
+        will: Some(MqttWillConfig {
+            topic: "status/offline".to_string(),
+            payload: b"offline".to_vec(),
+            delivery: Some(DeliveryGuarantee::AtLeastOnce),
+            retain: true,
+            delay_interval_secs: Some(5),
+            payload_format: Some(MqttPayloadFormat::Utf8),
+            message_expiry_interval_secs: Some(60),
+            content_type: Some("text/plain".to_string()),
+            response_topic: Some("status/reply".to_string()),
+            correlation_data: Some(b"will-corr".to_vec()),
+            user_properties: vec![("source".to_string(), "ferredge".to_string())],
+        }),
+        reconnect: BrokerReconnectConfig::default(),
+        supported_versions: vec![MqttProtocolVersion::V5_0],
+    })
+    .expect("connect packet should build");
+
+    let mqtt::packet::Packet::V5_0Connect(packet) = packet else {
+        panic!("expected v5 connect packet");
+    };
+    assert!(packet.will_flag());
+    assert_eq!(packet.will_topic(), Some("status/offline"));
+    assert_eq!(packet.will_payload(), Some(&b"offline"[..]));
+    assert!(packet.will_retain());
+    assert!(packet.will_props().iter().any(|prop| matches!(
+        prop,
+        mqtt::packet::Property::WillDelayInterval(value) if value.val() == 5
+    )));
+    assert!(packet.will_props().iter().any(|prop| matches!(
+        prop,
+        mqtt::packet::Property::MessageExpiryInterval(value) if value.val() == 60
+    )));
 }
 
 #[test]
@@ -1158,6 +1317,7 @@ fn mqtt_listener_keeps_running_with_ping_response() {
             session_expiry_secs: None,
             topic_prefix: None,
             connect_properties: MqttConnectProperties::default(),
+            will: None,
             reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V5_0],
         }),
@@ -1252,6 +1412,318 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
     );
 
     block_on(driver.stop()).expect("driver should stop after same-driver control test");
+    let _ = shutdown_tx.send(());
+    broker_handle.join().expect("broker thread should join");
+}
+
+#[test]
+fn mqtt_connect_auth_roundtrip_uses_handler_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
+    let addr = listener.local_addr().expect("test broker should have local addr");
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+    let broker_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("broker should accept client");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(TEST_BROKER_READ_TIMEOUT_MS)))
+            .expect("broker should set read timeout");
+
+        let mut connection = mqtt::Connection::<mqtt::role::Server>::new(mqtt::Version::Undetermined);
+
+        let connect = recv_server_packet(&mut stream, &mut connection);
+        match connect {
+            mqtt::packet::Packet::V5_0Connect(packet) => {
+                let mut authentication_method = None;
+                let mut authentication_data = None;
+                for prop in packet.props() {
+                    match prop {
+                        mqtt::packet::Property::AuthenticationMethod(prop) => {
+                            authentication_method = Some(prop.val().to_string());
+                        }
+                        mqtt::packet::Property::AuthenticationData(prop) => {
+                            authentication_data = Some(prop.val().to_vec());
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(authentication_method.as_deref(), Some("scram-sha-256"));
+                assert_eq!(authentication_data, Some(b"client-first".to_vec()));
+            }
+            other => panic!("expected v5 connect packet, got {other:?}"),
+        }
+
+        let auth = mqtt::packet::v5_0::Auth::builder()
+            .reason_code(mqtt::result_code::AuthReasonCode::ContinueAuthentication)
+            .props(vec![
+                mqtt::packet::Property::AuthenticationMethod(
+                    mqtt::packet::AuthenticationMethod::new("scram-sha-256")
+                        .expect("auth method should build"),
+                ),
+                mqtt::packet::Property::AuthenticationData(
+                    mqtt::packet::AuthenticationData::new(b"server-first".to_vec())
+                        .expect("auth data should build"),
+                ),
+                mqtt::packet::Property::ReasonString(
+                    mqtt::packet::ReasonString::new("challenge")
+                        .expect("reason string should build"),
+                ),
+                mqtt::packet::Property::UserProperty(
+                    mqtt::packet::UserProperty::new("step", "1")
+                        .expect("user property should build"),
+                ),
+            ])
+            .build()
+            .expect("auth should build");
+        send_server_packet(&mut stream, &mut connection, auth.into());
+
+        let auth_response = recv_server_packet(&mut stream, &mut connection);
+        match auth_response {
+            mqtt::packet::Packet::V5_0Auth(packet) => {
+                assert_eq!(
+                    packet.reason_code(),
+                    Some(mqtt::result_code::AuthReasonCode::Success)
+                );
+                let mut authentication_method = None;
+                let mut authentication_data = None;
+                let mut reason_string = None;
+                let mut user_property = None;
+                if let Some(props) = packet.props() {
+                    for prop in props {
+                        match prop {
+                            mqtt::packet::Property::AuthenticationMethod(prop) => {
+                                authentication_method = Some(prop.val().to_string());
+                            }
+                            mqtt::packet::Property::AuthenticationData(prop) => {
+                                authentication_data = Some(prop.val().to_vec());
+                            }
+                            mqtt::packet::Property::ReasonString(prop) => {
+                                reason_string = Some(prop.val().to_string());
+                            }
+                            mqtt::packet::Property::UserProperty(prop) => {
+                                user_property =
+                                    Some((prop.key().to_string(), prop.val().to_string()));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                assert_eq!(authentication_method.as_deref(), Some("scram-sha-256"));
+                assert_eq!(authentication_data, Some(b"client-final".to_vec()));
+                assert_eq!(reason_string.as_deref(), Some("proof"));
+                assert_eq!(
+                    user_property,
+                    Some(("client-step".to_string(), "2".to_string()))
+                );
+            }
+            other => panic!("expected v5 auth packet, got {other:?}"),
+        }
+
+        let connack = mqtt::packet::v5_0::Connack::builder()
+            .session_present(false)
+            .reason_code(mqtt::result_code::ConnectReasonCode::Success)
+            .props(vec![mqtt::packet::Property::AuthenticationMethod(
+                mqtt::packet::AuthenticationMethod::new("scram-sha-256")
+                    .expect("auth method should build"),
+            )])
+            .build()
+            .expect("connack should build");
+        send_server_packet(&mut stream, &mut connection, connack.into());
+
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+            let mut buffer = [0u8; 4096];
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut driver = make_driver(format!("mqtt://{addr}"), vec![MqttProtocolVersion::V5_0]);
+    let seen_challenges = Arc::new(Mutex::new(Vec::new()));
+    if let DeviceEndpoint::Mqtt(config) = &mut driver.dvc.endpoint {
+        config.connect_properties.authentication_method = Some("scram-sha-256".to_string());
+        config.connect_properties.authentication_data = Some(b"client-first".to_vec());
+    }
+    {
+        let seen_challenges = Arc::clone(&seen_challenges);
+        driver
+            .set_auth_handler(move |challenge: MqttAuthChallenge| {
+                seen_challenges
+                    .lock()
+                    .expect("seen challenge lock")
+                    .push(challenge.clone());
+                Ok(Some(MqttAuthResponse {
+                    reason: MqttAuthFlowReason::Success,
+                    authentication_method: None,
+                    authentication_data: Some(b"client-final".to_vec()),
+                    reason_string: Some("proof".to_string()),
+                    user_properties: vec![("client-step".to_string(), "2".to_string())],
+                }))
+            })
+            .expect("auth handler should register");
+    }
+
+    block_on(driver.start()).expect("driver should finish auth handshake");
+    block_on(driver.stop()).expect("driver should stop cleanly after auth handshake");
+
+    let challenges = seen_challenges.lock().expect("seen challenge lock");
+    assert_eq!(challenges.len(), 1);
+    assert_eq!(challenges[0].stage, MqttAuthStage::Connect);
+    assert_eq!(
+        challenges[0].reason,
+        MqttAuthFlowReason::ContinueAuthentication
+    );
+    assert_eq!(
+        challenges[0].authentication_method.as_deref(),
+        Some("scram-sha-256")
+    );
+    assert_eq!(
+        challenges[0].authentication_data,
+        Some(b"server-first".to_vec())
+    );
+    assert_eq!(challenges[0].reason_string.as_deref(), Some("challenge"));
+    assert_eq!(
+        challenges[0].user_properties,
+        vec![("step".to_string(), "1".to_string())]
+    );
+
+    let _ = shutdown_tx.send(());
+    broker_handle.join().expect("broker thread should join");
+}
+
+#[test]
+fn mqtt_listener_handles_reauthentication_auth_packets() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test broker should bind");
+    let addr = listener.local_addr().expect("test broker should have local addr");
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let (reauth_seen_tx, reauth_seen_rx) = mpsc::channel();
+
+    let broker_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("broker should accept client");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(TEST_BROKER_READ_TIMEOUT_MS)))
+            .expect("broker should set read timeout");
+
+        let mut connection = mqtt::Connection::<mqtt::role::Server>::new(mqtt::Version::Undetermined);
+
+        let connect = recv_server_packet(&mut stream, &mut connection);
+        assert!(matches!(connect, mqtt::packet::Packet::V5_0Connect(_)));
+
+        let connack = mqtt::packet::v5_0::Connack::builder()
+            .session_present(false)
+            .reason_code(mqtt::result_code::ConnectReasonCode::Success)
+            .build()
+            .expect("connack should build");
+        send_server_packet(&mut stream, &mut connection, connack.into());
+
+        let reauth = mqtt::packet::v5_0::Auth::builder()
+            .reason_code(mqtt::result_code::AuthReasonCode::ReAuthenticate)
+            .props(vec![
+                mqtt::packet::Property::AuthenticationMethod(
+                    mqtt::packet::AuthenticationMethod::new("scram-sha-256")
+                        .expect("auth method should build"),
+                ),
+                mqtt::packet::Property::AuthenticationData(
+                    mqtt::packet::AuthenticationData::new(b"server-reauth".to_vec())
+                        .expect("auth data should build"),
+                ),
+            ])
+            .build()
+            .expect("reauth should build");
+        send_server_packet(&mut stream, &mut connection, reauth.into());
+
+        let auth_response = recv_server_packet(&mut stream, &mut connection);
+        match auth_response {
+            mqtt::packet::Packet::V5_0Auth(packet) => {
+                assert_eq!(
+                    packet.reason_code(),
+                    Some(mqtt::result_code::AuthReasonCode::Success)
+                );
+                let mut authentication_data = None;
+                if let Some(props) = packet.props() {
+                    for prop in props {
+                        if let mqtt::packet::Property::AuthenticationData(prop) = prop {
+                            authentication_data = Some(prop.val().to_vec());
+                        }
+                    }
+                }
+                assert_eq!(authentication_data, Some(b"client-reauth".to_vec()));
+                reauth_seen_tx
+                    .send(())
+                    .expect("reauth completion should signal test");
+            }
+            other => panic!("expected v5 auth packet, got {other:?}"),
+        }
+
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+            let mut buffer = [0u8; 4096];
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut driver = make_driver(format!("mqtt://{addr}"), vec![MqttProtocolVersion::V5_0]);
+    let seen_challenges = Arc::new(Mutex::new(Vec::new()));
+    if let DeviceEndpoint::Mqtt(config) = &mut driver.dvc.endpoint {
+        config.connect_properties.authentication_method = Some("scram-sha-256".to_string());
+    }
+    {
+        let seen_challenges = Arc::clone(&seen_challenges);
+        driver
+            .set_auth_handler(move |challenge: MqttAuthChallenge| {
+                seen_challenges
+                    .lock()
+                    .expect("seen challenge lock")
+                    .push(challenge.clone());
+                Ok(Some(MqttAuthResponse {
+                    reason: MqttAuthFlowReason::Success,
+                    authentication_method: None,
+                    authentication_data: Some(match challenge.stage {
+                        MqttAuthStage::Connect => b"client-connect".to_vec(),
+                        MqttAuthStage::Reauthenticate => b"client-reauth".to_vec(),
+                    }),
+                    reason_string: None,
+                    user_properties: Vec::new(),
+                }))
+            })
+            .expect("auth handler should register");
+    }
+
+    block_on(driver.start_listening(NoopSink)).expect("listener should start");
+    reauth_seen_rx
+        .recv_timeout(Duration::from_secs(TEST_STATUS_TIMEOUT_SECS))
+        .expect("broker should receive reauth response");
+    block_on(driver.stop()).expect("driver should stop cleanly after reauth");
+
+    let challenges = seen_challenges.lock().expect("seen challenge lock");
+    assert_eq!(challenges.len(), 1);
+    assert_eq!(challenges[0].stage, MqttAuthStage::Reauthenticate);
+    assert_eq!(challenges[0].reason, MqttAuthFlowReason::ReAuthenticate);
+    assert_eq!(
+        challenges[0].authentication_data,
+        Some(b"server-reauth".to_vec())
+    );
+
     let _ = shutdown_tx.send(());
     broker_handle.join().expect("broker thread should join");
 }

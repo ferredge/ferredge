@@ -11,7 +11,11 @@ use runtime_stack::StackSocket;
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
+use crate::convert::qos_from_delivery;
 use crate::types::{MqttPacketRequest, MqttWirePacket};
+use crate::{
+    MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
+};
 #[cfg(feature = "tokio-runtime")]
 use crate::runtime_stack;
 #[cfg(feature = "async-std-runtime")]
@@ -29,6 +33,7 @@ pub(crate) struct MqttClientSession {
     pub(crate) awaiting_pingresp: bool,
     pub(crate) pending_command_ids: HashMap<u16, String>,
     pub(crate) pending_reply_routes: HashMap<String, PendingReplyRoute>,
+    pub(crate) authentication_method: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +74,11 @@ pub(crate) fn build_connect_packet(
     match config.preferred_protocol_version() {
         MqttProtocolVersion::V5_0 => {
             let mut props = mqtt::packet::Properties::new();
-            if let Some(session_expiry_secs) = config.session_expiry_secs {
+            if let Some(session_expiry_secs) = config
+                .connect_properties
+                .session_expiry_interval_secs
+                .or(config.session_expiry_secs)
+            {
                 props.push(mqtt::packet::Property::SessionExpiryInterval(
                     mqtt::packet::SessionExpiryInterval::new(session_expiry_secs)
                         .map_err(|e| e.to_string())?,
@@ -135,6 +144,18 @@ pub(crate) fn build_connect_packet(
                 .clean_start(config.clean_start)
                 .keep_alive(config.keepalive_secs.unwrap_or(0))
                 .props(props);
+            if let Some(will) = &config.will {
+                builder = builder
+                    .will_message(
+                        will.topic.as_str(),
+                        will.payload.clone(),
+                        qos_from_delivery(will.delivery),
+                        will.retain,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let will_props = build_v5_will_props(will)?;
+                builder = builder.will_props(will_props);
+            }
             if let Some(auth) = &config.auth {
                 if let Some(username) = &auth.username {
                     builder = builder
@@ -220,7 +241,7 @@ pub(crate) async fn send_packet_request_async(
     let events = session
         .connection
         .checked_send(packet_request_into_packet(request));
-    let _ = handle_connection_events_async(runtime, session, device_id, None, events).await?;
+    let _ = handle_connection_events_async(runtime, session, device_id, None, None, events).await?;
     Ok(())
 }
 
@@ -336,6 +357,7 @@ pub(crate) async fn read_from_session_async(
     session: &mut MqttClientSession,
     device_id: &str,
     negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
+    auth_handler: Option<&Shared<RuntimeMutex<Option<Shared<dyn MqttAuthProvider>>>>>,
     timeout: Option<Duration>,
 ) -> Result<Vec<RoutedMessage>, String> {
     session
@@ -351,7 +373,15 @@ pub(crate) async fn read_from_session_async(
             session.awaiting_pingresp = false;
             let mut cursor = mqtt::common::Cursor::new(&buffer[..n]);
             let events = session.connection.recv(&mut cursor);
-            handle_connection_events_async(runtime, session, device_id, negotiated_connack, events).await
+            handle_connection_events_async(
+                runtime,
+                session,
+                device_id,
+                negotiated_connack,
+                auth_handler,
+                events,
+            )
+            .await
         }
         Err(NetError::TimedOut) => {
             send_keepalive_ping_if_due(runtime, session, device_id).await?;
@@ -366,6 +396,7 @@ pub(crate) async fn handle_connection_events_async(
     session: &mut MqttClientSession,
     device_id: &str,
     negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
+    auth_handler: Option<&Shared<RuntimeMutex<Option<Shared<dyn MqttAuthProvider>>>>>,
     events: Vec<mqtt::connection::Event>,
 ) -> Result<Vec<RoutedMessage>, String> {
     let mut routed = Vec::new();
@@ -387,6 +418,9 @@ pub(crate) async fn handle_connection_events_async(
             mqtt::connection::Event::NotifyPacketReceived(packet) => {
                 if let Some(negotiated_connack) = negotiated_connack {
                     update_negotiated_connack(negotiated_connack, &packet).await?;
+                }
+                if let Some(auth_handler) = auth_handler {
+                    process_incoming_auth_async(runtime, session, auth_handler, &packet).await?;
                 }
                 if let Some(message) = routed_message_from_packet(
                     &mut session.pending_command_ids,
@@ -412,6 +446,175 @@ pub(crate) async fn handle_connection_events_async(
     Ok(routed)
 }
 
+async fn process_incoming_auth_async(
+    runtime: &runtime_stack::StackRuntime,
+    session: &mut MqttClientSession,
+    auth_handler: &Shared<RuntimeMutex<Option<Shared<dyn MqttAuthProvider>>>>,
+    packet: &mqtt::packet::Packet,
+) -> Result<(), String> {
+    let challenge = match packet {
+        mqtt::packet::Packet::V5_0Auth(packet) => Some(auth_challenge_from_auth(session, packet)?),
+        _ => None,
+    };
+    let Some(challenge) = challenge else {
+        return Ok(());
+    };
+
+    let handler = auth_handler
+        .lock()
+        .await
+        .map_err(|_| "failed to lock MQTT auth handler".to_string())?
+        .clone();
+    let Some(handler) = handler else {
+        return Err("mqtt broker requested enhanced authentication but no auth handler is configured".to_string());
+    };
+    let Some(response) = handler.respond(challenge)? else {
+        return Err("mqtt auth handler returned no response for broker challenge".to_string());
+    };
+    let packet = build_auth_packet(session, response)?;
+    let events = session.connection.checked_send(packet);
+    process_outbound_auth_events_async(runtime, session, events).await?;
+    Ok(())
+}
+
+async fn process_outbound_auth_events_async(
+    runtime: &runtime_stack::StackRuntime,
+    session: &mut MqttClientSession,
+    events: Vec<mqtt::connection::Event>,
+) -> Result<(), String> {
+    for event in events {
+        match event {
+            mqtt::connection::Event::RequestSendPacket { packet, .. } => {
+                let bytes = packet.to_continuous_buffer();
+                write_all_socket_async(&mut session.stream, &bytes)
+                    .await
+                    .map_err(|e| format!("failed to write MQTT auth packet: {e:?}"))?;
+                session
+                    .stream
+                    .flush()
+                    .await
+                    .map_err(|e| format!("failed to flush MQTT auth packet: {e:?}"))?;
+                session.last_activity = runtime.now();
+            }
+            mqtt::connection::Event::NotifyError(error) => {
+                return Err(format!("mqtt protocol error during auth exchange: {error:?}"));
+            }
+            mqtt::connection::Event::RequestClose => {
+                return Err("mqtt auth exchange requested close".to_string());
+            }
+            mqtt::connection::Event::NotifyPacketReceived(_)
+            | mqtt::connection::Event::NotifyPacketIdReleased(_)
+            | mqtt::connection::Event::RequestTimerReset { .. }
+            | mqtt::connection::Event::RequestTimerCancel(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn auth_challenge_from_auth(
+    session: &mut MqttClientSession,
+    packet: &mqtt::packet::v5_0::Auth,
+) -> Result<MqttAuthChallenge, String> {
+    let mut authentication_method = session.authentication_method.clone();
+    let mut authentication_data = None;
+    let mut reason_string = None;
+    let mut user_properties = Vec::new();
+
+    if let Some(props) = packet.props() {
+        for prop in props {
+            match prop {
+                mqtt::packet::Property::AuthenticationMethod(prop) => {
+                    authentication_method = Some(prop.val().to_string());
+                }
+                mqtt::packet::Property::AuthenticationData(prop) => {
+                    authentication_data = Some(prop.val().to_vec());
+                }
+                mqtt::packet::Property::ReasonString(prop) => {
+                    reason_string = Some(prop.val().to_string());
+                }
+                mqtt::packet::Property::UserProperty(prop) => {
+                    user_properties.push((prop.key().to_string(), prop.val().to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+    session.authentication_method = authentication_method.clone();
+
+    Ok(MqttAuthChallenge {
+        stage: if packet.reason_code() == Some(mqtt::result_code::AuthReasonCode::ReAuthenticate) {
+            MqttAuthStage::Reauthenticate
+        } else {
+            MqttAuthStage::Connect
+        },
+        reason: auth_flow_reason_from_v5(
+            packet
+                .reason_code()
+                .unwrap_or(mqtt::result_code::AuthReasonCode::Success),
+        ),
+        authentication_method,
+        authentication_data,
+        reason_string,
+        user_properties,
+    })
+}
+
+fn auth_flow_reason_from_v5(code: mqtt::result_code::AuthReasonCode) -> MqttAuthFlowReason {
+    match code {
+        mqtt::result_code::AuthReasonCode::Success => MqttAuthFlowReason::Success,
+        mqtt::result_code::AuthReasonCode::ContinueAuthentication => {
+            MqttAuthFlowReason::ContinueAuthentication
+        }
+        mqtt::result_code::AuthReasonCode::ReAuthenticate => MqttAuthFlowReason::ReAuthenticate,
+    }
+}
+
+fn build_auth_packet(
+    session: &mut MqttClientSession,
+    response: MqttAuthResponse,
+) -> Result<mqtt::packet::v5_0::Auth, String> {
+    let mut props = mqtt::packet::Properties::new();
+    let method = response
+        .authentication_method
+        .clone()
+        .or_else(|| session.authentication_method.clone());
+    if let Some(authentication_method) = &method {
+        props.push(mqtt::packet::Property::AuthenticationMethod(
+            mqtt::packet::AuthenticationMethod::new(authentication_method.as_str())
+                .map_err(|e| e.to_string())?,
+        ));
+    }
+    if let Some(authentication_data) = response.authentication_data {
+        props.push(mqtt::packet::Property::AuthenticationData(
+            mqtt::packet::AuthenticationData::new(authentication_data).map_err(|e| e.to_string())?,
+        ));
+    }
+    if let Some(reason_string) = &response.reason_string {
+        props.push(mqtt::packet::Property::ReasonString(
+            mqtt::packet::ReasonString::new(reason_string.as_str()).map_err(|e| e.to_string())?,
+        ));
+    }
+    for (key, value) in &response.user_properties {
+        props.push(mqtt::packet::Property::UserProperty(
+            mqtt::packet::UserProperty::new(key.as_str(), value.as_str())
+                .map_err(|e| e.to_string())?,
+        ));
+    }
+    session.authentication_method = method;
+
+    mqtt::packet::v5_0::Auth::builder()
+        .reason_code(match response.reason {
+            MqttAuthFlowReason::Success => mqtt::result_code::AuthReasonCode::Success,
+            MqttAuthFlowReason::ContinueAuthentication => {
+                mqtt::result_code::AuthReasonCode::ContinueAuthentication
+            }
+            MqttAuthFlowReason::ReAuthenticate => mqtt::result_code::AuthReasonCode::ReAuthenticate,
+        })
+        .props(props)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) async fn disconnect_session(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
@@ -432,7 +635,7 @@ pub(crate) async fn disconnect_session(
             session.connection.checked_send(disconnect)
         }
     };
-    let _ = handle_connection_events_async(runtime, session, "", None, events).await?;
+    let _ = handle_connection_events_async(runtime, session, "", None, None, events).await?;
     session
         .stream
         .close()
@@ -474,7 +677,7 @@ async fn send_keepalive_ping_if_due(
         }
     };
     session.awaiting_pingresp = true;
-    let _ = handle_connection_events_async(runtime, session, device_id, None, events).await?;
+    let _ = handle_connection_events_async(runtime, session, device_id, None, None, events).await?;
     Ok(())
 }
 
@@ -525,6 +728,7 @@ fn connack_snapshot_from_v5(
     let mut receive_maximum = None;
     let mut maximum_packet_size = None;
     let mut topic_alias_maximum = None;
+    let mut session_expiry_interval_secs = None;
     let mut maximum_qos = None;
     let mut retain_available = None;
     let mut server_keep_alive = None;
@@ -533,6 +737,7 @@ fn connack_snapshot_from_v5(
     let mut shared_subscription_available = None;
     let mut authentication_method = None;
     let mut authentication_data = None;
+    let mut reason_string = None;
     let mut user_properties = Vec::new();
 
     for prop in packet.props() {
@@ -554,6 +759,9 @@ fn connack_snapshot_from_v5(
             }
             mqtt::packet::Property::TopicAliasMaximum(prop) => {
                 topic_alias_maximum = Some(prop.val());
+            }
+            mqtt::packet::Property::SessionExpiryInterval(prop) => {
+                session_expiry_interval_secs = Some(prop.val());
             }
             mqtt::packet::Property::MaximumQos(prop) => {
                 maximum_qos = Some(prop.val());
@@ -579,6 +787,9 @@ fn connack_snapshot_from_v5(
             mqtt::packet::Property::AuthenticationData(prop) => {
                 authentication_data = Some(prop.val().to_vec());
             }
+            mqtt::packet::Property::ReasonString(prop) => {
+                reason_string = Some(prop.val().to_string());
+            }
             mqtt::packet::Property::UserProperty(prop) => {
                 user_properties.push((prop.key().to_string(), prop.val().to_string()));
             }
@@ -589,12 +800,14 @@ fn connack_snapshot_from_v5(
     Ok(MqttConnackProperties {
         session_present: packet.session_present(),
         reason_code: Some(packet.reason_code().to_string()),
+        reason_string,
         assigned_client_identifier,
         response_information,
         server_reference,
         receive_maximum,
         maximum_packet_size,
         topic_alias_maximum,
+        session_expiry_interval_secs,
         maximum_qos,
         retain_available,
         server_keep_alive,
@@ -605,6 +818,127 @@ fn connack_snapshot_from_v5(
         authentication_data,
         user_properties,
     })
+}
+
+fn build_v5_will_props(will: &MqttWillConfig) -> Result<mqtt::packet::Properties, String> {
+    let mut props = mqtt::packet::Properties::new();
+    if let Some(delay) = will.delay_interval_secs {
+        props.push(mqtt::packet::Property::WillDelayInterval(
+            mqtt::packet::WillDelayInterval::new(delay).map_err(|e| e.to_string())?,
+        ));
+    }
+    if let Some(payload_format) = will.payload_format {
+        props.push(mqtt::packet::Property::PayloadFormatIndicator(
+            mqtt::packet::PayloadFormatIndicator::new(match payload_format {
+                MqttPayloadFormat::Bytes => mqtt::packet::PayloadFormat::Binary,
+                MqttPayloadFormat::Utf8 => mqtt::packet::PayloadFormat::String,
+            })
+            .map_err(|e| e.to_string())?,
+        ));
+    }
+    if let Some(expiry) = will.message_expiry_interval_secs {
+        props.push(mqtt::packet::Property::MessageExpiryInterval(
+            mqtt::packet::MessageExpiryInterval::new(expiry).map_err(|e| e.to_string())?,
+        ));
+    }
+    if let Some(content_type) = &will.content_type {
+        props.push(mqtt::packet::Property::ContentType(
+            mqtt::packet::ContentType::new(content_type.as_str()).map_err(|e| e.to_string())?,
+        ));
+    }
+    if let Some(response_topic) = &will.response_topic {
+        props.push(mqtt::packet::Property::ResponseTopic(
+            mqtt::packet::ResponseTopic::new(response_topic.as_str())
+                .map_err(|e| e.to_string())?,
+        ));
+    }
+    if let Some(correlation_data) = &will.correlation_data {
+        props.push(mqtt::packet::Property::CorrelationData(
+            mqtt::packet::CorrelationData::new(correlation_data.clone())
+                .map_err(|e| e.to_string())?,
+        ));
+    }
+    for (key, value) in &will.user_properties {
+        props.push(mqtt::packet::Property::UserProperty(
+            mqtt::packet::UserProperty::new(key.as_str(), value.as_str())
+                .map_err(|e| e.to_string())?,
+        ));
+    }
+    Ok(props)
+}
+
+fn reason_string_from_props(props: &mqtt::packet::Properties) -> Option<String> {
+    props.iter().find_map(|prop| match prop {
+        mqtt::packet::Property::ReasonString(prop) => Some(prop.val().to_string()),
+        _ => None,
+    })
+}
+
+fn reason_string_from_props_opt(props: &Option<mqtt::packet::Properties>) -> Option<String> {
+    props.as_ref().and_then(reason_string_from_props)
+}
+
+fn mqtt_meta_from_v5_publish(
+    packet: &mqtt::packet::v5_0::Publish,
+    correlation_override: Option<String>,
+) -> MqttMeta {
+    let mut content_type = None;
+    let mut payload_format = None;
+    let mut message_expiry_interval_secs = None;
+    let mut response_topic = None;
+    let mut correlation_data = correlation_override;
+    let mut correlation_data_bytes = None;
+    let mut topic_alias = None;
+    let mut subscription_identifiers = Vec::new();
+    let mut user_properties = Vec::new();
+
+    for prop in packet.props() {
+        match prop {
+            mqtt::packet::Property::ContentType(prop) => content_type = Some(prop.val().to_string()),
+            mqtt::packet::Property::PayloadFormatIndicator(prop) => {
+                payload_format = Some(prop.val().to_string())
+            }
+            mqtt::packet::Property::MessageExpiryInterval(prop) => {
+                message_expiry_interval_secs = Some(prop.val())
+            }
+            mqtt::packet::Property::ResponseTopic(prop) => {
+                response_topic = Some(prop.val().to_string())
+            }
+            mqtt::packet::Property::CorrelationData(prop) => {
+                if correlation_data.is_none() {
+                    correlation_data = Some(String::from_utf8_lossy(prop.val()).into_owned());
+                }
+                correlation_data_bytes = Some(prop.val().to_vec());
+            }
+            mqtt::packet::Property::TopicAlias(prop) => topic_alias = Some(prop.val()),
+            mqtt::packet::Property::SubscriptionIdentifier(prop) => {
+                subscription_identifiers.push(prop.val())
+            }
+            mqtt::packet::Property::UserProperty(prop) => {
+                user_properties.push((prop.key().to_string(), prop.val().to_string()))
+            }
+            _ => {}
+        }
+    }
+
+    MqttMeta {
+        topic: packet.topic_name().to_string(),
+        qos: packet.qos() as u8,
+        retain: packet.retain(),
+        duplicate: packet.dup(),
+        packet_id: packet.packet_id(),
+        content_type,
+        payload_format,
+        message_expiry_interval_secs,
+        response_topic,
+        correlation_data,
+        correlation_data_bytes,
+        topic_alias,
+        subscription_identifiers,
+        user_properties,
+        reason_codes: Vec::new(),
+        reason_string: None,
+    }
 }
 
 
@@ -637,14 +971,30 @@ pub(crate) fn routed_message_from_packet(
                 true,
             )))
         }
-        mqtt::packet::Packet::V5_0Pubrec(packet) => {
-            Some(RoutedMessage::Result(routed_result_from_v5_pubrec(
+            mqtt::packet::Packet::V5_0Pubrec(packet) => {
+                Some(RoutedMessage::Result(routed_result_from_v5_pubrec(
+                    pending_command_ids,
+                    device_id,
+                    &packet,
+                )))
+            }
+        mqtt::packet::Packet::V5_0Pubrel(packet) => {
+            Some(RoutedMessage::Result(routed_result_from_v5_pubrel(
                 pending_command_ids,
                 device_id,
                 &packet,
             )))
         }
         mqtt::packet::Packet::V3_1_1Pubrec(packet) => {
+            Some(RoutedMessage::Result(routed_result_from_packet_id(
+                pending_command_ids,
+                device_id,
+                packet.packet_id(),
+                DeliveryState::Dispatched,
+                false,
+            )))
+        }
+        mqtt::packet::Packet::V3_1_1Pubrel(packet) => {
             Some(RoutedMessage::Result(routed_result_from_packet_id(
                 pending_command_ids,
                 device_id,
@@ -704,6 +1054,9 @@ pub(crate) fn routed_message_from_packet(
         mqtt::packet::Packet::V5_0Disconnect(packet) => Some(RoutedMessage::Result(
             routed_result_from_v5_disconnect(device_id, &packet),
         )),
+        mqtt::packet::Packet::V5_0Auth(packet) => Some(RoutedMessage::Result(
+            routed_result_from_v5_auth(device_id, &packet),
+        )),
         _ => None,
     }
 }
@@ -754,13 +1107,18 @@ pub(crate) fn routed_event_from_v5_publish(
     packet: &mqtt::packet::v5_0::Publish,
 ) -> RoutedEvent {
     let mut correlation_id = None;
+    let mut correlation_data_bytes = None;
     let mut reply_to = None;
     let mut content_type = None;
+    let mut payload_format = None;
+    let mut message_expiry_interval_secs = None;
+    let mut topic_alias = None;
     let mut subscription_identifiers = Vec::new();
     let mut user_properties = Vec::new();
     for prop in packet.props() {
         match prop {
             mqtt::packet::Property::CorrelationData(prop) => {
+                correlation_data_bytes = Some(prop.val().to_vec());
                 correlation_id = Some(String::from_utf8_lossy(prop.val()).into_owned());
             }
             mqtt::packet::Property::ResponseTopic(prop) => {
@@ -768,6 +1126,15 @@ pub(crate) fn routed_event_from_v5_publish(
             }
             mqtt::packet::Property::ContentType(prop) => {
                 content_type = Some(prop.val().to_string());
+            }
+            mqtt::packet::Property::PayloadFormatIndicator(prop) => {
+                payload_format = Some(prop.val().to_string());
+            }
+            mqtt::packet::Property::MessageExpiryInterval(prop) => {
+                message_expiry_interval_secs = Some(prop.val());
+            }
+            mqtt::packet::Property::TopicAlias(prop) => {
+                topic_alias = Some(prop.val());
             }
             mqtt::packet::Property::SubscriptionIdentifier(prop) => {
                 subscription_identifiers.push(prop.val());
@@ -801,11 +1168,16 @@ pub(crate) fn routed_event_from_v5_publish(
             duplicate: packet.dup(),
             packet_id: packet.packet_id(),
             content_type,
+            payload_format,
+            message_expiry_interval_secs,
             response_topic,
             correlation_data: correlation_id.clone(),
+            correlation_data_bytes,
+            topic_alias,
             subscription_identifiers,
             user_properties,
             reason_codes: Vec::new(),
+            reason_string: None,
         })),
     }
 }
@@ -839,41 +1211,10 @@ fn routed_reply_or_event_from_v5_publish(
                     reply_to: route.reply_to,
                 }),
             },
-            transport: Some(TransportMeta::Mqtt(MqttMeta {
-                topic: packet.topic_name().to_string(),
-                qos: packet.qos() as u8,
-                retain: packet.retain(),
-                duplicate: packet.dup(),
-                packet_id: packet.packet_id(),
-                content_type: packet.props().iter().find_map(|prop| match prop {
-                    mqtt::packet::Property::ContentType(prop) => Some(prop.val().to_string()),
-                    _ => None,
-                }),
-                response_topic: packet.props().iter().find_map(|prop| match prop {
-                    mqtt::packet::Property::ResponseTopic(prop) => Some(prop.val().to_string()),
-                    _ => None,
-                }),
-                correlation_data: Some(correlation_key),
-                subscription_identifiers: packet
-                    .props()
-                    .iter()
-                    .filter_map(|prop| match prop {
-                        mqtt::packet::Property::SubscriptionIdentifier(prop) => Some(prop.val()),
-                        _ => None,
-                    })
-                    .collect(),
-                user_properties: packet
-                    .props()
-                    .iter()
-                    .filter_map(|prop| match prop {
-                        mqtt::packet::Property::UserProperty(prop) => {
-                            Some((prop.key().to_string(), prop.val().to_string()))
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-                reason_codes: Vec::new(),
-            })),
+            transport: Some(TransportMeta::Mqtt(mqtt_meta_from_v5_publish(
+                packet,
+                Some(correlation_key),
+            ))),
         }));
     }
 
@@ -898,11 +1239,16 @@ pub(crate) fn routed_event_from_v3_publish(
             duplicate: packet.dup(),
             packet_id: packet.packet_id(),
             content_type: None,
+            payload_format: None,
+            message_expiry_interval_secs: None,
             response_topic: None,
             correlation_data: None,
+            correlation_data_bytes: None,
+            topic_alias: None,
             subscription_identifiers: Vec::new(),
             user_properties: Vec::new(),
             reason_codes: Vec::new(),
+            reason_string: None,
         })),
     }
 }
@@ -929,6 +1275,7 @@ fn routed_result_from_v5_puback(
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_string_from_props_opt(packet.props()),
         ))),
     )
 }
@@ -955,6 +1302,34 @@ fn routed_result_from_v5_pubrec(
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_string_from_props_opt(packet.props()),
+        ))),
+    )
+}
+
+fn routed_result_from_v5_pubrel(
+    pending_command_ids: &mut HashMap<u16, String>,
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Pubrel,
+) -> RoutedResult {
+    let reason_code = packet.reason_code();
+    routed_result_from_packet_id_with_transport(
+        pending_command_ids,
+        device_id,
+        packet.packet_id(),
+        reason_code.map_or(DeliveryState::Dispatched, |code| {
+            if code.is_success() {
+                DeliveryState::Dispatched
+            } else {
+                DeliveryState::Rejected
+            }
+        }),
+        reason_code.filter(|code| code.is_failure()).map(|code| code.to_string()),
+        false,
+        Some(TransportMeta::Mqtt(mqtt_result_meta(
+            Some(packet.packet_id()),
+            reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_string_from_props_opt(packet.props()),
         ))),
     )
 }
@@ -981,6 +1356,7 @@ fn routed_result_from_v5_pubcomp(
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code.into_iter().map(|code| code.to_string()).collect(),
+            reason_string_from_props_opt(packet.props()),
         ))),
     )
 }
@@ -1014,6 +1390,7 @@ fn routed_result_from_v5_suback(
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_codes.into_iter().map(|code| code.to_string()).collect(),
+            reason_string_from_props(packet.props()),
         ))),
     )
 }
@@ -1047,6 +1424,7 @@ fn routed_result_from_v5_unsuback(
         Some(TransportMeta::Mqtt(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_codes.into_iter().map(|code| code.to_string()).collect(),
+            reason_string_from_props(packet.props()),
         ))),
     )
 }
@@ -1082,6 +1460,42 @@ fn routed_result_from_v5_disconnect(
         transport: Some(TransportMeta::Mqtt(mqtt_result_meta(
             None,
             reason_code_text.into_iter().collect(),
+            reason_string_from_props_opt(packet.props()),
+        ))),
+    }
+}
+
+fn routed_result_from_v5_auth(
+    device_id: &str,
+    packet: &mqtt::packet::v5_0::Auth,
+) -> RoutedResult {
+    let reason_code = packet.reason_code();
+    let reason_code_text = reason_code.map(|code| code.to_string());
+    let state = reason_code.map_or(DeliveryState::Accepted, |code| {
+        if code.is_success() {
+            DeliveryState::Accepted
+        } else {
+            DeliveryState::Rejected
+        }
+    });
+    RoutedResult {
+        source: mqtt_source(device_id),
+        result: CommandResult {
+            command_id: "__mqtt_auth__".to_string(),
+            device_id: device_id.to_string(),
+            state: state.clone(),
+            payload: None,
+            error: if state == DeliveryState::Rejected {
+                reason_code_text.clone()
+            } else {
+                None
+            },
+            correlation: None,
+        },
+        transport: Some(TransportMeta::Mqtt(mqtt_result_meta(
+            None,
+            reason_code_text.into_iter().collect(),
+            reason_string_from_props_opt(packet.props()),
         ))),
     }
 }
@@ -1089,6 +1503,7 @@ fn routed_result_from_v5_disconnect(
 fn mqtt_result_meta(
     packet_id: Option<u16>,
     reason_codes: Vec<String>,
+    reason_string: Option<String>,
 ) -> MqttMeta {
     MqttMeta {
         topic: String::new(),
@@ -1097,11 +1512,16 @@ fn mqtt_result_meta(
         duplicate: false,
         packet_id,
         content_type: None,
+        payload_format: None,
+        message_expiry_interval_secs: None,
         response_topic: None,
         correlation_data: None,
+        correlation_data_bytes: None,
+        topic_alias: None,
         subscription_identifiers: Vec::new(),
         user_properties: Vec::new(),
         reason_codes,
+        reason_string,
     }
 }
 
