@@ -17,9 +17,9 @@ use ferredge_core::prelude::{
 };
 
 use crate::{
+    MqttDriver, MqttListenerStatus,
     runtime_stack::StackRuntime,
     types::{MqttCommandRef, MqttPacketRequest},
-    MqttDriver, MqttListenerStatus,
 };
 
 const MOSQUITTO_START_TIMEOUT_SECS: u64 = 5;
@@ -144,7 +144,10 @@ impl MosquittoGuard {
             if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
                 break;
             }
-            assert!(Instant::now() < deadline, "mosquitto should start before timeout");
+            assert!(
+                Instant::now() < deadline,
+                "mosquitto should start before timeout"
+            );
             thread::sleep(Duration::from_millis(MOSQUITTO_POLL_INTERVAL_MS));
         }
     }
@@ -422,15 +425,14 @@ fn mosquitto_extended_client_flow() {
         .wait_with_output()
         .expect("mosquitto_sub should finish");
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "outbound-ok");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "outbound-ok"
+    );
 
     block_on(subscriber.stop_listening()).expect("listener should stop before unsubscribe");
-    block_on(subscriber.unsubscribe(unsubscribe_packet(
-        &subscriber,
-        "unsub-1",
-        "ferredge/it/in",
-    )))
-    .expect("subscriber should unsubscribe");
+    block_on(subscriber.unsubscribe(unsubscribe_packet(&subscriber, "unsub-1", "ferredge/it/in")))
+        .expect("subscriber should unsubscribe");
 
     let prior_len = events.lock().expect("events lock").len();
     let pub_status = ProcessCommand::new("mosquitto_pub")
@@ -486,7 +488,9 @@ fn mosquitto_keepalive_client_flow_five_seconds() {
     thread::sleep(Duration::from_secs(MOSQUITTO_KEEPALIVE_SHORT_SECS));
 
     assert_eq!(
-        driver.listener_status().expect("listener status should be readable"),
+        driver
+            .listener_status()
+            .expect("listener status should be readable"),
         MqttListenerStatus::Running
     );
 
@@ -564,12 +568,14 @@ fn mosquitto_v5_complex_property_roundtrip() {
             assert_eq!(meta.content_type, Some("application/json".to_string()));
             assert_eq!(meta.response_topic, Some("ferredge/it/reply".to_string()));
             assert_eq!(meta.correlation_data, Some("corr-v5-123".to_string()));
-            assert!(meta
-                .user_properties
-                .contains(&("x-trace".to_string(), "trace-123".to_string())));
-            assert!(meta
-                .user_properties
-                .contains(&("x-origin".to_string(), "ferredge".to_string())));
+            assert!(
+                meta.user_properties
+                    .contains(&("x-trace".to_string(), "trace-123".to_string()))
+            );
+            assert!(
+                meta.user_properties
+                    .contains(&("x-origin".to_string(), "ferredge".to_string()))
+            );
         }
         other => panic!("expected MQTT transport metadata, got {other:?}"),
     }
@@ -637,15 +643,27 @@ fn mosquitto_will_publishes_after_ungraceful_driver_drop() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(will_topic), "missing will topic: {stdout}");
     assert!(stdout.contains("offline"), "missing will payload: {stdout}");
-    assert!(stdout.contains("text/plain"), "missing will content type: {stdout}");
-    assert!(stdout.contains("will-corr"), "missing will correlation data: {stdout}");
+    assert!(
+        stdout.contains("text/plain"),
+        "missing will content type: {stdout}"
+    );
+    assert!(
+        stdout.contains("will-corr"),
+        "missing will correlation data: {stdout}"
+    );
     assert!(stdout.contains("30"), "missing will expiry: {stdout}");
     assert!(
         stdout.contains("ferredge/it/will/reply"),
         "missing will response topic: {stdout}"
     );
-    assert!(stdout.contains("source"), "missing will user property key: {stdout}");
-    assert!(stdout.contains("ferredge"), "missing will user property value: {stdout}");
+    assert!(
+        stdout.contains("source"),
+        "missing will user property key: {stdout}"
+    );
+    assert!(
+        stdout.contains("ferredge"),
+        "missing will user property value: {stdout}"
+    );
 }
 
 #[test]
@@ -698,9 +716,15 @@ fn mosquitto_v5_topic_alias_publish_is_accepted_by_broker() {
     let output = subscriber
         .wait_with_output()
         .expect("mosquitto_sub should finish after topic alias publish");
-    assert!(output.status.success(), "topic alias subscriber should succeed");
+    assert!(
+        output.status.success(),
+        "topic alias subscriber should succeed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ferredge/it/topic-alias"), "missing topic: {stdout}");
+    assert!(
+        stdout.contains("ferredge/it/topic-alias"),
+        "missing topic: {stdout}"
+    );
     assert!(stdout.contains("alias-ok"), "missing payload: {stdout}");
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
@@ -801,38 +825,40 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
     let topic = "ferredge/it/subopts";
 
     block_on(driver.start()).expect("driver should connect");
-    block_on(driver.subscribe(
-        MqttPacketRequest::try_from(MqttCommandRef {
-            device: &driver.dvc,
-            command: &Command {
-                id: "subopts-sub".to_string(),
-                source_device_id: None,
-                target_device_id: driver.dvc.id.clone(),
-                intent: Intent::Subscribe {
-                    channel: BrokerAddress {
-                        name: topic.to_string(),
-                        kind: Some(BrokerChannelKind::Topic),
+    block_on(
+        driver.subscribe(
+            MqttPacketRequest::try_from(MqttCommandRef {
+                device: &driver.dvc,
+                command: &Command {
+                    id: "subopts-sub".to_string(),
+                    source_device_id: None,
+                    target_device_id: driver.dvc.id.clone(),
+                    intent: Intent::Subscribe {
+                        channel: BrokerAddress {
+                            name: topic.to_string(),
+                            kind: Some(BrokerChannelKind::Topic),
+                        },
+                        options: BrokerSubscriptionOptions {
+                            delivery: Some(DeliveryGuarantee::AtLeastOnce),
+                            protocol: Some(BrokerSubscriptionProtocolOptions::Mqtt(
+                                MqttSubscriptionOptions {
+                                    no_local: true,
+                                    subscription_identifier: Some(41),
+                                    ..MqttSubscriptionOptions::default()
+                                },
+                            )),
+                            ..BrokerSubscriptionOptions::default()
+                        },
                     },
-                    options: BrokerSubscriptionOptions {
-                        delivery: Some(DeliveryGuarantee::AtLeastOnce),
-                        protocol: Some(BrokerSubscriptionProtocolOptions::Mqtt(
-                            MqttSubscriptionOptions {
-                                no_local: true,
-                                subscription_identifier: Some(41),
-                                ..MqttSubscriptionOptions::default()
-                            },
-                        )),
-                        ..BrokerSubscriptionOptions::default()
-                    },
+                    correlation: None,
                 },
-                correlation: None,
+            })
+            .expect("subscribe packet should build"),
+            RecordingSink {
+                events: Arc::clone(&events),
             },
-        })
-        .expect("subscribe packet should build"),
-        RecordingSink {
-            events: Arc::clone(&events),
-        },
-    ))
+        ),
+    )
     .expect("driver should subscribe");
     block_on(driver.start_listening(RecordingSink {
         events: Arc::clone(&events),
@@ -909,31 +935,33 @@ fn mosquitto_shared_subscriptions_load_balance() {
         (&subscriber_b, Arc::clone(&events_b), "shared-sub-b"),
     ] {
         block_on(driver.start()).expect("subscriber should connect");
-        block_on(driver.subscribe(
-            MqttPacketRequest::try_from(MqttCommandRef {
-                device: &driver.dvc,
-                command: &Command {
-                    id: sub_id.to_string(),
-                    source_device_id: None,
-                    target_device_id: driver.dvc.id.clone(),
-                    intent: Intent::Subscribe {
-                        channel: BrokerAddress {
-                            name: topic.to_string(),
-                            kind: Some(BrokerChannelKind::Topic),
+        block_on(
+            driver.subscribe(
+                MqttPacketRequest::try_from(MqttCommandRef {
+                    device: &driver.dvc,
+                    command: &Command {
+                        id: sub_id.to_string(),
+                        source_device_id: None,
+                        target_device_id: driver.dvc.id.clone(),
+                        intent: Intent::Subscribe {
+                            channel: BrokerAddress {
+                                name: topic.to_string(),
+                                kind: Some(BrokerChannelKind::Topic),
+                            },
+                            options: BrokerSubscriptionOptions {
+                                shared_group: Some("workers".to_string()),
+                                ..BrokerSubscriptionOptions::default()
+                            },
                         },
-                        options: BrokerSubscriptionOptions {
-                            shared_group: Some("workers".to_string()),
-                            ..BrokerSubscriptionOptions::default()
-                        },
+                        correlation: None,
                     },
-                    correlation: None,
+                })
+                .expect("shared subscribe should build"),
+                RecordingSink {
+                    events: Arc::clone(&events),
                 },
-            })
-            .expect("shared subscribe should build"),
-            RecordingSink {
-                events: Arc::clone(&events),
-            },
-        ))
+            ),
+        )
         .expect("subscriber should subscribe shared topic");
         block_on(driver.start_listening(RecordingSink {
             events: Arc::clone(&events),
@@ -996,7 +1024,9 @@ fn mosquitto_keepalive_client_flow_thirty_five_seconds() {
     thread::sleep(Duration::from_secs(MOSQUITTO_KEEPALIVE_LONG_SECS));
 
     assert_eq!(
-        driver.listener_status().expect("listener status should be readable"),
+        driver
+            .listener_status()
+            .expect("listener status should be readable"),
         MqttListenerStatus::Running
     );
 
@@ -1077,7 +1107,9 @@ fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
         "reconnected-outbound-ok"
     );
     assert_eq!(
-        driver.listener_status().expect("listener status should be readable"),
+        driver
+            .listener_status()
+            .expect("listener status should be readable"),
         MqttListenerStatus::Running
     );
 
@@ -1136,7 +1168,10 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
         .expect("listener status should be readable")
     {
         MqttListenerStatus::Failed(error) => {
-            assert!(!error.is_empty(), "failed listener should retain reconnect error");
+            assert!(
+                !error.is_empty(),
+                "failed listener should retain reconnect error"
+            );
         }
         other => panic!("expected failed listener status, got {other:?}"),
     }

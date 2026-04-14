@@ -87,7 +87,10 @@ where
     T: Send + 'static,
 {
     async fn send(&self, item: T) -> Result<(), ChannelError> {
-        self.inner.send(item).await.map_err(|_| ChannelError::Closed)
+        self.inner
+            .send(item)
+            .await
+            .map_err(|_| ChannelError::Closed)
     }
 
     fn try_send(&self, item: T) -> Result<(), ChannelError> {
@@ -160,10 +163,22 @@ impl RuntimeInstant for AsyncStdInstant {
 }
 
 impl AsyncRuntime for AsyncStdRuntime {
-    type Task<T> = AsyncStdTask<T> where T: Send + 'static;
-    type Sender<T> = AsyncStdSender<T> where T: Send + 'static;
-    type Receiver<T> = AsyncStdReceiver<T> where T: Send + 'static;
-    type Mutex<T> = AsyncStdMutex<T> where T: Send + 'static;
+    type Task<T>
+        = AsyncStdTask<T>
+    where
+        T: Send + 'static;
+    type Sender<T>
+        = AsyncStdSender<T>
+    where
+        T: Send + 'static;
+    type Receiver<T>
+        = AsyncStdReceiver<T>
+    where
+        T: Send + 'static;
+    type Mutex<T>
+        = AsyncStdMutex<T>
+    where
+        T: Send + 'static;
     type Instant = AsyncStdInstant;
 
     fn spawn<F>(&self, future: F) -> Self::Task<F::Output>
@@ -181,10 +196,7 @@ impl AsyncRuntime for AsyncStdRuntime {
         T: Send + 'static,
     {
         let (tx, rx) = async_std::channel::bounded(capacity);
-        (
-            AsyncStdSender { inner: tx },
-            AsyncStdReceiver { inner: rx },
-        )
+        (AsyncStdSender { inner: tx }, AsyncStdReceiver { inner: rx })
     }
 
     fn mutex<T>(&self, value: T) -> Self::Mutex<T>

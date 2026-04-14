@@ -1,7 +1,4 @@
-use std::{
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use ferredge_core::prelude::*;
 use tokio::{
@@ -111,7 +108,10 @@ where
     T: Send + 'static,
 {
     async fn send(&self, item: T) -> Result<(), ChannelError> {
-        self.inner.send(item).await.map_err(|_| ChannelError::Closed)
+        self.inner
+            .send(item)
+            .await
+            .map_err(|_| ChannelError::Closed)
     }
 
     fn try_send(&self, item: T) -> Result<(), ChannelError> {
@@ -184,10 +184,22 @@ impl RuntimeInstant for TokioInstant {
 }
 
 impl AsyncRuntime for TokioRuntime {
-    type Task<T> = TokioTask<T> where T: Send + 'static;
-    type Sender<T> = TokioSender<T> where T: Send + 'static;
-    type Receiver<T> = TokioReceiver<T> where T: Send + 'static;
-    type Mutex<T> = TokioMutex<T> where T: Send + 'static;
+    type Task<T>
+        = TokioTask<T>
+    where
+        T: Send + 'static;
+    type Sender<T>
+        = TokioSender<T>
+    where
+        T: Send + 'static;
+    type Receiver<T>
+        = TokioReceiver<T>
+    where
+        T: Send + 'static;
+    type Mutex<T>
+        = TokioMutex<T>
+    where
+        T: Send + 'static;
     type Instant = TokioInstant;
 
     fn spawn<F>(&self, future: F) -> Self::Task<F::Output>

@@ -56,11 +56,10 @@ pub trait AsyncNet: Clone + Send + Sync + 'static {
 
     /// Establishes one outbound byte-stream connection to the given address.
     fn connect(&self, address: &str)
-        -> impl Future<Output = Result<Self::Socket, NetError>> + Send;
+    -> impl Future<Output = Result<Self::Socket, NetError>> + Send;
 
     /// Binds one listener to the given local address when supported.
-    fn bind(&self, address: &str)
-        -> impl Future<Output = Result<Self::Listener, NetError>> + Send;
+    fn bind(&self, address: &str) -> impl Future<Output = Result<Self::Listener, NetError>> + Send;
 }
 
 #[cfg(test)]
