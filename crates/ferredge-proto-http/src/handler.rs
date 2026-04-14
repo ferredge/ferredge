@@ -2,9 +2,15 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use alloc::format;
+use alloc::string::{String, ToString};
 use ferredge_core::prelude::{AsyncNet, AsyncRuntime, AsyncSocket, NetError};
 
 use crate::HttpRequest;
+
+struct ParsedEndpoint {
+    connect_target: String,
+    host_header: String,
+}
 
 /// Sends one native HTTP request to endpoint and returns raw response bytes.
 pub async fn send_request<N, R>(
@@ -17,9 +23,10 @@ where
     N: AsyncNet,
     R: AsyncRuntime,
 {
+    let parsed_endpoint = parse_endpoint(endpoint)?;
     let mut wire_request = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\n",
-        request.method, request.path, endpoint
+        request.method, request.path, parsed_endpoint.host_header
     );
 
     for (key, value) in &request.headers {
@@ -33,7 +40,7 @@ where
     wire_request.push_str("Connection: close\r\n\r\n");
 
     let mut upstream = net
-        .connect(endpoint)
+        .connect(parsed_endpoint.connect_target.as_str())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to endpoint: {e:?}"))?;
 
@@ -68,6 +75,53 @@ where
     Ok(response)
 }
 
+fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, anyhow::Error> {
+    let (authority_and_path, default_port) = if let Some(rest) = endpoint.strip_prefix("http://") {
+        (rest, 80)
+    } else if let Some(rest) = endpoint.strip_prefix("https://") {
+        (rest, 443)
+    } else {
+        (endpoint, 80)
+    };
+
+    let authority = authority_and_path
+        .split('/')
+        .next()
+        .filter(|authority| !authority.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("HTTP endpoint missing authority"))?;
+
+    if authority.starts_with('[') {
+        let Some(bracket_end) = authority.find(']') else {
+            return Err(anyhow::anyhow!("HTTP endpoint has malformed IPv6 authority"));
+        };
+
+        let suffix = &authority[bracket_end + 1..];
+        return match suffix {
+            "" => Ok(ParsedEndpoint {
+                connect_target: format!("{authority}:{default_port}"),
+                host_header: authority.to_string(),
+            }),
+            _ if suffix.starts_with(':') => Ok(ParsedEndpoint {
+                connect_target: authority.to_string(),
+                host_header: authority.to_string(),
+            }),
+            _ => Err(anyhow::anyhow!("HTTP endpoint has malformed IPv6 authority")),
+        };
+    }
+
+    if authority.contains(':') {
+        Ok(ParsedEndpoint {
+            connect_target: authority.to_string(),
+            host_header: authority.to_string(),
+        })
+    } else {
+        Ok(ParsedEndpoint {
+            connect_target: format!("{authority}:{default_port}"),
+            host_header: authority.to_string(),
+        })
+    }
+}
+
 async fn write_all_socket<S: AsyncSocket>(socket: &mut S, mut buf: &[u8]) -> Result<(), NetError> {
     while !buf.is_empty() {
         let written = socket.write(buf).await?;
@@ -77,4 +131,51 @@ async fn write_all_socket<S: AsyncSocket>(socket: &mut S, mut buf: &[u8]) -> Res
         buf = &buf[written..];
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_endpoint;
+
+    #[test]
+    fn parse_endpoint_adds_default_ports() {
+        let parsed = parse_endpoint("example.com").expect("host should parse");
+        assert_eq!(parsed.connect_target, "example.com:80");
+        assert_eq!(parsed.host_header, "example.com");
+
+        let parsed = parse_endpoint("http://example.com").expect("http url should parse");
+        assert_eq!(parsed.connect_target, "example.com:80");
+        assert_eq!(parsed.host_header, "example.com");
+
+        let parsed = parse_endpoint("https://example.com").expect("https url should parse");
+        assert_eq!(parsed.connect_target, "example.com:443");
+        assert_eq!(parsed.host_header, "example.com");
+    }
+
+    #[test]
+    fn parse_endpoint_handles_bracketed_ipv6() {
+        let parsed = parse_endpoint("[::1]").expect("ipv6 host should parse");
+        assert_eq!(parsed.connect_target, "[::1]:80");
+        assert_eq!(parsed.host_header, "[::1]");
+
+        let parsed = parse_endpoint("http://[::1]").expect("ipv6 url should parse");
+        assert_eq!(parsed.connect_target, "[::1]:80");
+        assert_eq!(parsed.host_header, "[::1]");
+
+        let parsed = parse_endpoint("https://[::1]").expect("ipv6 https url should parse");
+        assert_eq!(parsed.connect_target, "[::1]:443");
+        assert_eq!(parsed.host_header, "[::1]");
+
+        let parsed = parse_endpoint("http://[::1]:8080").expect("ipv6 with port should parse");
+        assert_eq!(parsed.connect_target, "[::1]:8080");
+        assert_eq!(parsed.host_header, "[::1]:8080");
+    }
+
+    #[test]
+    fn parse_endpoint_strips_path_before_connect() {
+        let parsed =
+            parse_endpoint("https://example.com/api/v1").expect("url with path should parse");
+        assert_eq!(parsed.connect_target, "example.com:443");
+        assert_eq!(parsed.host_header, "example.com");
+    }
 }
