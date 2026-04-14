@@ -357,6 +357,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ferredge-core",
+ "ferredge-runtime-async-std",
+ "ferredge-runtime-embassy",
+ "ferredge-runtime-tokio",
  "httparse",
  "serde",
 ]

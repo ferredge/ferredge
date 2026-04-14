@@ -1,3 +1,6 @@
+extern crate alloc;
+
+use alloc::{string::String, vec::Vec};
 use ferredge_core::prelude::DeviceResourceAttributes;
 use serde::{Deserialize, Serialize};
 

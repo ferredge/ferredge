@@ -1,16 +1,40 @@
-#[cfg(not(feature = "std"))]
+#![cfg_attr(not(feature = "std"), no_std)]
+
 extern crate alloc;
 
-#[cfg(feature = "std")]
-use std::{string::String, vec::Vec};
-
-#[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{string::{String, ToString}, vec::Vec};
 
 use ferredge_core::prelude::*;
 
 pub mod attributes;
 mod handler;
+#[cfg(all(feature = "tokio-runtime", feature = "async-std-runtime"))]
+compile_error!("ferredge-proto-http supports only one std runtime stack feature at a time");
+#[cfg(not(any(
+    feature = "tokio-runtime",
+    feature = "async-std-runtime",
+    feature = "embassy-runtime"
+)))]
+compile_error!("ferredge-proto-http requires one runtime stack feature");
+#[cfg(feature = "tokio-runtime")]
+mod runtime_stack {
+    pub use ferredge_runtime_tokio::{TokioNet as StackNet, TokioRuntime as StackRuntime};
+}
+#[cfg(feature = "async-std-runtime")]
+mod runtime_stack {
+    pub use ferredge_runtime_async_std::{AsyncStdNet as StackNet, AsyncStdRuntime as StackRuntime};
+}
+#[cfg(feature = "embassy-runtime")]
+mod runtime_stack {
+    pub use ferredge_runtime_embassy::{EmbassyNet as StackNet, EmbassyRuntime as StackRuntime};
+}
+
+#[cfg(any(
+    feature = "tokio-runtime",
+    feature = "async-std-runtime",
+    feature = "embassy-runtime"
+))]
+use runtime_stack::{StackNet, StackRuntime};
 
 /// Native outbound HTTP request used by the HTTP protocol adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,10 +77,32 @@ impl core::fmt::Display for HttpCommandConversionError {
 }
 
 /// HTTP protocol adapter implementing lifecycle and request/response capabilities.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpDriver {
     /// Device metadata and resource map served by this driver.
     pub dvc: Device<attributes::HttpResourceAttributes>,
+    /// Selected runtime used by the live HTTP transport path.
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "async-std-runtime",
+        feature = "embassy-runtime"
+    ))]
+    runtime: StackRuntime,
+    /// Selected network adapter used by the live HTTP transport path.
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "async-std-runtime",
+        feature = "embassy-runtime"
+    ))]
+    net: StackNet,
+}
+
+impl core::fmt::Debug for HttpDriver {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HttpDriver")
+            .field("dvc", &self.dvc)
+            .finish()
+    }
 }
 
 /// Viewer that carries enough context to convert routed command into native HTTP request.
@@ -66,6 +112,27 @@ pub struct HttpCommandRef<'a> {
     pub device: &'a Device<attributes::HttpResourceAttributes>,
     /// Routed command to convert.
     pub command: &'a Command,
+}
+
+impl HttpDriver {
+    /// Creates a new HTTP driver from device metadata.
+    pub fn new(dvc: Device<attributes::HttpResourceAttributes>) -> Self {
+        Self {
+            dvc,
+            #[cfg(any(
+                feature = "tokio-runtime",
+                feature = "async-std-runtime",
+                feature = "embassy-runtime"
+            ))]
+            runtime: StackRuntime::default(),
+            #[cfg(any(
+                feature = "tokio-runtime",
+                feature = "async-std-runtime",
+                feature = "embassy-runtime"
+            ))]
+            net: StackNet::default(),
+        }
+    }
 }
 
 impl TryFrom<HttpCommandRef<'_>> for HttpRequest {
@@ -127,21 +194,26 @@ impl RequestResponse for HttpDriver {
     type Response = HttpResponse;
     type Error = String;
 
-    #[cfg(feature = "std")]
     async fn execute(&self, request: Self::Request) -> Result<Self::Response, Self::Error> {
         let endpoint = match &self.dvc.endpoint {
             DeviceEndpoint::Http(config) => config.url.as_str(),
             _ => return Err("device endpoint is not HTTP".to_string()),
         };
 
-        handler::send_request(endpoint, &request)
-            .map(|body| HttpResponse { body })
-            .map_err(|e| e.to_string())
-    }
+        #[cfg(any(
+            feature = "tokio-runtime",
+            feature = "async-std-runtime",
+            feature = "embassy-runtime"
+        ))]
+        {
+            return handler::send_request(endpoint, &request, &self.runtime, &self.net)
+                .await
+                .map(|body| HttpResponse { body })
+                .map_err(|e| e.to_string());
+        }
 
-    #[cfg(not(feature = "std"))]
-    async fn execute(&self, _request: Self::Request) -> Result<Self::Response, Self::Error> {
-        Err("HTTP driver not implemented for no_std environment".to_string())
+        #[allow(unreachable_code)]
+        Err("HTTP driver runtime stack is unavailable".to_string())
     }
 }
 
@@ -182,8 +254,7 @@ mod tests {
             },
         );
 
-        HttpDriver {
-            dvc: Device {
+        HttpDriver::new(Device {
                 id: "device-1".to_string(),
                 name: "HTTP Device".to_string(),
                 status: DeviceStatus::Online,
@@ -194,8 +265,7 @@ mod tests {
                 max_connections: Some(4),
                 resources,
                 message_endpoints: Vec::new(),
-            },
-        }
+            })
     }
 
     #[test]
