@@ -1,13 +1,12 @@
-#[cfg(feature = "std")]
 use std::{
     collections::HashMap,
     string::String,
-    time::{Duration, Instant},
+    time::Duration,
     vec::Vec,
 };
 
 use ferredge_core::prelude::*;
-#[cfg(feature = "std")]
+use ferredge_core::prelude::RuntimeInstant as RuntimeInstantExt;
 use runtime_stack::StackSocket;
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
@@ -18,26 +17,26 @@ use crate::runtime_stack;
 #[cfg(feature = "async-std-runtime")]
 use crate::runtime_stack;
 
-#[cfg(feature = "std")]
+type RuntimeMutex<T> = <runtime_stack::StackRuntime as AsyncRuntime>::Mutex<T>;
+type StackInstant = <runtime_stack::StackRuntime as AsyncRuntime>::Instant;
+
 pub(crate) struct MqttClientSession {
     pub(crate) stream: StackSocket,
     pub(crate) connection: mqtt::Connection<mqtt::role::Client>,
     pub(crate) protocol_version: MqttProtocolVersion,
     pub(crate) keepalive_secs: Option<u16>,
-    pub(crate) last_activity: Instant,
+    pub(crate) last_activity: StackInstant,
     pub(crate) awaiting_pingresp: bool,
     pub(crate) pending_command_ids: HashMap<u16, String>,
     pub(crate) pending_reply_routes: HashMap<String, PendingReplyRoute>,
 }
 
-#[cfg(feature = "std")]
 #[derive(Debug, Clone)]
 pub(crate) struct PendingReplyRoute {
     pub(crate) command_id: String,
     pub(crate) reply_to: Option<Address>,
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn normalize_broker_addr(broker: &str) -> String {
     let without_scheme = broker
         .strip_prefix("mqtt://")
@@ -50,7 +49,6 @@ pub(crate) fn normalize_broker_addr(broker: &str) -> String {
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn mqtt_version_from_core(version: MqttProtocolVersion) -> mqtt::Version {
     match version {
         MqttProtocolVersion::V3_1_1 => mqtt::Version::V3_1_1,
@@ -58,7 +56,6 @@ pub(crate) fn mqtt_version_from_core(version: MqttProtocolVersion) -> mqtt::Vers
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn build_connect_packet(
     config: &MqttEndpointConfig,
 ) -> Result<mqtt::packet::Packet, String> {
@@ -168,7 +165,6 @@ pub(crate) fn build_connect_packet(
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn packet_request_into_packet(request: MqttPacketRequest) -> mqtt::packet::Packet {
     match request.packet {
         MqttWirePacket::V5Publish(packet) => packet.into(),
@@ -180,7 +176,6 @@ pub(crate) fn packet_request_into_packet(request: MqttPacketRequest) -> mqtt::pa
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn packet_request_packet_id(packet: &MqttWirePacket) -> Option<u16> {
     match packet {
         MqttWirePacket::V5Publish(packet) => packet.packet_id(),
@@ -192,7 +187,6 @@ pub(crate) fn packet_request_packet_id(packet: &MqttWirePacket) -> Option<u16> {
     }
 }
 
-#[cfg(feature = "std")]
 fn publish_requires_packet_id(packet: &MqttWirePacket) -> bool {
     match packet {
         MqttWirePacket::V5Publish(packet) => packet.qos() != mqtt::packet::Qos::AtMostOnce,
@@ -201,8 +195,8 @@ fn publish_requires_packet_id(packet: &MqttWirePacket) -> bool {
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) async fn send_packet_request_async(
+    runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
     device_id: &str,
     request: MqttPacketRequest,
@@ -219,11 +213,10 @@ pub(crate) async fn send_packet_request_async(
     let events = session
         .connection
         .checked_send(packet_request_into_packet(request));
-    let _ = handle_connection_events_async(session, device_id, None, events).await?;
+    let _ = handle_connection_events_async(runtime, session, device_id, None, events).await?;
     Ok(())
 }
 
-#[cfg(feature = "std")]
 fn assign_runtime_packet_id(
     session: &mut MqttClientSession,
     request: MqttPacketRequest,
@@ -256,7 +249,6 @@ fn assign_runtime_packet_id(
     }
 }
 
-#[cfg(feature = "std")]
 fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<MqttPacketRequest, String> {
     let command_id = request.command_id;
     let packet = match request.packet {
@@ -332,11 +324,11 @@ fn rebuild_with_packet_id(request: MqttPacketRequest, packet_id: u16) -> Result<
     Ok(MqttPacketRequest { command_id, packet })
 }
 
-#[cfg(feature = "std")]
 pub(crate) async fn read_from_session_async(
+    runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
     device_id: &str,
-    negotiated_connack: Option<&std::sync::Arc<std::sync::Mutex<Option<MqttConnackProperties>>>>,
+    negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
     timeout: Option<Duration>,
 ) -> Result<Vec<RoutedMessage>, String> {
     session
@@ -348,25 +340,25 @@ pub(crate) async fn read_from_session_async(
     match session.stream.read(&mut buffer).await {
         Ok(0) => Err("mqtt stream closed".to_string()),
         Ok(n) => {
-            session.last_activity = Instant::now();
+            session.last_activity = runtime.now();
             session.awaiting_pingresp = false;
             let mut cursor = mqtt::common::Cursor::new(&buffer[..n]);
             let events = session.connection.recv(&mut cursor);
-            handle_connection_events_async(session, device_id, negotiated_connack, events).await
+            handle_connection_events_async(runtime, session, device_id, negotiated_connack, events).await
         }
         Err(NetError::TimedOut) => {
-            send_keepalive_ping_if_due(session, device_id).await?;
+            send_keepalive_ping_if_due(runtime, session, device_id).await?;
             Ok(Vec::new())
         }
         Err(error) => Err(format!("failed reading MQTT stream: {error:?}")),
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) async fn handle_connection_events_async(
+    runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
     device_id: &str,
-    negotiated_connack: Option<&std::sync::Arc<std::sync::Mutex<Option<MqttConnackProperties>>>>,
+    negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
     events: Vec<mqtt::connection::Event>,
 ) -> Result<Vec<RoutedMessage>, String> {
     let mut routed = Vec::new();
@@ -383,11 +375,11 @@ pub(crate) async fn handle_connection_events_async(
                     .flush()
                     .await
                     .map_err(|e| format!("failed to flush MQTT packet: {e:?}"))?;
-                session.last_activity = Instant::now();
+                session.last_activity = runtime.now();
             }
             mqtt::connection::Event::NotifyPacketReceived(packet) => {
                 if let Some(negotiated_connack) = negotiated_connack {
-                    update_negotiated_connack(negotiated_connack, &packet)?;
+                    update_negotiated_connack(negotiated_connack, &packet).await?;
                 }
                 if let Some(message) = routed_message_from_packet(
                     &mut session.pending_command_ids,
@@ -413,8 +405,10 @@ pub(crate) async fn handle_connection_events_async(
     Ok(routed)
 }
 
-#[cfg(feature = "std")]
-pub(crate) async fn disconnect_session(session: &mut MqttClientSession) -> Result<(), String> {
+pub(crate) async fn disconnect_session(
+    runtime: &runtime_stack::StackRuntime,
+    session: &mut MqttClientSession,
+) -> Result<(), String> {
     let events = match session.protocol_version {
         MqttProtocolVersion::V5_0 => {
             let disconnect = mqtt::packet::v5_0::Disconnect::builder()
@@ -431,7 +425,7 @@ pub(crate) async fn disconnect_session(session: &mut MqttClientSession) -> Resul
             session.connection.checked_send(disconnect)
         }
     };
-    let _ = handle_connection_events_async(session, "", None, events).await?;
+    let _ = handle_connection_events_async(runtime, session, "", None, events).await?;
     session
         .stream
         .close()
@@ -439,8 +433,8 @@ pub(crate) async fn disconnect_session(session: &mut MqttClientSession) -> Resul
         .map_err(|e| format!("failed to close MQTT socket: {e:?}"))
 }
 
-#[cfg(feature = "std")]
 async fn send_keepalive_ping_if_due(
+    runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
     device_id: &str,
 ) -> Result<(), String> {
@@ -473,11 +467,10 @@ async fn send_keepalive_ping_if_due(
         }
     };
     session.awaiting_pingresp = true;
-    let _ = handle_connection_events_async(session, device_id, None, events).await?;
+    let _ = handle_connection_events_async(runtime, session, device_id, None, events).await?;
     Ok(())
 }
 
-#[cfg(feature = "std")]
 async fn write_all_socket_async(
     socket: &mut StackSocket,
     mut buf: &[u8],
@@ -492,9 +485,8 @@ async fn write_all_socket_async(
     Ok(())
 }
 
-#[cfg(feature = "std")]
-fn update_negotiated_connack(
-    negotiated_connack: &std::sync::Arc<std::sync::Mutex<Option<MqttConnackProperties>>>,
+async fn update_negotiated_connack(
+    negotiated_connack: &Shared<RuntimeMutex<Option<MqttConnackProperties>>>,
     packet: &mqtt::packet::Packet,
 ) -> Result<(), String> {
     let snapshot = match packet {
@@ -510,13 +502,13 @@ fn update_negotiated_connack(
     if let Some(snapshot) = snapshot {
         let mut guard = negotiated_connack
             .lock()
+            .await
             .map_err(|_| "failed to lock negotiated MQTT CONNACK state".to_string())?;
         *guard = Some(snapshot);
     }
     Ok(())
 }
 
-#[cfg(feature = "std")]
 fn connack_snapshot_from_v5(
     packet: &mqtt::packet::v5_0::Connack,
 ) -> Result<MqttConnackProperties, String> {
@@ -609,7 +601,6 @@ fn connack_snapshot_from_v5(
 }
 
 
-#[cfg(feature = "std")]
 pub(crate) fn routed_message_from_packet(
     pending_command_ids: &mut HashMap<u16, String>,
     pending_reply_routes: &mut HashMap<String, PendingReplyRoute>,
@@ -710,7 +701,6 @@ pub(crate) fn routed_message_from_packet(
     }
 }
 
-#[cfg(feature = "std")]
 fn pending_reply_route_from_packet(
     request: &MqttPacketRequest,
 ) -> Option<(String, PendingReplyRoute)> {
@@ -745,7 +735,6 @@ fn pending_reply_route_from_packet(
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn mqtt_source(device_id: &str) -> EndpointRef {
     EndpointRef {
         device_id: device_id.to_string(),
@@ -753,7 +742,6 @@ pub(crate) fn mqtt_source(device_id: &str) -> EndpointRef {
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn routed_event_from_v5_publish(
     device_id: &str,
     packet: &mqtt::packet::v5_0::Publish,
@@ -815,7 +803,6 @@ pub(crate) fn routed_event_from_v5_publish(
     }
 }
 
-#[cfg(feature = "std")]
 fn routed_reply_or_event_from_v5_publish(
     pending_reply_routes: &mut HashMap<String, PendingReplyRoute>,
     device_id: &str,
@@ -888,7 +875,6 @@ fn routed_reply_or_event_from_v5_publish(
     )))
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn routed_event_from_v3_publish(
     device_id: &str,
     packet: &mqtt::packet::v3_1_1::Publish,
@@ -914,7 +900,6 @@ pub(crate) fn routed_event_from_v3_publish(
     }
 }
 
-#[cfg(feature = "std")]
 fn routed_result_from_v5_puback(
     pending_command_ids: &mut HashMap<u16, String>,
     device_id: &str,
@@ -941,7 +926,6 @@ fn routed_result_from_v5_puback(
     )
 }
 
-#[cfg(feature = "std")]
 fn routed_result_from_v5_pubrec(
     pending_command_ids: &mut HashMap<u16, String>,
     device_id: &str,
@@ -968,7 +952,6 @@ fn routed_result_from_v5_pubrec(
     )
 }
 
-#[cfg(feature = "std")]
 fn routed_result_from_v5_pubcomp(
     pending_command_ids: &mut HashMap<u16, String>,
     device_id: &str,
@@ -995,7 +978,6 @@ fn routed_result_from_v5_pubcomp(
     )
 }
 
-#[cfg(feature = "std")]
 fn routed_result_from_v5_suback(
     pending_command_ids: &mut HashMap<u16, String>,
     device_id: &str,
@@ -1029,7 +1011,6 @@ fn routed_result_from_v5_suback(
     )
 }
 
-#[cfg(feature = "std")]
 fn routed_result_from_v5_unsuback(
     pending_command_ids: &mut HashMap<u16, String>,
     device_id: &str,
@@ -1063,7 +1044,6 @@ fn routed_result_from_v5_unsuback(
     )
 }
 
-#[cfg(feature = "std")]
 fn routed_result_from_v5_disconnect(
     device_id: &str,
     packet: &mqtt::packet::v5_0::Disconnect,
@@ -1099,7 +1079,6 @@ fn routed_result_from_v5_disconnect(
     }
 }
 
-#[cfg(feature = "std")]
 fn mqtt_result_meta(
     packet_id: Option<u16>,
     reason_codes: Vec<String>,
@@ -1119,7 +1098,6 @@ fn mqtt_result_meta(
     }
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn routed_result_from_packet_id(
     pending_command_ids: &mut HashMap<u16, String>,
     device_id: &str,
@@ -1138,7 +1116,6 @@ pub(crate) fn routed_result_from_packet_id(
     )
 }
 
-#[cfg(feature = "std")]
 fn routed_result_from_packet_id_with_transport(
     pending_command_ids: &mut HashMap<u16, String>,
     device_id: &str,

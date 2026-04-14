@@ -5,6 +5,7 @@ mod net;
 mod runtime;
 mod router;
 mod routed;
+mod sync;
 
 pub mod prelude {
     pub use crate::bridge::*;
@@ -14,4 +15,5 @@ pub mod prelude {
     pub use crate::runtime::*;
     pub use crate::router::*;
     pub use crate::routed::*;
+    pub use crate::sync::*;
 }

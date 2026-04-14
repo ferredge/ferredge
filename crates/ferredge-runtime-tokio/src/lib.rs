@@ -8,7 +8,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::{Handle, Runtime},
-    sync::mpsc,
+    sync::{Mutex, MutexGuard, mpsc},
     task::JoinHandle,
 };
 
@@ -30,6 +30,19 @@ pub struct TokioSender<T> {
 
 pub struct TokioReceiver<T> {
     inner: mpsc::Receiver<T>,
+}
+
+pub struct TokioMutex<T> {
+    inner: Mutex<T>,
+}
+
+pub struct TokioMutexGuard<'a, T> {
+    inner: MutexGuard<'a, T>,
+}
+
+#[derive(Clone)]
+pub struct TokioInstant {
+    inner: std::time::Instant,
 }
 
 impl<T> Clone for TokioSender<T> {
@@ -127,10 +140,55 @@ where
     }
 }
 
+impl<T> core::ops::Deref for TokioMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> core::ops::DerefMut for TokioMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T> AsyncMutex<T> for TokioMutex<T>
+where
+    T: Send + 'static,
+{
+    type Guard<'a>
+        = TokioMutexGuard<'a, T>
+    where
+        T: 'a;
+
+    async fn lock(&self) -> Result<Self::Guard<'_>, MutexError> {
+        Ok(TokioMutexGuard {
+            inner: self.inner.lock().await,
+        })
+    }
+
+    fn try_lock(&self) -> Result<Self::Guard<'_>, MutexError> {
+        self.inner
+            .try_lock()
+            .map(|inner| TokioMutexGuard { inner })
+            .map_err(|_| MutexError::Busy)
+    }
+}
+
+impl RuntimeInstant for TokioInstant {
+    fn elapsed(&self) -> Duration {
+        self.inner.elapsed()
+    }
+}
+
 impl AsyncRuntime for TokioRuntime {
     type Task<T> = TokioTask<T> where T: Send + 'static;
     type Sender<T> = TokioSender<T> where T: Send + 'static;
     type Receiver<T> = TokioReceiver<T> where T: Send + 'static;
+    type Mutex<T> = TokioMutex<T> where T: Send + 'static;
+    type Instant = TokioInstant;
 
     fn spawn<F>(&self, future: F) -> Self::Task<F::Output>
     where
@@ -148,6 +206,21 @@ impl AsyncRuntime for TokioRuntime {
     {
         let (tx, rx) = mpsc::channel(capacity);
         (TokioSender { inner: tx }, TokioReceiver { inner: rx })
+    }
+
+    fn mutex<T>(&self, value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static,
+    {
+        TokioMutex {
+            inner: Mutex::new(value),
+        }
+    }
+
+    fn now(&self) -> Self::Instant {
+        TokioInstant {
+            inner: std::time::Instant::now(),
+        }
     }
 
     async fn sleep(&self, duration: Duration) {

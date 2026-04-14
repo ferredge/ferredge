@@ -10,10 +10,11 @@ use std::{
 
 use ferredge_core::prelude::{
     ActionEmitter, Address, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
-    BrokerReconnectConfig, BrokerSubscriptionOptions, Command, Correlation, Device,
-    DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent, Lifecycle,
-    Map, MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion, ProtocolBridge, PubSub,
-    RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
+    BrokerReconnectConfig, BrokerSubscriptionOptions, ChannelReceiver, Command, Correlation,
+    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent,
+    Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion,
+    ProtocolBridge, PubSub, RoutedEvent, RoutedMessage, RoutedResult, TransportMeta,
+    AsyncRuntime,
 };
 use mqtt_protocol_core::mqtt;
 use ferredge_proto_http::{attributes::HttpResourceAttributes, HttpCommandRef, HttpDriver, HttpRequest};
@@ -24,6 +25,8 @@ use crate::{
     types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
     MqttDriver, MqttListenerStatus,
 };
+
+type RuntimeReceiver<T> = <StackRuntime as AsyncRuntime>::Receiver<T>;
 
 const TEST_STATUS_TIMEOUT_SECS: u64 = 5;
 const TEST_BROKER_READ_TIMEOUT_MS: u64 = 100;
@@ -66,15 +69,16 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 fn wait_for_status(
-    rx: &mpsc::Receiver<MqttListenerStatus>,
+    rx: &mut RuntimeReceiver<MqttListenerStatus>,
     matcher: impl Fn(&MqttListenerStatus) -> bool,
 ) -> MqttListenerStatus {
     let deadline = std::time::Instant::now() + Duration::from_secs(TEST_STATUS_TIMEOUT_SECS);
     loop {
-        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
-        let status = rx
-            .recv_timeout(timeout)
-            .expect("listener status should arrive before timeout");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "listener status should arrive before timeout"
+        );
+        let status = block_on(rx.recv()).expect("listener status should arrive before timeout");
         if matcher(&status) {
             return status;
         }
@@ -901,12 +905,12 @@ fn mqtt_listener_error_can_be_cleared_without_runtime() {
 fn mqtt_listener_status_subscription_receives_initial_state() {
     let driver = make_default_driver();
 
-    let rx = driver
+    let mut rx = driver
         .subscribe_listener_status()
         .expect("listener status subscription should succeed");
 
     assert_eq!(
-        rx.recv().expect("initial listener status should be sent"),
+        block_on(rx.recv()).expect("initial listener status should be sent"),
         MqttListenerStatus::Stopped
     );
 }
@@ -914,17 +918,17 @@ fn mqtt_listener_status_subscription_receives_initial_state() {
 #[test]
 fn mqtt_listener_status_subscription_receives_clear_transition() {
     let driver = make_default_driver();
-    let rx = driver
+    let mut rx = driver
         .subscribe_listener_status()
         .expect("listener status subscription should succeed");
-    let _ = rx.recv().expect("initial listener status should be sent");
+    let _ = block_on(rx.recv()).expect("initial listener status should be sent");
 
     driver
         .clear_listener_error()
         .expect("clearing empty listener error should succeed");
 
     assert_eq!(
-        rx.recv().expect("listener status transition should be sent"),
+        block_on(rx.recv()).expect("listener status transition should be sent"),
         MqttListenerStatus::Stopped
     );
 }
@@ -933,32 +937,32 @@ fn mqtt_listener_status_subscription_receives_clear_transition() {
 fn mqtt_listener_can_start_stop_and_restart() {
     let (broker, shutdown_tx, broker_handle) = spawn_test_broker_v5(None);
     let driver = make_driver(broker, vec![MqttProtocolVersion::V5_0]);
-    let rx = driver
+    let mut rx = driver
         .subscribe_listener_status()
         .expect("listener status subscription should succeed");
-    let _ = rx.recv().expect("initial listener status should be sent");
+    let _ = block_on(rx.recv()).expect("initial listener status should be sent");
 
     block_on(driver.start_listening(NoopSink)).expect("listener should start");
     assert_eq!(
-        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Running)),
+        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Running)),
         MqttListenerStatus::Running
     );
 
     block_on(driver.stop_listening()).expect("listener should stop");
     assert_eq!(
-        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Stopped)),
+        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Stopped)),
         MqttListenerStatus::Stopped
     );
 
     block_on(driver.start_listening(NoopSink)).expect("listener should restart");
     assert_eq!(
-        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Running)),
+        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Running)),
         MqttListenerStatus::Running
     );
 
     block_on(driver.stop()).expect("driver should stop cleanly");
     assert!(matches!(
-        wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Stopped)),
+        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Stopped)),
         MqttListenerStatus::Stopped
     ));
 
@@ -976,13 +980,14 @@ fn mqtt_listener_reports_failed_when_sink_rejects_event() {
         .expect("publish packet should build");
     let (broker, shutdown_tx, broker_handle) = spawn_test_broker_v5(Some(publish));
     let driver = make_driver(broker, vec![MqttProtocolVersion::V5_0]);
-    let rx = driver
+    let mut rx = driver
         .subscribe_listener_status()
         .expect("listener status subscription should succeed");
-    let _ = rx.recv().expect("initial listener status should be sent");
+    let _ = block_on(rx.recv()).expect("initial listener status should be sent");
 
     block_on(driver.start_listening(FailOnEventSink)).expect("listener should start");
-    let failed = wait_for_status(&rx, |status| matches!(status, MqttListenerStatus::Failed(_)));
+    let failed =
+        wait_for_status(&mut rx, |status| matches!(status, MqttListenerStatus::Failed(_)));
     assert_eq!(
         failed,
         MqttListenerStatus::Failed("failed to forward MQTT event to sink".to_string())
