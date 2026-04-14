@@ -1,5 +1,7 @@
 use core::{future::Future, time::Duration};
 
+use crate::sync::AsyncMutex;
+
 /// Error returned by runtime-backed task handles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskJoinError {
@@ -20,6 +22,15 @@ pub enum ChannelError {
     Closed,
     /// Channel operation failed because runtime resources are unavailable.
     RuntimeUnavailable,
+}
+
+/// Monotonic instant returned by a runtime clock.
+///
+/// Implementations should represent a monotonically increasing point in time suitable for
+/// elapsed-duration checks used by protocol keepalive and timeout logic.
+pub trait RuntimeInstant: Clone + Send + Sync + 'static {
+    /// Returns the duration elapsed since this instant was captured.
+    fn elapsed(&self) -> Duration;
 }
 
 /// Handle returned by runtime task spawning.
@@ -85,6 +96,14 @@ pub trait AsyncRuntime: Clone + Send + Sync + 'static {
     where
         T: Send + 'static;
 
+    /// Async mutex type created by `mutex`.
+    type Mutex<T>: AsyncMutex<T>
+    where
+        T: Send + 'static;
+
+    /// Monotonic instant type returned by `now`.
+    type Instant: RuntimeInstant;
+
     /// Spawns one background future onto the runtime.
     fn spawn<F>(&self, future: F) -> Self::Task<F::Output>
     where
@@ -95,6 +114,14 @@ pub trait AsyncRuntime: Clone + Send + Sync + 'static {
     fn channel<T>(&self, capacity: usize) -> (Self::Sender<T>, Self::Receiver<T>)
     where
         T: Send + 'static;
+
+    /// Creates one async mutex backed by the selected runtime.
+    fn mutex<T>(&self, value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static;
+
+    /// Returns the current monotonic instant for elapsed-time checks.
+    fn now(&self) -> Self::Instant;
 
     /// Suspends the current task for the requested duration.
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send;
@@ -156,6 +183,24 @@ mod tests {
     }
 
     struct MockReceiver<T>(core::marker::PhantomData<fn() -> T>);
+    struct MockMutex<T>(std::sync::Mutex<T>);
+    struct MockGuard<'a, T>(std::sync::MutexGuard<'a, T>);
+    #[derive(Clone)]
+    struct MockInstant(std::time::Instant);
+
+    impl<T> core::ops::Deref for MockGuard<'_, T> {
+        type Target = T;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<T> core::ops::DerefMut for MockGuard<'_, T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
 
     impl<T> Default for MockReceiver<T> {
         fn default() -> Self {
@@ -176,6 +221,36 @@ mod tests {
         }
     }
 
+    impl<T> AsyncMutex<T> for MockMutex<T>
+    where
+        T: Send + 'static,
+    {
+        type Guard<'a>
+            = MockGuard<'a, T>
+        where
+            T: 'a;
+
+        async fn lock(&self) -> Result<Self::Guard<'_>, crate::sync::MutexError> {
+            self.0
+                .lock()
+                .map(MockGuard)
+                .map_err(|_| crate::sync::MutexError::RuntimeUnavailable)
+        }
+
+        fn try_lock(&self) -> Result<Self::Guard<'_>, crate::sync::MutexError> {
+            self.0
+                .try_lock()
+                .map(MockGuard)
+                .map_err(|_| crate::sync::MutexError::Busy)
+        }
+    }
+
+    impl RuntimeInstant for MockInstant {
+        fn elapsed(&self) -> Duration {
+            self.0.elapsed()
+        }
+    }
+
     impl AsyncRuntime for MockRuntime {
         type Task<T>
             = MockTask<T>
@@ -189,6 +264,11 @@ mod tests {
             = MockReceiver<T>
         where
             T: Send + 'static;
+        type Mutex<T>
+            = MockMutex<T>
+        where
+            T: Send + 'static;
+        type Instant = MockInstant;
 
         fn spawn<F>(&self, _future: F) -> Self::Task<F::Output>
         where
@@ -203,6 +283,17 @@ mod tests {
             T: Send + 'static,
         {
             (MockSender::default(), MockReceiver::default())
+        }
+
+        fn mutex<T>(&self, value: T) -> Self::Mutex<T>
+        where
+            T: Send + 'static,
+        {
+            MockMutex(std::sync::Mutex::new(value))
+        }
+
+        fn now(&self) -> Self::Instant {
+            MockInstant(std::time::Instant::now())
         }
 
         async fn sleep(&self, _duration: Duration) {}

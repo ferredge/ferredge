@@ -3,6 +3,7 @@ use std::time::Duration;
 use async_std::{
     io::{ReadExt, WriteExt},
     net::{TcpListener, TcpStream},
+    sync::{Mutex, MutexGuard},
     task::{self, JoinHandle},
 };
 use ferredge_core::prelude::*;
@@ -23,6 +24,19 @@ pub struct AsyncStdSender<T> {
 
 pub struct AsyncStdReceiver<T> {
     inner: async_std::channel::Receiver<T>,
+}
+
+pub struct AsyncStdMutex<T> {
+    inner: Mutex<T>,
+}
+
+pub struct AsyncStdMutexGuard<'a, T> {
+    inner: MutexGuard<'a, T>,
+}
+
+#[derive(Clone)]
+pub struct AsyncStdInstant {
+    inner: std::time::Instant,
 }
 
 impl<T> Clone for AsyncStdSender<T> {
@@ -102,10 +116,55 @@ where
     }
 }
 
+impl<T> core::ops::Deref for AsyncStdMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> core::ops::DerefMut for AsyncStdMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T> AsyncMutex<T> for AsyncStdMutex<T>
+where
+    T: Send + 'static,
+{
+    type Guard<'a>
+        = AsyncStdMutexGuard<'a, T>
+    where
+        T: 'a;
+
+    async fn lock(&self) -> Result<Self::Guard<'_>, MutexError> {
+        Ok(AsyncStdMutexGuard {
+            inner: self.inner.lock().await,
+        })
+    }
+
+    fn try_lock(&self) -> Result<Self::Guard<'_>, MutexError> {
+        self.inner
+            .try_lock()
+            .map(|inner| AsyncStdMutexGuard { inner })
+            .ok_or(MutexError::Busy)
+    }
+}
+
+impl RuntimeInstant for AsyncStdInstant {
+    fn elapsed(&self) -> Duration {
+        self.inner.elapsed()
+    }
+}
+
 impl AsyncRuntime for AsyncStdRuntime {
     type Task<T> = AsyncStdTask<T> where T: Send + 'static;
     type Sender<T> = AsyncStdSender<T> where T: Send + 'static;
     type Receiver<T> = AsyncStdReceiver<T> where T: Send + 'static;
+    type Mutex<T> = AsyncStdMutex<T> where T: Send + 'static;
+    type Instant = AsyncStdInstant;
 
     fn spawn<F>(&self, future: F) -> Self::Task<F::Output>
     where
@@ -126,6 +185,21 @@ impl AsyncRuntime for AsyncStdRuntime {
             AsyncStdSender { inner: tx },
             AsyncStdReceiver { inner: rx },
         )
+    }
+
+    fn mutex<T>(&self, value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static,
+    {
+        AsyncStdMutex {
+            inner: Mutex::new(value),
+        }
+    }
+
+    fn now(&self) -> Self::Instant {
+        AsyncStdInstant {
+            inner: std::time::Instant::now(),
+        }
     }
 
     async fn sleep(&self, duration: Duration) {
