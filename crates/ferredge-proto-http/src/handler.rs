@@ -1,14 +1,22 @@
-#[cfg(feature = "std")]
-use std::{
-    io::{Read, Write},
-    net::TcpStream,
-};
+extern crate alloc;
+
+use alloc::vec::Vec;
+use alloc::format;
+use ferredge_core::prelude::{AsyncNet, AsyncRuntime, AsyncSocket, NetError};
 
 use crate::HttpRequest;
 
 /// Sends one native HTTP request to endpoint and returns raw response bytes.
-#[cfg(feature = "std")]
-pub fn send_request(endpoint: &str, request: &HttpRequest) -> Result<Vec<u8>, anyhow::Error> {
+pub async fn send_request<N, R>(
+    endpoint: &str,
+    request: &HttpRequest,
+    _runtime: &R,
+    net: &N,
+) -> Result<Vec<u8>, anyhow::Error>
+where
+    N: AsyncNet,
+    R: AsyncRuntime,
+{
     let mut wire_request = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\n",
         request.method, request.path, endpoint
@@ -24,31 +32,49 @@ pub fn send_request(endpoint: &str, request: &HttpRequest) -> Result<Vec<u8>, an
 
     wire_request.push_str("Connection: close\r\n\r\n");
 
-    let mut upstream = TcpStream::connect(endpoint)
-        .map_err(|e| anyhow::anyhow!("Failed to connect to endpoint: {e}"))?;
+    let mut upstream = net
+        .connect(endpoint)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to endpoint: {e:?}"))?;
 
-    upstream
-        .write_all(wire_request.as_bytes())
-        .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+    write_all_socket(&mut upstream, wire_request.as_bytes())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to send request: {e:?}"))?;
 
     if let Some(body) = &request.body {
-        upstream
-            .write_all(body)
-            .map_err(|e| anyhow::anyhow!("Failed to send request body: {e}"))?;
+        write_all_socket(&mut upstream, body)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send request body: {e:?}"))?;
     }
 
-    let mut response = Vec::new();
     upstream
-        .read_to_end(&mut response)
-        .map_err(|e| anyhow::anyhow!("Failed to read response: {e}"))?;
+        .flush()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to flush request: {e:?}"))?;
+
+    let mut response = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let count = upstream
+            .read(&mut buffer)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read response: {e:?}"))?;
+        if count == 0 {
+            break;
+        }
+        response.extend_from_slice(&buffer[..count]);
+    }
 
     Ok(response)
 }
 
-/// Placeholder no_std handler until HTTP transport support is introduced there.
-#[cfg(not(feature = "std"))]
-pub fn send_request(_endpoint: &str, _request: &HttpRequest) -> Result<Vec<u8>, anyhow::Error> {
-    Err(anyhow::anyhow!(
-        "HTTP driver not implemented for no_std environment"
-    ))
+async fn write_all_socket<S: AsyncSocket>(socket: &mut S, mut buf: &[u8]) -> Result<(), NetError> {
+    while !buf.is_empty() {
+        let written = socket.write(buf).await?;
+        if written == 0 {
+            return Err(NetError::Closed);
+        }
+        buf = &buf[written..];
+    }
+    Ok(())
 }

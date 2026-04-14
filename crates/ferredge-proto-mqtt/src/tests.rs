@@ -383,8 +383,7 @@ fn make_http_driver() -> HttpDriver {
         },
     );
 
-    HttpDriver {
-        dvc: Device {
+    HttpDriver::new(Device {
             id: "http-device-1".to_string(),
             name: "HTTP Device".to_string(),
             status: DeviceStatus::Online,
@@ -395,8 +394,7 @@ fn make_http_driver() -> HttpDriver {
             max_connections: Some(4),
             resources,
             message_endpoints: Vec::new(),
-        },
-    }
+        })
 }
 
 #[test]
