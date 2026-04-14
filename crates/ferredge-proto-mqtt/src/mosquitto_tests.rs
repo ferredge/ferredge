@@ -7,11 +7,12 @@ use std::{
 };
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, BrokerBackoffStrategy, BrokerMessageOptions, BrokerReconnectConfig,
-    BrokerSubscriptionOptions, BrokerChannelKind, Command, Correlation, DeliveryGuarantee, Device,
+    Address, BrokerAddress, BrokerBackoffStrategy, BrokerChannelKind, BrokerMessageOptions,
+    BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
+    BrokerSubscriptionProtocolOptions, Command, Correlation, DeliveryGuarantee, Device,
     DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
-    MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion, PubSub, RoutedEvent,
-    TransportMeta,
+    MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat,
+    MqttProtocolVersion, MqttSubscriptionOptions, PubSub, RoutedEvent, TransportMeta,
 };
 
 use crate::{
@@ -86,6 +87,7 @@ fn make_driver_with_config(
             session_expiry_secs,
             topic_prefix: None,
             connect_properties: MqttConnectProperties::default(),
+            will: None,
             reconnect,
             supported_versions: vec![MqttProtocolVersion::V5_0],
         }),
@@ -527,13 +529,17 @@ fn mosquitto_v5_complex_property_roundtrip() {
         br#"{"ok":true}"#,
         BrokerMessageOptions {
             delivery: Some(DeliveryGuarantee::BestEffort),
-            headers: vec![
-                ("content-type".to_string(), "application/json".to_string()),
-                ("x-trace".to_string(), "trace-123".to_string()),
-                ("x-origin".to_string(), "ferredge".to_string()),
-            ],
             reply_to: Some("ferredge/it/reply".to_string()),
             correlation_id: Some("corr-v5-123".to_string()),
+            protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
+                content_type: Some("application/json".to_string()),
+                user_properties: vec![
+                    ("x-trace".to_string(), "trace-123".to_string()),
+                    ("x-origin".to_string(), "ferredge".to_string()),
+                ],
+                ..MqttMessageOptions::default()
+            })),
+            ..BrokerMessageOptions::default()
         },
     )))
     .expect("publisher should publish");
@@ -569,6 +575,276 @@ fn mosquitto_v5_complex_property_roundtrip() {
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
     block_on(subscriber.stop()).expect("subscriber should stop cleanly");
+}
+
+#[test]
+fn mosquitto_retained_publish_roundtrip_preserves_meta() {
+    let broker = MosquittoGuard::start();
+    let publisher = make_named_driver(
+        broker.broker_url(),
+        "mqtt-retain-publisher",
+        "ferredge-mosquitto-retain-publisher",
+    );
+    let subscriber = make_named_driver(
+        broker.broker_url(),
+        "mqtt-retain-subscriber",
+        "ferredge-mosquitto-retain-subscriber",
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let topic = "ferredge/it/retain";
+    let payload = br#"{"retained":true}"#;
+
+    block_on(publisher.start()).expect("publisher should connect");
+    block_on(publisher.publish(publish_packet(
+        &publisher,
+        "pub-retain-1",
+        topic,
+        payload,
+        BrokerMessageOptions {
+            protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
+                retain: true,
+                payload_format: Some(MqttPayloadFormat::Utf8),
+                content_type: Some("application/json".to_string()),
+                message_expiry_interval_secs: Some(30),
+                ..MqttMessageOptions::default()
+            })),
+            ..BrokerMessageOptions::default()
+        },
+    )))
+    .expect("publisher should publish retained payload");
+    block_on(publisher.stop()).expect("publisher should stop cleanly");
+
+    block_on(subscriber.start()).expect("subscriber should connect");
+    block_on(subscriber.subscribe(
+        subscribe_packet(&subscriber, "sub-retain-1", topic),
+        RecordingSink {
+            events: Arc::clone(&events),
+        },
+    ))
+    .expect("subscriber should subscribe");
+    block_on(subscriber.start_listening(RecordingSink {
+        events: Arc::clone(&events),
+    }))
+    .expect("subscriber listener should start");
+
+    let event = wait_for_event_payload(&events, payload);
+    assert_eq!(event.address, Address::Channel(topic.to_string()));
+    match event.transport {
+        Some(TransportMeta::Mqtt(meta)) => {
+            assert!(meta.retain, "retained publish should stay marked retained");
+            assert_eq!(meta.content_type, Some("application/json".to_string()));
+            assert_eq!(meta.payload_format, Some("1".to_string()));
+            assert_eq!(meta.message_expiry_interval_secs, Some(30));
+        }
+        other => panic!("expected MQTT transport metadata, got {other:?}"),
+    }
+
+    let clear_status = ProcessCommand::new("mosquitto_pub")
+        .args([
+            "-h",
+            broker.host().as_str(),
+            "-p",
+            broker.port_string().as_str(),
+            "-V",
+            "mqttv5",
+            "-t",
+            topic,
+            "-n",
+            "-r",
+        ])
+        .status()
+        .expect("mosquitto_pub should clear retained message");
+    assert!(clear_status.success());
+
+    block_on(subscriber.stop()).expect("subscriber should stop cleanly");
+}
+
+#[test]
+#[ignore = "requires local mosquitto process and escalated execution"]
+fn mosquitto_v5_subscription_identifier_and_no_local_work() {
+    let broker = MosquittoGuard::start();
+    let driver = make_named_driver(
+        broker.broker_url(),
+        "mqtt-subopts-device",
+        "ferredge-mosquitto-subopts",
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let topic = "ferredge/it/subopts";
+
+    block_on(driver.start()).expect("driver should connect");
+    block_on(driver.subscribe(
+        MqttPacketRequest::try_from(MqttCommandRef {
+            device: &driver.dvc,
+            command: &Command {
+                id: "subopts-sub".to_string(),
+                source_device_id: None,
+                target_device_id: driver.dvc.id.clone(),
+                intent: Intent::Subscribe {
+                    channel: BrokerAddress {
+                        name: topic.to_string(),
+                        kind: Some(BrokerChannelKind::Topic),
+                    },
+                    options: BrokerSubscriptionOptions {
+                        delivery: Some(DeliveryGuarantee::AtLeastOnce),
+                        protocol: Some(BrokerSubscriptionProtocolOptions::Mqtt(
+                            MqttSubscriptionOptions {
+                                no_local: true,
+                                subscription_identifier: Some(41),
+                                ..MqttSubscriptionOptions::default()
+                            },
+                        )),
+                        ..BrokerSubscriptionOptions::default()
+                    },
+                },
+                correlation: None,
+            },
+        })
+        .expect("subscribe packet should build"),
+        RecordingSink {
+            events: Arc::clone(&events),
+        },
+    ))
+    .expect("driver should subscribe");
+    block_on(driver.start_listening(RecordingSink {
+        events: Arc::clone(&events),
+    }))
+    .expect("driver listener should start");
+
+    block_on(driver.publish(publish_packet(
+        &driver,
+        "subopts-pub-self",
+        topic,
+        b"self-should-not-loop",
+        BrokerMessageOptions::default(),
+    )))
+    .expect("driver should publish to same topic");
+    thread::sleep(Duration::from_millis(MOSQUITTO_UNSUBSCRIBE_SETTLE_MS));
+    assert!(
+        events.lock().expect("events lock").is_empty(),
+        "no_local subscription should suppress own publish"
+    );
+
+    let pub_status = ProcessCommand::new("mosquitto_pub")
+        .args([
+            "-h",
+            broker.host().as_str(),
+            "-p",
+            broker.port_string().as_str(),
+            "-V",
+            "mqttv5",
+            "-t",
+            topic,
+            "-m",
+            "remote-should-arrive",
+        ])
+        .status()
+        .expect("mosquitto_pub should publish remote message");
+    assert!(pub_status.success());
+
+    let event = wait_for_event_payload(&events, b"remote-should-arrive");
+    match event.transport {
+        Some(TransportMeta::Mqtt(meta)) => {
+            assert_eq!(meta.subscription_identifiers, vec![41]);
+        }
+        other => panic!("expected MQTT transport metadata, got {other:?}"),
+    }
+
+    block_on(driver.stop()).expect("driver should stop cleanly");
+}
+
+#[test]
+#[ignore = "requires local mosquitto process and escalated execution"]
+fn mosquitto_shared_subscriptions_load_balance() {
+    let broker = MosquittoGuard::start();
+    let subscriber_a = make_named_driver(
+        broker.broker_url(),
+        "mqtt-shared-subscriber-a",
+        "ferredge-mosquitto-shared-a",
+    );
+    let subscriber_b = make_named_driver(
+        broker.broker_url(),
+        "mqtt-shared-subscriber-b",
+        "ferredge-mosquitto-shared-b",
+    );
+    let publisher = make_named_driver(
+        broker.broker_url(),
+        "mqtt-shared-publisher",
+        "ferredge-mosquitto-shared-publisher",
+    );
+    let events_a = Arc::new(Mutex::new(Vec::new()));
+    let events_b = Arc::new(Mutex::new(Vec::new()));
+    let topic = "ferredge/it/shared";
+
+    for (driver, events, sub_id) in [
+        (&subscriber_a, Arc::clone(&events_a), "shared-sub-a"),
+        (&subscriber_b, Arc::clone(&events_b), "shared-sub-b"),
+    ] {
+        block_on(driver.start()).expect("subscriber should connect");
+        block_on(driver.subscribe(
+            MqttPacketRequest::try_from(MqttCommandRef {
+                device: &driver.dvc,
+                command: &Command {
+                    id: sub_id.to_string(),
+                    source_device_id: None,
+                    target_device_id: driver.dvc.id.clone(),
+                    intent: Intent::Subscribe {
+                        channel: BrokerAddress {
+                            name: topic.to_string(),
+                            kind: Some(BrokerChannelKind::Topic),
+                        },
+                        options: BrokerSubscriptionOptions {
+                            shared_group: Some("workers".to_string()),
+                            ..BrokerSubscriptionOptions::default()
+                        },
+                    },
+                    correlation: None,
+                },
+            })
+            .expect("shared subscribe should build"),
+            RecordingSink {
+                events: Arc::clone(&events),
+            },
+        ))
+        .expect("subscriber should subscribe shared topic");
+        block_on(driver.start_listening(RecordingSink {
+            events: Arc::clone(&events),
+        }))
+        .expect("subscriber listener should start");
+    }
+
+    block_on(publisher.start()).expect("publisher should connect");
+    block_on(publisher.publish(publish_packet(
+        &publisher,
+        "shared-pub-1",
+        topic,
+        b"shared-only-once",
+        BrokerMessageOptions::default(),
+    )))
+    .expect("publisher should publish shared test message");
+
+    let deadline = Instant::now() + Duration::from_secs(MOSQUITTO_EVENT_WAIT_TIMEOUT_SECS);
+    loop {
+        let count = events_a.lock().expect("events_a lock").len()
+            + events_b.lock().expect("events_b lock").len();
+        if count == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shared subscription should deliver to exactly one subscriber"
+        );
+        thread::sleep(Duration::from_millis(MOSQUITTO_POLL_INTERVAL_MS));
+    }
+
+    assert_eq!(
+        events_a.lock().expect("events_a lock").len()
+            + events_b.lock().expect("events_b lock").len(),
+        1
+    );
+
+    block_on(publisher.stop()).expect("publisher should stop cleanly");
+    block_on(subscriber_a.stop()).expect("subscriber A should stop cleanly");
+    block_on(subscriber_b.stop()).expect("subscriber B should stop cleanly");
 }
 
 #[test]

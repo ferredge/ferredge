@@ -1,11 +1,6 @@
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
-#[cfg(feature = "std")]
-use std::{string::String, vec::Vec};
-
-#[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap as StdlessMap, collections::VecDeque, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -15,8 +10,11 @@ use crate::command::BrokerAddress;
 #[cfg(feature = "std")]
 pub use std::collections::{HashMap as Map, VecDeque};
 
-#[cfg(not(feature = "std"))]
-pub type Map<K, V> = StdlessMap<K, V>;
+#[cfg(feature = "hashbrown")]
+pub use hashbrown::collections::{HashMap as Map, VecDeque};
+
+#[cfg(not(any(feature = "std", feature = "hashbrown")))]
+pub use alloc::collections::{BTreeMap as Map, VecDeque};
 
 /// Stable identifier for registered device.
 pub type DeviceId = String;
@@ -59,6 +57,33 @@ pub struct TlsConfig {
     pub client_certificate_pem: Option<String>,
     /// Optional PEM-encoded private key for client certificate.
     pub client_key_pem: Option<String>,
+}
+
+/// MQTT last-will publish configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MqttWillConfig {
+    /// Topic where broker publishes will on unexpected disconnect.
+    pub topic: String,
+    /// Will payload bytes.
+    pub payload: Vec<u8>,
+    /// Delivery guarantee used for will publish.
+    pub delivery: Option<crate::command::DeliveryGuarantee>,
+    /// Whether will should be retained by broker.
+    pub retain: bool,
+    /// Optional MQTT v5 will delay interval in seconds.
+    pub delay_interval_secs: Option<u32>,
+    /// Optional MQTT v5 will payload format indicator.
+    pub payload_format: Option<crate::command::MqttPayloadFormat>,
+    /// Optional MQTT v5 will message expiry interval in seconds.
+    pub message_expiry_interval_secs: Option<u32>,
+    /// Optional MQTT v5 will content type.
+    pub content_type: Option<String>,
+    /// Optional MQTT v5 will response topic.
+    pub response_topic: Option<String>,
+    /// Optional MQTT v5 will correlation data.
+    pub correlation_data: Option<Vec<u8>>,
+    /// Optional MQTT v5 will user properties.
+    pub user_properties: Vec<(String, String)>,
 }
 
 /// Strategy used to compute delay between broker reconnect attempts.
@@ -151,6 +176,8 @@ pub struct MqttConnectProperties {
     pub request_response_information: Option<bool>,
     /// Whether broker should include detailed problem information on failures.
     pub request_problem_information: Option<bool>,
+    /// Optional session expiry interval override in seconds.
+    pub session_expiry_interval_secs: Option<u32>,
     /// Optional enhanced authentication method.
     pub authentication_method: Option<String>,
     /// Optional enhanced authentication payload.
@@ -166,6 +193,8 @@ pub struct MqttConnackProperties {
     pub session_present: bool,
     /// MQTT v5 connect reason code returned by broker.
     pub reason_code: Option<String>,
+    /// Optional human-readable connect reason string.
+    pub reason_string: Option<String>,
     /// Broker-assigned client identifier, if one was returned.
     pub assigned_client_identifier: Option<String>,
     /// Response information string returned by broker when requested.
@@ -178,6 +207,8 @@ pub struct MqttConnackProperties {
     pub maximum_packet_size: Option<u32>,
     /// Server-advertised topic alias maximum.
     pub topic_alias_maximum: Option<u16>,
+    /// Session expiry interval negotiated by broker.
+    pub session_expiry_interval_secs: Option<u32>,
     /// Maximum QoS supported by server.
     pub maximum_qos: Option<u8>,
     /// Whether retained messages are supported by server.
@@ -219,6 +250,8 @@ pub struct MqttEndpointConfig {
     pub topic_prefix: Option<String>,
     /// Optional MQTT v5 CONNECT property set used during negotiation.
     pub connect_properties: MqttConnectProperties,
+    /// Optional MQTT last-will configuration.
+    pub will: Option<MqttWillConfig>,
     /// Reconnect policy shared with broker-oriented transports.
     pub reconnect: BrokerReconnectConfig,
     /// MQTT protocol versions supported by broker or deployment policy.
@@ -430,6 +463,7 @@ mod tests {
                 clean_start: true,
                 session_expiry_secs: None,
                 topic_prefix: None,
+                will: None,
                 connect_properties: MqttConnectProperties::default(),
                 reconnect: BrokerReconnectConfig::default(),
                 supported_versions: vec![MqttProtocolVersion::V5_0, MqttProtocolVersion::V3_1_1],
@@ -476,6 +510,7 @@ mod tests {
             connect_properties: MqttConnectProperties::default(),
             reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V3_1_1, MqttProtocolVersion::V5_0],
+            will: None,
         };
         assert_eq!(
             preferred_v5.preferred_protocol_version(),
@@ -494,6 +529,7 @@ mod tests {
             connect_properties: MqttConnectProperties::default(),
             reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V3_1_1],
+            will: None,
         };
         assert_eq!(
             fallback_v3.preferred_protocol_version(),

@@ -1,10 +1,5 @@
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
-#[cfg(feature = "std")]
-use std::{string::String, vec::Vec};
-
-#[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
 use crate::device::DeviceId;
@@ -57,6 +52,26 @@ pub enum DeliveryGuarantee {
     ExactlyOnce,
 }
 
+/// MQTT payload format indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MqttPayloadFormat {
+    /// Payload is arbitrary binary bytes.
+    Bytes,
+    /// Payload should be interpreted as UTF-8 text.
+    Utf8,
+}
+
+/// MQTT retained-message handling policy for subscriptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MqttRetainHandling {
+    /// Send retained messages when subscription is established.
+    SendRetained,
+    /// Send retained messages only when subscription does not already exist.
+    SendRetainedIfNotExists,
+    /// Do not send retained messages on subscribe.
+    DoNotSendRetained,
+}
+
 /// Protocol-neutral broker send options preserved in routed command layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BrokerMessageOptions {
@@ -68,6 +83,8 @@ pub struct BrokerMessageOptions {
     pub reply_to: Option<String>,
     /// Optional application-level correlation identifier.
     pub correlation_id: Option<String>,
+    /// Optional protocol-specific broker extension.
+    pub protocol: Option<BrokerMessageProtocolOptions>,
 }
 
 /// Protocol-neutral broker subscription options preserved in routed command layer.
@@ -79,6 +96,58 @@ pub struct BrokerSubscriptionOptions {
     pub durable_name: Option<String>,
     /// Optional shared consumer group identifier.
     pub shared_group: Option<String>,
+    /// Optional protocol-specific subscription extension.
+    pub protocol: Option<BrokerSubscriptionProtocolOptions>,
+}
+
+/// Tagged protocol-specific broker send options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrokerMessageProtocolOptions {
+    /// MQTT-specific publish options.
+    Mqtt(MqttMessageOptions),
+}
+
+/// MQTT-specific broker send options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MqttMessageOptions {
+    /// Whether broker should retain message for future subscribers.
+    pub retain: bool,
+    /// Optional MQTT v5 payload format indicator.
+    pub payload_format: Option<MqttPayloadFormat>,
+    /// Optional MQTT v5 content type.
+    pub content_type: Option<String>,
+    /// Optional MQTT v5 message expiry interval in seconds.
+    pub message_expiry_interval_secs: Option<u32>,
+    /// Optional MQTT v5 topic alias.
+    pub topic_alias: Option<u16>,
+    /// Optional MQTT v5 user properties.
+    pub user_properties: Vec<(String, String)>,
+    /// Optional MQTT v5 response topic. If omitted, generic `reply_to` is used when possible.
+    pub response_topic: Option<String>,
+    /// Optional raw MQTT v5 correlation data.
+    pub correlation_data: Option<Vec<u8>>,
+}
+
+/// Tagged protocol-specific broker subscription options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrokerSubscriptionProtocolOptions {
+    /// MQTT-specific subscribe options.
+    Mqtt(MqttSubscriptionOptions),
+}
+
+/// MQTT-specific broker subscription options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MqttSubscriptionOptions {
+    /// Prevent broker from sending messages published by same client.
+    pub no_local: bool,
+    /// Preserve original RETAIN flag on forwarded messages.
+    pub retain_as_published: bool,
+    /// Retained-message delivery policy when subscription starts.
+    pub retain_handling: Option<MqttRetainHandling>,
+    /// Optional MQTT v5 subscription identifier.
+    pub subscription_identifier: Option<u32>,
+    /// Optional MQTT v5 user properties.
+    pub user_properties: Vec<(String, String)>,
 }
 
 /// Generic broker address used across topic, queue, subject, and stream transports.

@@ -49,16 +49,26 @@ pub struct MqttMeta {
     pub packet_id: Option<u16>,
     /// Optional content type declared on MQTT v5 publish.
     pub content_type: Option<String>,
+    /// Optional MQTT v5 payload format indicator.
+    pub payload_format: Option<String>,
+    /// Optional MQTT v5 message expiry interval in seconds.
+    pub message_expiry_interval_secs: Option<u32>,
     /// Optional response topic declared on MQTT v5 publish.
     pub response_topic: Option<String>,
     /// Optional correlation data preserved as UTF-8 lossless string view.
     pub correlation_data: Option<String>,
+    /// Optional raw correlation data preserved losslessly.
+    pub correlation_data_bytes: Option<Vec<u8>>,
+    /// Optional MQTT v5 topic alias.
+    pub topic_alias: Option<u16>,
     /// Optional subscription identifiers included by broker on MQTT v5 publish.
     pub subscription_identifiers: Vec<u32>,
     /// Optional MQTT v5 user properties preserved from packet metadata.
     pub user_properties: Vec<(String, String)>,
     /// Optional MQTT v5 reason code list for ack or disconnect packets.
     pub reason_codes: Vec<String>,
+    /// Optional MQTT v5 human-readable reason string.
+    pub reason_string: Option<String>,
 }
 
 /// Transport-specific message metadata preserved during routing.

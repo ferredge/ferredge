@@ -1,13 +1,7 @@
-#![cfg_attr(not(feature = "std"), no_std)]
 //! MQTT protocol adapter for ferredge.
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
-#[cfg(feature = "std")]
-use std::string::{String, ToString};
-
-#[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 
 use ferredge_core::prelude::*;
@@ -58,8 +52,12 @@ use runtime::{
 };
 
 pub use types::{
+    MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
     MqttCommandConversionError, MqttPublishRequest, MqttSubscriptionRequest, MqttWirePacket,
 };
+
+#[cfg(feature = "std")]
+type MqttAuthHandler = Shared<dyn MqttAuthProvider>;
 
 const MQTT_CONNECT_IO_TIMEOUT_MS: u64 = 1_000;
 const MQTT_ACK_READ_TIMEOUT_MS: u64 = 250;
@@ -110,6 +108,8 @@ pub struct MqttDriver {
     desired_subscriptions: Shared<RuntimeMutex<Map<String, MqttPacketRequest>>>,
     /// Queued outbound requests waiting for broker recovery.
     recovery_queue: Shared<RuntimeMutex<VecDeque<MqttPacketRequest>>>,
+    /// Optional enhanced authentication callback for MQTT v5 AUTH flow.
+    auth_handler: Shared<RuntimeMutex<Option<MqttAuthHandler>>>,
 }
 
 impl core::fmt::Debug for MqttDriver {
@@ -138,7 +138,21 @@ impl MqttDriver {
             net: StackNet::default(),
             desired_subscriptions: Shared::new(runtime.mutex(Map::new())),
             recovery_queue: Shared::new(runtime.mutex(VecDeque::new())),
+            auth_handler: Shared::new(runtime.mutex(None)),
         }
+    }
+
+    /// Registers enhanced MQTT v5 auth callback used for connect-time and re-auth exchanges.
+    pub fn set_auth_handler<P>(&self, handler: P) -> Result<(), String>
+    where
+        P: MqttAuthProvider + 'static,
+    {
+        let mut guard = self
+            .runtime
+            .block_on(self.auth_handler.lock())
+            .map_err(|_| "failed to lock MQTT auth handler".to_string())?;
+        *guard = Some(Shared::new(handler));
+        Ok(())
     }
 
     async fn ensure_connected_async(&self) -> Result<(), String> {
@@ -190,6 +204,7 @@ impl MqttDriver {
             awaiting_pingresp: false,
             pending_command_ids: Map::new(),
             pending_reply_routes: Map::new(),
+            authentication_method: config.connect_properties.authentication_method.clone(),
         };
         let events = session.connection.checked_send(connect_packet);
         runtime::handle_connection_events_async(
@@ -197,19 +212,40 @@ impl MqttDriver {
             &mut session,
             &self.dvc.id,
             Some(&self.negotiated_connack),
+            Some(&self.auth_handler),
             events,
         )
         .await?;
-        let _ = read_from_session_async(
-            &self.runtime,
-            &mut session,
-            &self.dvc.id,
-            Some(&self.negotiated_connack),
-            Some(core::time::Duration::from_millis(
-                MQTT_CONNECT_IO_TIMEOUT_MS,
-            )),
-        )
-        .await?;
+        loop {
+            let _ = read_from_session_async(
+                &self.runtime,
+                &mut session,
+                &self.dvc.id,
+                Some(&self.negotiated_connack),
+                Some(&self.auth_handler),
+                Some(core::time::Duration::from_millis(
+                    MQTT_CONNECT_IO_TIMEOUT_MS,
+                )),
+            )
+            .await?;
+
+            let negotiated = self
+                .negotiated_connack
+                .lock()
+                .await
+                .map_err(|_| "failed to lock negotiated MQTT CONNACK state".to_string())?
+                .clone();
+            if let Some(connack) = negotiated {
+                if connack.reason_code.as_deref() == Some("Success") {
+                    break;
+                }
+                let detail = connack
+                    .reason_string
+                    .clone()
+                    .unwrap_or_else(|| connack.reason_code.clone().unwrap_or_default());
+                return Err(format!("mqtt connect rejected: {detail}"));
+            }
+        }
 
         let mut guard = self
             .session
@@ -322,6 +358,7 @@ impl MqttDriver {
                         session,
                         &self.dvc.id,
                         Some(&self.negotiated_connack),
+                        Some(&self.auth_handler),
                         Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                     )
                     .await?;
@@ -349,6 +386,7 @@ impl MqttDriver {
                     session,
                     &self.dvc.id,
                     Some(&self.negotiated_connack),
+                    Some(&self.auth_handler),
                     Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -606,6 +644,7 @@ async fn process_session_command(
     runtime: &StackRuntime,
     session: &mut MqttClientSession,
     device_id: &str,
+    auth_handler: &Shared<RuntimeMutex<Option<MqttAuthHandler>>>,
     command: SessionCommand,
 ) -> Result<(), String> {
     let response = match command.kind {
@@ -617,6 +656,7 @@ async fn process_session_command(
                     session,
                     device_id,
                     None,
+                    Some(auth_handler),
                     Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -632,6 +672,7 @@ async fn process_session_command(
                     session,
                     device_id,
                     None,
+                    Some(auth_handler),
                     Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -655,6 +696,7 @@ async fn process_session_command(
                     session,
                     device_id,
                     None,
+                    Some(auth_handler),
                     Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -747,6 +789,7 @@ impl PubSub for MqttDriver {
                     &mut session,
                     &self.dvc.id,
                     Some(&self.negotiated_connack),
+                    Some(&self.auth_handler),
                     Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -822,6 +865,7 @@ impl PubSub for MqttDriver {
                     &mut session,
                     &self.dvc.id,
                     Some(&self.negotiated_connack),
+                    Some(&self.auth_handler),
                     Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await
@@ -890,6 +934,7 @@ impl PubSub for MqttDriver {
                     &mut session,
                     &self.dvc.id,
                     Some(&self.negotiated_connack),
+                    Some(&self.auth_handler),
                     Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
                 )
                 .await?;
@@ -934,6 +979,7 @@ impl EventSource for MqttDriver {
             let status_subscribers = Shared::clone(&self.listener_status_subscribers);
             let listener_command_sender = Shared::clone(&self.listener_command_sender);
             let negotiated_connack = Shared::clone(&self.negotiated_connack);
+            let auth_handler = Shared::clone(&self.auth_handler);
             let device_id = self.dvc.id.clone();
             let driver = self.clone();
             let runtime = self.runtime.clone();
@@ -991,7 +1037,13 @@ impl EventSource for MqttDriver {
                         match command_rx.try_recv() {
                             Ok(command) => {
                                 if let Err(error) =
-                                    process_session_command(&runtime, &mut session_value, &device_id, command)
+                                    process_session_command(
+                                        &runtime,
+                                        &mut session_value,
+                                        &device_id,
+                                        &auth_handler,
+                                        command,
+                                    )
                                         .await
                                 {
                                     if let Ok(mut guard) = session.lock().await {
@@ -1109,6 +1161,7 @@ impl EventSource for MqttDriver {
                         &mut session_value,
                         &device_id,
                         Some(&negotiated_connack),
+                        Some(&auth_handler),
                         Some(core::time::Duration::from_millis(MQTT_LISTENER_IDLE_POLL_MS)),
                     )
                     .await;
