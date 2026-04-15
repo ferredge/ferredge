@@ -89,7 +89,7 @@ pub struct MqttWillConfig {
 
 /// Strategy used to compute delay between broker reconnect attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BrokerBackoffStrategy {
+pub enum BackoffStrategy {
     /// Use the same delay for every reconnect attempt.
     Fixed,
     /// Multiply the delay by `multiplier` for each later attempt, capped by `max_delay_ms`.
@@ -106,7 +106,7 @@ pub struct BrokerReconnectConfig {
     /// Maximum delay between reconnect attempts in milliseconds.
     pub max_delay_ms: u64,
     /// Backoff strategy used to compute retry delay.
-    pub strategy: BrokerBackoffStrategy,
+    pub strategy: BackoffStrategy,
     /// Multiplier used by exponential backoff. Ignored for fixed backoff.
     pub multiplier: u32,
     /// Optional maximum reconnect attempts before surfacing failure.
@@ -125,7 +125,7 @@ impl Default for BrokerReconnectConfig {
             enabled: true,
             initial_delay_ms: 250,
             max_delay_ms: 5_000,
-            strategy: BrokerBackoffStrategy::Exponential,
+            strategy: BackoffStrategy::Exponential,
             multiplier: 2,
             max_attempts: None,
             replay_subscriptions: true,
@@ -151,8 +151,8 @@ impl BrokerReconnectConfig {
         }
 
         match self.strategy {
-            BrokerBackoffStrategy::Fixed => self.initial_delay_ms.min(self.max_delay_ms),
-            BrokerBackoffStrategy::Exponential => {
+            BackoffStrategy::Fixed => self.initial_delay_ms.min(self.max_delay_ms),
+            BackoffStrategy::Exponential => {
                 let multiplier = u64::from(self.multiplier.max(1));
                 let mut delay = self.initial_delay_ms.max(1);
                 for _ in 1..attempt {
@@ -162,6 +162,69 @@ impl BrokerReconnectConfig {
                     }
                 }
                 delay.min(self.max_delay_ms)
+            }
+        }
+    }
+}
+
+/// Reconnect/retry policy for Modbus request transport failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusReconnectConfig {
+    /// Whether automatic retry attempts are enabled.
+    pub enabled: bool,
+    /// Delay before first retry attempt after request failure.
+    pub initial_delay: Option<Duration>,
+    /// Maximum retry delay cap. Falls back to `initial_delay` when omitted.
+    pub max_delay: Option<Duration>,
+    /// Backoff strategy used to compute retry delay.
+    pub strategy: BackoffStrategy,
+    /// Multiplier used by exponential backoff. Ignored for fixed backoff.
+    pub multiplier: u32,
+    /// Maximum number of retry attempts after initial failure.
+    pub max_attempts: u32,
+}
+
+impl Default for ModbusReconnectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            initial_delay: None,
+            max_delay: None,
+            strategy: BackoffStrategy::Fixed,
+            multiplier: 2,
+            max_attempts: 0,
+        }
+    }
+}
+
+impl ModbusReconnectConfig {
+    /// Returns whether given 1-based retry attempt is permitted.
+    pub fn allows_attempt(&self, attempt: u32) -> bool {
+        self.enabled && attempt <= self.max_attempts
+    }
+
+    /// Returns retry delay for given 1-based retry attempt.
+    pub fn delay_for_attempt(&self, attempt: u32) -> Option<Duration> {
+        let initial_delay = self.initial_delay?;
+        if attempt <= 1 {
+            return Some(initial_delay);
+        }
+
+        let max_delay = self.max_delay.unwrap_or(initial_delay);
+        match self.strategy {
+            BackoffStrategy::Fixed => Some(initial_delay.min(max_delay)),
+            BackoffStrategy::Exponential => {
+                let multiplier = u128::from(self.multiplier.max(1));
+                let mut millis = initial_delay.as_millis().max(1);
+                let max_millis = max_delay.as_millis().max(1);
+                for _ in 1..attempt {
+                    millis = millis.saturating_mul(multiplier);
+                    if millis >= max_millis {
+                        millis = max_millis;
+                        break;
+                    }
+                }
+                Some(Duration::from_millis(millis.min(u128::from(u64::MAX)) as u64))
             }
         }
     }
@@ -318,10 +381,8 @@ pub struct ModbusClientOptions {
     pub unit_id: u8,
     /// Optional end-to-end request timeout.
     pub request_timeout: Option<Duration>,
-    /// Optional delay between consecutive requests.
-    pub inter_request_delay: Option<Duration>,
-    /// Maximum number of retry attempts after initial failure.
-    pub max_retries: u32,
+    /// Reconnect/retry policy for failed requests.
+    pub reconnect: ModbusReconnectConfig,
 }
 
 impl Default for ModbusClientOptions {
@@ -329,8 +390,7 @@ impl Default for ModbusClientOptions {
         Self {
             unit_id: 1,
             request_timeout: None,
-            inter_request_delay: None,
-            max_retries: 0,
+            reconnect: ModbusReconnectConfig::default(),
         }
     }
 }
@@ -669,10 +729,25 @@ mod tests {
             ModbusClientOptions {
                 unit_id: 1,
                 request_timeout: None,
-                inter_request_delay: None,
-                max_retries: 0,
+                reconnect: ModbusReconnectConfig::default(),
             }
         );
+    }
+
+    #[test]
+    fn modbus_reconnect_config_compute_retry_delay() {
+        let reconnect = ModbusReconnectConfig {
+            initial_delay: Some(Duration::from_millis(100)),
+            max_delay: Some(Duration::from_millis(500)),
+            strategy: BackoffStrategy::Exponential,
+            multiplier: 2,
+            ..ModbusReconnectConfig::default()
+        };
+
+        assert_eq!(reconnect.delay_for_attempt(1), Some(Duration::from_millis(100)));
+        assert_eq!(reconnect.delay_for_attempt(2), Some(Duration::from_millis(200)));
+        assert_eq!(reconnect.delay_for_attempt(3), Some(Duration::from_millis(400)));
+        assert_eq!(reconnect.delay_for_attempt(4), Some(Duration::from_millis(500)));
     }
 
     #[test]
@@ -741,7 +816,7 @@ mod tests {
             enabled: true,
             initial_delay_ms: 100,
             max_delay_ms: 1_000,
-            strategy: BrokerBackoffStrategy::Exponential,
+            strategy: BackoffStrategy::Exponential,
             multiplier: 3,
             max_attempts: Some(3),
             replay_subscriptions: true,

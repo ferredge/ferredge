@@ -7,6 +7,7 @@ use rmodbus::ModbusProto;
 use crate::{
     ModbusDriver, ModbusRequest, ModbusResponse,
     StackDatagramSocket, StackSerialPort, StackSocket,
+    convert::endpoint_options,
     codec::{build_modbus_response, decode_ascii_wire_frame},
 };
 
@@ -35,6 +36,31 @@ impl RequestResponse for ModbusDriver {
 
 impl ModbusDriver {
     pub(crate) async fn execute_on_endpoint(&self, request: &ModbusRequest) -> Result<Vec<u8>, String> {
+        let options = endpoint_options(&self.dvc.endpoint)
+            .ok_or_else(|| "missing Modbus endpoint options".to_string())?;
+        let reconnect = &options.reconnect;
+        let max_attempts = reconnect.max_attempts.saturating_add(1);
+        let mut last_error = None;
+
+        for attempt in 0..max_attempts {
+            match self.execute_once(request).await {
+                Ok(frame) => return Ok(frame),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 >= max_attempts {
+                        break;
+                    }
+                    if let Some(delay) = reconnect.delay_for_attempt(attempt + 1) {
+                        self.runtime.sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| "Modbus execute failed".to_string()))
+    }
+
+    async fn execute_once(&self, request: &ModbusRequest) -> Result<Vec<u8>, String> {
         match &self.dvc.endpoint {
             DeviceEndpoint::ModbusTCP(config) => self.execute_tcp(request, config).await,
             DeviceEndpoint::ModbusUDP(config) => self.execute_udp(request, config).await,

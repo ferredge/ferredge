@@ -7,7 +7,7 @@ use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
 use crate::{
-    StackNet, StackSerial,
+    StackNet, StackRuntime, StackSerial,
     attributes::ModbusResourceAttributes,
 };
 
@@ -95,6 +95,7 @@ pub struct ModbusCommandRef<'a> {
 #[derive(Clone)]
 pub struct ModbusDriver {
     pub dvc: Device<ModbusResourceAttributes>,
+    pub(crate) runtime: StackRuntime,
     pub(crate) net: StackNet,
     pub(crate) serial: StackSerial,
 }
@@ -111,6 +112,7 @@ impl ModbusDriver {
     pub fn new(dvc: Device<ModbusResourceAttributes>) -> Self {
         Self {
             dvc,
+            runtime: StackRuntime::default(),
             net: StackNet::default(),
             serial: StackSerial::default(),
         }
