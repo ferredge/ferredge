@@ -184,6 +184,7 @@ fn build_read_request_for_holding_register() {
 
     assert_eq!(request.proto, ModbusProto::TcpUdp);
     assert_eq!(request.decoder, crate::ModbusResponseDecoder::U16);
+    assert!(!request.is_write);
     assert!(!request.frame.is_empty());
 }
 
@@ -236,6 +237,7 @@ fn build_write_single_holding_request() {
     })
     .unwrap();
 
+    assert!(request.is_write);
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert!(payload.is_empty());
