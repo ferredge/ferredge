@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
+use core::time::Duration;
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -301,6 +302,107 @@ pub struct HttpEndpointConfig {
     pub url: String,
 }
 
+/// Supported Modbus wire encodings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModbusWireMode {
+    Tcp,
+    Rtu,
+    Ascii,
+    Udp,
+}
+
+/// Shared Modbus client policy applied across transports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusClientOptions {
+    /// Remote unit/slave identifier for addressed requests.
+    pub unit_id: u8,
+    /// Optional end-to-end request timeout.
+    pub request_timeout: Option<Duration>,
+    /// Optional delay between consecutive requests.
+    pub inter_request_delay: Option<Duration>,
+    /// Maximum number of retry attempts after initial failure.
+    pub max_retries: u32,
+}
+
+impl Default for ModbusClientOptions {
+    fn default() -> Self {
+        Self {
+            unit_id: 1,
+            request_timeout: None,
+            inter_request_delay: None,
+            max_retries: 0,
+        }
+    }
+}
+
+/// Number of data bits used by one serial frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SerialDataBits {
+    Five,
+    Six,
+    Seven,
+    Eight,
+}
+
+/// Parity setting used by serial transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SerialParity {
+    None,
+    Even,
+    Odd,
+}
+
+/// Stop-bit count used by serial transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SerialStopBits {
+    One,
+    Two,
+}
+
+/// Flow-control mode used by serial transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SerialFlowControl {
+    None,
+    Software,
+    Hardware,
+}
+
+/// Shared serial port configuration usable by Modbus RTU and ASCII.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerialPortConfig {
+    /// Serial port device path or identifier.
+    pub path: String,
+    /// Serial baudrate used for connection.
+    pub baudrate: u32,
+    /// Number of data bits per frame.
+    pub data_bits: SerialDataBits,
+    /// Parity mode used by the line.
+    pub parity: SerialParity,
+    /// Stop-bit count used by the line.
+    pub stop_bits: SerialStopBits,
+    /// Flow-control mode, if any.
+    pub flow_control: SerialFlowControl,
+    /// Optional read timeout.
+    pub read_timeout: Option<Duration>,
+    /// Optional write timeout.
+    pub write_timeout: Option<Duration>,
+}
+
+impl Default for SerialPortConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            baudrate: 9_600,
+            data_bits: SerialDataBits::Eight,
+            parity: SerialParity::None,
+            stop_bits: SerialStopBits::One,
+            flow_control: SerialFlowControl::None,
+            read_timeout: None,
+            write_timeout: None,
+        }
+    }
+}
+
 /// Modbus TCP-specific endpoint configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModbusTcpEndpointConfig {
@@ -308,15 +410,37 @@ pub struct ModbusTcpEndpointConfig {
     pub addr: String,
     /// Remote Modbus TCP port.
     pub port: u16,
+    /// Shared Modbus client policy for this endpoint.
+    pub options: ModbusClientOptions,
 }
 
 /// Modbus RTU-specific endpoint configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModbusRtuEndpointConfig {
-    /// Serial port device path.
-    pub port: String,
-    /// Serial baudrate used for connection.
-    pub baudrate: u32,
+    /// Shared serial configuration for RTU line access.
+    pub serial: SerialPortConfig,
+    /// Shared Modbus client policy for this endpoint.
+    pub options: ModbusClientOptions,
+}
+
+/// Modbus ASCII-specific endpoint configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusAsciiEndpointConfig {
+    /// Shared serial configuration for ASCII line access.
+    pub serial: SerialPortConfig,
+    /// Shared Modbus client policy for this endpoint.
+    pub options: ModbusClientOptions,
+}
+
+/// Modbus UDP-specific endpoint configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusUdpEndpointConfig {
+    /// Remote device address or hostname.
+    pub addr: String,
+    /// Remote Modbus UDP port.
+    pub port: u16,
+    /// Shared Modbus client policy for this endpoint.
+    pub options: ModbusClientOptions,
 }
 
 /// CoAP-specific endpoint configuration.
@@ -333,6 +457,8 @@ pub enum DeviceEndpoint {
     Mqtt(MqttEndpointConfig),
     ModbusTCP(ModbusTcpEndpointConfig),
     ModbusRTU(ModbusRtuEndpointConfig),
+    ModbusASCII(ModbusAsciiEndpointConfig),
+    ModbusUDP(ModbusUdpEndpointConfig),
     CoAP(CoapEndpointConfig),
 }
 
@@ -357,6 +483,16 @@ impl DeviceEndpoint {
         Self::ModbusRTU(config)
     }
 
+    /// Creates a Modbus ASCII endpoint from dedicated config.
+    pub fn modbus_ascii(config: ModbusAsciiEndpointConfig) -> Self {
+        Self::ModbusASCII(config)
+    }
+
+    /// Creates a Modbus UDP endpoint from dedicated config.
+    pub fn modbus_udp(config: ModbusUdpEndpointConfig) -> Self {
+        Self::ModbusUDP(config)
+    }
+
     /// Creates a CoAP endpoint from dedicated config.
     pub fn coap(config: CoapEndpointConfig) -> Self {
         Self::CoAP(config)
@@ -369,6 +505,8 @@ impl DeviceEndpoint {
             DeviceEndpoint::Mqtt(_) => DeviceProtocol::MQTT,
             DeviceEndpoint::ModbusTCP(_) => DeviceProtocol::Modbus,
             DeviceEndpoint::ModbusRTU(_) => DeviceProtocol::Modbus,
+            DeviceEndpoint::ModbusASCII(_) => DeviceProtocol::Modbus,
+            DeviceEndpoint::ModbusUDP(_) => DeviceProtocol::Modbus,
             DeviceEndpoint::CoAP(_) => DeviceProtocol::CoAP,
         }
     }
@@ -478,14 +616,39 @@ mod tests {
             DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
                 addr: "127.0.0.1".to_string(),
                 port: 502,
+                options: ModbusClientOptions::default(),
             })
             .protocol(),
             DeviceProtocol::Modbus
         );
         assert_eq!(
             DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
-                port: "/dev/ttyUSB0".to_string(),
-                baudrate: 9600,
+                serial: SerialPortConfig {
+                    path: "/dev/ttyUSB0".to_string(),
+                    ..SerialPortConfig::default()
+                },
+                options: ModbusClientOptions::default(),
+            })
+            .protocol(),
+            DeviceProtocol::Modbus
+        );
+        assert_eq!(
+            DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
+                serial: SerialPortConfig {
+                    path: "/dev/ttyUSB1".to_string(),
+                    baudrate: 19_200,
+                    ..SerialPortConfig::default()
+                },
+                options: ModbusClientOptions::default(),
+            })
+            .protocol(),
+            DeviceProtocol::Modbus
+        );
+        assert_eq!(
+            DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {
+                addr: "127.0.0.1".to_string(),
+                port: 502,
+                options: ModbusClientOptions::default(),
             })
             .protocol(),
             DeviceProtocol::Modbus
@@ -496,6 +659,36 @@ mod tests {
             })
             .protocol(),
             DeviceProtocol::CoAP
+        );
+    }
+
+    #[test]
+    fn modbus_client_options_default_to_common_safe_values() {
+        assert_eq!(
+            ModbusClientOptions::default(),
+            ModbusClientOptions {
+                unit_id: 1,
+                request_timeout: None,
+                inter_request_delay: None,
+                max_retries: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn serial_port_config_defaults_match_common_modbus_line_settings() {
+        assert_eq!(
+            SerialPortConfig::default(),
+            SerialPortConfig {
+                path: String::new(),
+                baudrate: 9_600,
+                data_bits: SerialDataBits::Eight,
+                parity: SerialParity::None,
+                stop_bits: SerialStopBits::One,
+                flow_control: SerialFlowControl::None,
+                read_timeout: None,
+                write_timeout: None,
+            }
         );
     }
 
