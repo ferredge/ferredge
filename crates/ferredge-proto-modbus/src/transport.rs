@@ -377,6 +377,9 @@ async fn read_stream_response_socket(
             Err(e) => return Err(format!("failed to read Modbus socket response: {e:?}")),
         };
         if read_count == 0 {
+            if frame.is_empty() {
+                return Err("failed to read Modbus socket response: Closed".to_string());
+            }
             break;
         }
         frame.extend_from_slice(&buf[..read_count]);
@@ -402,6 +405,9 @@ async fn read_stream_response_serial(
             Err(e) => return Err(format!("failed to read Modbus serial response: {e:?}")),
         };
         if read_count == 0 {
+            if frame.is_empty() {
+                return Err("failed to read Modbus serial response: Closed".to_string());
+            }
             break;
         }
         frame.extend_from_slice(&buf[..read_count]);
@@ -438,6 +444,9 @@ fn frame_complete(frame: &[u8], proto: ModbusProto) -> bool {
 }
 
 fn trim_frame(mut frame: Vec<u8>, proto: ModbusProto) -> Vec<u8> {
+    if frame.is_empty() {
+        return frame;
+    }
     if let Ok(expected_len) = rmodbus::guess_response_frame_len(&frame, proto) {
         frame.truncate(usize::from(expected_len));
     }
