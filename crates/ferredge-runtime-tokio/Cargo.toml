@@ -8,5 +8,5 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ferredge-core = { workspace = true, features = ["std"] }
+ferredge-core = { workspace = true, features = ["std", "net", "runtime", "sync"] }
 tokio = { workspace = true }
