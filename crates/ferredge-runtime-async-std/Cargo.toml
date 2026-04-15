@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+runtime = ["dep:async-std", "ferredge-core/std", "ferredge-core/runtime"]
+net = ["dep:async-std", "ferredge-core/std", "ferredge-core/net"]
+serial = ["dep:async-std", "dep:serialport", "ferredge-core/std", "ferredge-core/serial"]
+
 [dependencies]
-ferredge-core = { workspace = true, features = ["std", "net", "runtime", "sync"] }
-async-std = { workspace = true }
+ferredge-core = { workspace = true }
+async-std = { workspace = true, optional = true }
+serialport = { workspace = true, optional = true }

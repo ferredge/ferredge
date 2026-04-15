@@ -6,6 +6,11 @@
 
 #![no_std]
 
+#[cfg(feature = "runtime")]
 pub struct EmbassyRuntime;
 
+#[cfg(feature = "net")]
 pub struct EmbassyNet;
+
+#[cfg(feature = "serial")]
+pub struct EmbassySerial;
