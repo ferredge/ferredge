@@ -89,6 +89,7 @@ fn build_read_request(
     };
     Ok(ModbusRequest {
         resource: resource.to_string(),
+        is_write: false,
         frame: encode_wire_frame(proto, &binary_frame).map_err(map_rmodbus_build_error)?,
         proto,
         unit_id: options.unit_id,
@@ -129,6 +130,7 @@ fn build_write_request(
 
     Ok(ModbusRequest {
         resource: resource.to_string(),
+        is_write: true,
         frame: encode_wire_frame(proto, &binary_frame).map_err(map_rmodbus_build_error)?,
         proto,
         unit_id: options.unit_id,

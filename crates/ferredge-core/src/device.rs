@@ -182,6 +182,8 @@ pub struct ModbusReconnectConfig {
     pub multiplier: u32,
     /// Maximum number of retry attempts after initial failure.
     pub max_attempts: u32,
+    /// Whether write requests may be retried automatically.
+    pub retry_writes: bool,
 }
 
 impl Default for ModbusReconnectConfig {
@@ -193,6 +195,7 @@ impl Default for ModbusReconnectConfig {
             strategy: BackoffStrategy::Fixed,
             multiplier: 2,
             max_attempts: 0,
+            retry_writes: false,
         }
     }
 }

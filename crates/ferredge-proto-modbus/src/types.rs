@@ -15,6 +15,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModbusRequest {
     pub resource: String,
+    pub is_write: bool,
     pub frame: Vec<u8>,
     pub proto: ModbusProto,
     pub unit_id: u8,

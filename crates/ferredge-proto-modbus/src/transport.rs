@@ -39,15 +39,20 @@ impl ModbusDriver {
         let options = endpoint_options(&self.dvc.endpoint)
             .ok_or_else(|| "missing Modbus endpoint options".to_string())?;
         let reconnect = &options.reconnect;
-        let max_attempts = reconnect.max_attempts.saturating_add(1);
+        let max_attempts = if request.is_write && !reconnect.retry_writes {
+            1
+        } else {
+            reconnect.max_attempts.saturating_add(1)
+        };
         let mut last_error = None;
 
         for attempt in 0..max_attempts {
             match self.execute_once(request).await {
                 Ok(frame) => return Ok(frame),
                 Err(error) => {
+                    let retryable = is_retryable_transport_error(&error);
                     last_error = Some(error);
-                    if attempt + 1 >= max_attempts {
+                    if attempt + 1 >= max_attempts || !retryable {
                         break;
                     }
                     if let Some(delay) = reconnect.delay_for_attempt(attempt + 1) {
@@ -256,4 +261,14 @@ fn trim_frame(mut frame: Vec<u8>, proto: ModbusProto) -> Vec<u8> {
         frame.truncate(usize::from(expected_len));
     }
     frame
+}
+
+fn is_retryable_transport_error(error: &str) -> bool {
+    error.starts_with("failed to connect ")
+        || error.starts_with("failed to bind ")
+        || error.starts_with("failed to open ")
+        || error.starts_with("failed to send ")
+        || error.starts_with("failed to write ")
+        || error.starts_with("failed to flush ")
+        || error.starts_with("failed to read ")
 }
