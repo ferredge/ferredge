@@ -27,19 +27,19 @@ compile_error!("ferredge-proto-modbus does not support embassy-runtime yet");
 mod runtime_stack {
     pub use ferredge_runtime_tokio::{
         TokioDatagramSocket as StackDatagramSocket, TokioNet as StackNet, TokioSerial as StackSerial,
-        TokioSerialPort as StackSerialPort, TokioSocket as StackSocket,
+        TokioRuntime as StackRuntime, TokioSerialPort as StackSerialPort, TokioSocket as StackSocket,
     };
 }
 #[cfg(feature = "async-std-runtime")]
 mod runtime_stack {
     pub use ferredge_runtime_async_std::{
         AsyncStdDatagramSocket as StackDatagramSocket, AsyncStdNet as StackNet, AsyncStdSerial as StackSerial,
-        AsyncStdSerialPort as StackSerialPort, AsyncStdSocket as StackSocket,
+        AsyncStdRuntime as StackRuntime, AsyncStdSerialPort as StackSerialPort, AsyncStdSocket as StackSocket,
     };
 }
 
 pub(crate) use runtime_stack::{
-    StackDatagramSocket, StackNet, StackSerial, StackSerialPort, StackSocket,
+    StackDatagramSocket, StackNet, StackRuntime, StackSerial, StackSerialPort, StackSocket,
 };
 
 pub use types::{
