@@ -1,0 +1,41 @@
+[package]
+name = "ferredge-proto-modbus"
+description = "Modbus protocol support for ferredge - device and data aggregator for edge devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["tokio-runtime"]
+std = ["ferredge-core/std", "serde/std"]
+tokio-runtime = [
+    "std",
+    "dep:ferredge-runtime-tokio",
+    "ferredge-runtime-tokio/runtime",
+    "ferredge-runtime-tokio/net",
+    "ferredge-runtime-tokio/serial",
+]
+async-std-runtime = [
+    "std",
+    "dep:ferredge-runtime-async-std",
+    "ferredge-runtime-async-std/runtime",
+    "ferredge-runtime-async-std/net",
+    "ferredge-runtime-async-std/serial",
+]
+embassy-runtime = [
+    "dep:ferredge-runtime-embassy",
+    "ferredge-runtime-embassy/runtime",
+    "ferredge-runtime-embassy/net",
+    "ferredge-runtime-embassy/serial",
+]
+diagslave-tests = []
+
+[dependencies]
+ferredge-core = { workspace = true, features = ["net", "runtime", "serial"] }
+serde = { workspace = true }
+rmodbus = { workspace = true }
+ferredge-runtime-tokio = { workspace = true, optional = true }
+ferredge-runtime-async-std = { workspace = true, optional = true }
+ferredge-runtime-embassy = { workspace = true, optional = true }
