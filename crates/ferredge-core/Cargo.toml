@@ -8,8 +8,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
+default = []
 std = ["serde/std", "bitflags/std"]
 hashbrown = ["dep:hashbrown"]
+sync = []
+runtime = ["sync"]
+net = []
 
 [dependencies]
 serde = { workspace = true }
