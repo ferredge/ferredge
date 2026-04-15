@@ -236,7 +236,7 @@ fn build_holding_write_request(
 pub(crate) fn proto_from_endpoint(endpoint: &DeviceEndpoint) -> Option<ModbusProto> {
     match endpoint {
         DeviceEndpoint::ModbusTCP(_) | DeviceEndpoint::ModbusUDP(_) => Some(ModbusProto::TcpUdp),
-        DeviceEndpoint::ModbusRTU(_) => Some(ModbusProto::Rtu),
+        DeviceEndpoint::ModbusRTUOverTCP(_) | DeviceEndpoint::ModbusRTU(_) => Some(ModbusProto::Rtu),
         DeviceEndpoint::ModbusASCII(_) => Some(ModbusProto::Ascii),
         _ => None,
     }
@@ -245,6 +245,7 @@ pub(crate) fn proto_from_endpoint(endpoint: &DeviceEndpoint) -> Option<ModbusPro
 pub(crate) fn endpoint_options(endpoint: &DeviceEndpoint) -> Option<&ModbusClientOptions> {
     match endpoint {
         DeviceEndpoint::ModbusTCP(config) => Some(&config.options),
+        DeviceEndpoint::ModbusRTUOverTCP(config) => Some(&config.options),
         DeviceEndpoint::ModbusUDP(config) => Some(&config.options),
         DeviceEndpoint::ModbusRTU(config) => Some(&config.options),
         DeviceEndpoint::ModbusASCII(config) => Some(&config.options),

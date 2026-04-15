@@ -480,6 +480,17 @@ pub struct ModbusTcpEndpointConfig {
     pub options: ModbusClientOptions,
 }
 
+/// Modbus RTU-over-TCP endpoint configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusRtuOverTcpEndpointConfig {
+    /// Remote device address or hostname.
+    pub addr: String,
+    /// Remote TCP port carrying RTU frames.
+    pub port: u16,
+    /// Shared Modbus client policy for this endpoint.
+    pub options: ModbusClientOptions,
+}
+
 /// Modbus RTU-specific endpoint configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModbusRtuEndpointConfig {
@@ -522,6 +533,7 @@ pub enum DeviceEndpoint {
     Http(HttpEndpointConfig),
     Mqtt(MqttEndpointConfig),
     ModbusTCP(ModbusTcpEndpointConfig),
+    ModbusRTUOverTCP(ModbusRtuOverTcpEndpointConfig),
     ModbusRTU(ModbusRtuEndpointConfig),
     ModbusASCII(ModbusAsciiEndpointConfig),
     ModbusUDP(ModbusUdpEndpointConfig),
@@ -542,6 +554,11 @@ impl DeviceEndpoint {
     /// Creates a Modbus TCP endpoint from dedicated config.
     pub fn modbus_tcp(config: ModbusTcpEndpointConfig) -> Self {
         Self::ModbusTCP(config)
+    }
+
+    /// Creates a Modbus RTU-over-TCP endpoint from dedicated config.
+    pub fn modbus_rtu_over_tcp(config: ModbusRtuOverTcpEndpointConfig) -> Self {
+        Self::ModbusRTUOverTCP(config)
     }
 
     /// Creates a Modbus RTU endpoint from dedicated config.
@@ -570,6 +587,7 @@ impl DeviceEndpoint {
             DeviceEndpoint::Http(_) => DeviceProtocol::HTTP,
             DeviceEndpoint::Mqtt(_) => DeviceProtocol::MQTT,
             DeviceEndpoint::ModbusTCP(_) => DeviceProtocol::Modbus,
+            DeviceEndpoint::ModbusRTUOverTCP(_) => DeviceProtocol::Modbus,
             DeviceEndpoint::ModbusRTU(_) => DeviceProtocol::Modbus,
             DeviceEndpoint::ModbusASCII(_) => DeviceProtocol::Modbus,
             DeviceEndpoint::ModbusUDP(_) => DeviceProtocol::Modbus,

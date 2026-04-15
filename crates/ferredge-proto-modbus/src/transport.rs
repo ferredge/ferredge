@@ -70,6 +70,7 @@ impl ModbusDriver {
     async fn execute_once(&self, request: &ModbusRequest) -> Result<Vec<u8>, String> {
         match &self.dvc.endpoint {
             DeviceEndpoint::ModbusTCP(config) => self.execute_tcp(request, config).await,
+            DeviceEndpoint::ModbusRTUOverTCP(config) => self.execute_rtu_over_tcp(request, config).await,
             DeviceEndpoint::ModbusUDP(config) => self.execute_udp(request, config).await,
             DeviceEndpoint::ModbusRTU(config) => self.execute_rtu(request, config).await,
             DeviceEndpoint::ModbusASCII(config) => self.execute_ascii(request, config).await,
@@ -105,6 +106,21 @@ impl ModbusDriver {
             .await
             .map_err(|e| format!("failed to send Modbus UDP request: {e:?}"))?;
         read_datagram_response(&mut socket).await
+    }
+
+    async fn execute_rtu_over_tcp(
+        &self,
+        request: &ModbusRequest,
+        config: &ModbusRtuOverTcpEndpointConfig,
+    ) -> Result<Vec<u8>, String> {
+        if config.options.persistent_session {
+            return self.execute_tcp_persistent_on_addr(request, &config.addr, config.port).await;
+        }
+        let mut socket = self
+            .open_tcp_socket_addr(&config.addr, config.port, request.timeout)
+            .await?;
+        write_stream_request(&mut socket, &request.frame, "Modbus RTU-over-TCP").await?;
+        read_stream_response_socket(&mut socket, request.proto).await
     }
 
     async fn execute_rtu(
@@ -151,13 +167,23 @@ impl ModbusDriver {
         request: &ModbusRequest,
         config: &ModbusTcpEndpointConfig,
     ) -> Result<Vec<u8>, String> {
+        self.execute_tcp_persistent_on_addr(request, &config.addr, config.port)
+            .await
+    }
+
+    async fn execute_tcp_persistent_on_addr(
+        &self,
+        request: &ModbusRequest,
+        addr: &str,
+        port: u16,
+    ) -> Result<Vec<u8>, String> {
         let mut socket = match self.take_persistent_session().await? {
             Some(PersistentSession::Tcp(socket)) => socket,
             Some(other) => {
                 self.close_session(other).await;
-                self.open_tcp_socket(config, request.timeout).await?
+                self.open_tcp_socket_addr(addr, port, request.timeout).await?
             }
-            None => self.open_tcp_socket(config, request.timeout).await?,
+            None => self.open_tcp_socket_addr(addr, port, request.timeout).await?,
         };
 
         let result = async {
@@ -231,9 +257,18 @@ impl ModbusDriver {
         config: &ModbusTcpEndpointConfig,
         timeout: Option<Duration>,
     ) -> Result<StackSocket, String> {
+        self.open_tcp_socket_addr(&config.addr, config.port, timeout).await
+    }
+
+    async fn open_tcp_socket_addr(
+        &self,
+        addr: &str,
+        port: u16,
+        timeout: Option<Duration>,
+    ) -> Result<StackSocket, String> {
         let mut socket = self
             .net
-            .connect(&format!("{}:{}", config.addr, config.port))
+            .connect(&format!("{addr}:{port}"))
             .await
             .map_err(|e| format!("failed to connect Modbus TCP socket: {e:?}"))?;
         socket

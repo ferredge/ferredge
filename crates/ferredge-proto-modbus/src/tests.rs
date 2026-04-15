@@ -95,6 +95,14 @@ fn rtu_endpoint() -> DeviceEndpoint {
     })
 }
 
+fn rtu_over_tcp_endpoint() -> DeviceEndpoint {
+    DeviceEndpoint::modbus_rtu_over_tcp(ModbusRtuOverTcpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port: 502,
+        options: ModbusClientOptions::default(),
+    })
+}
+
 fn ascii_endpoint() -> DeviceEndpoint {
     DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
         serial: SerialPortConfig {
@@ -212,6 +220,19 @@ fn decode_rtu_coil_response() {
     let response = simulate_response(&request, ModbusProto::Rtu);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, vec![1]);
+}
+
+#[test]
+fn build_rtu_over_tcp_request_uses_rtu_proto() {
+    let driver = make_driver(rtu_over_tcp_endpoint());
+    let request = ModbusRequest::try_from(ModbusCommandRef {
+        device: &driver.dvc,
+        command: &command_read("holding_u16"),
+    })
+    .unwrap();
+
+    assert_eq!(request.proto, ModbusProto::Rtu);
+    assert!(!request.is_write);
 }
 
 #[test]

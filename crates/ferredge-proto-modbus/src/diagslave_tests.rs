@@ -185,7 +185,8 @@ impl DiagslaveGuard {
 
         let deadline = Instant::now() + Duration::from_secs(DIAGSLAVE_START_TIMEOUT_SECS);
         loop {
-            let ready = matches!(self.mode, "tcp") && TcpStream::connect(("127.0.0.1", self.port)).is_ok();
+            let ready = matches!(self.mode, "tcp" | "enc")
+                && TcpStream::connect(("127.0.0.1", self.port)).is_ok();
             if ready {
                 break;
             }
@@ -366,6 +367,30 @@ fn diagslave_udp_write_then_read_coil() {
             .await
             .expect("coil read should succeed");
         assert_eq!(response.payload, vec![1]);
+    });
+}
+
+#[test]
+fn diagslave_rtu_over_tcp_write_then_read_holding() {
+    let guard = DiagslaveGuard::start("enc");
+    let driver = make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
+        ModbusRtuOverTcpEndpointConfig {
+            addr: "127.0.0.1".to_string(),
+            port: guard.port,
+            options: ModbusClientOptions::default(),
+        },
+    ));
+
+    block_on(async {
+        driver
+            .execute_command(&write_command("holding_u16", 0x5678u16.to_be_bytes().to_vec()))
+            .await
+            .expect("holding write should succeed");
+        let response = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("holding read should succeed");
+        assert_eq!(response.payload, 0x5678u16.to_be_bytes().to_vec());
     });
 }
 
