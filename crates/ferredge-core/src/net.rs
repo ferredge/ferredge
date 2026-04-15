@@ -1,3 +1,6 @@
+extern crate alloc;
+
+use alloc::string::String;
 use core::future::Future;
 
 /// Error returned by abstract async network operations.
@@ -15,6 +18,25 @@ pub enum NetError {
     RuntimeUnavailable,
     /// Transport-specific failure string preserved by adapter.
     Other(&'static str),
+}
+
+/// Async datagram socket used by UDP-style protocol adapters.
+pub trait AsyncDatagramSocket: Send + Sync + 'static {
+    /// Receives one datagram into the provided buffer and returns byte count plus peer address.
+    fn recv_from(
+        &mut self,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<(usize, String), NetError>> + Send;
+
+    /// Sends one datagram to the provided peer address and returns byte count sent.
+    fn send_to(
+        &mut self,
+        buf: &[u8],
+        address: &str,
+    ) -> impl Future<Output = Result<usize, NetError>> + Send;
+
+    /// Closes the datagram socket gracefully when the transport supports it.
+    fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + Send;
 }
 
 /// Async bidirectional byte stream used by protocol adapters.
@@ -62,9 +84,22 @@ pub trait AsyncNet: Clone + Send + Sync + 'static {
     fn bind(&self, address: &str) -> impl Future<Output = Result<Self::Listener, NetError>> + Send;
 }
 
+/// Async datagram network transport factory shared by UDP-style protocol adapters.
+pub trait AsyncDatagramNet: Clone + Send + Sync + 'static {
+    /// Datagram socket type returned by `bind_datagram`.
+    type DatagramSocket: AsyncDatagramSocket;
+
+    /// Binds one datagram socket to the given local address.
+    fn bind_datagram(
+        &self,
+        address: &str,
+    ) -> impl Future<Output = Result<Self::DatagramSocket, NetError>> + Send;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
     use core::{
         pin::Pin,
         task::{Context, Poll, Waker},
@@ -106,6 +141,12 @@ mod tests {
         accepted: bool,
     }
 
+    struct MockDatagramSocket {
+        recv_data: Option<&'static [u8]>,
+        sent_packets: usize,
+        closed: bool,
+    }
+
     impl AsyncListener for MockListener {
         type Socket = MockSocket;
 
@@ -128,6 +169,27 @@ mod tests {
         }
     }
 
+    impl AsyncDatagramSocket for MockDatagramSocket {
+        async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
+            let Some(recv_data) = self.recv_data.take() else {
+                return Err(NetError::Closed);
+            };
+            let len = recv_data.len().min(buf.len());
+            buf[..len].copy_from_slice(&recv_data[..len]);
+            Ok((len, "127.0.0.1:502".to_string()))
+        }
+
+        async fn send_to(&mut self, buf: &[u8], _address: &str) -> Result<usize, NetError> {
+            self.sent_packets += 1;
+            Ok(buf.len())
+        }
+
+        async fn close(&mut self) -> Result<(), NetError> {
+            self.closed = true;
+            Ok(())
+        }
+    }
+
     #[derive(Clone, Default)]
     struct MockNet;
 
@@ -145,6 +207,18 @@ mod tests {
 
         async fn bind(&self, _address: &str) -> Result<Self::Listener, NetError> {
             Ok(MockListener { accepted: false })
+        }
+    }
+
+    impl AsyncDatagramNet for MockNet {
+        type DatagramSocket = MockDatagramSocket;
+
+        async fn bind_datagram(&self, _address: &str) -> Result<Self::DatagramSocket, NetError> {
+            Ok(MockDatagramSocket {
+                recv_data: Some(b"udp"),
+                sent_packets: 0,
+                closed: false,
+            })
         }
     }
 
@@ -176,5 +250,21 @@ mod tests {
         let n = block_on(accepted.read(&mut buf)).expect("accepted read should succeed");
         assert_eq!(&buf[..n], b"ping");
         assert_eq!(block_on(listener.close()), Ok(()));
+    }
+
+    #[test]
+    fn mock_async_datagram_net_contract_is_usable() {
+        let net = MockNet;
+        let mut socket = block_on(net.bind_datagram("127.0.0.1:0"))
+            .expect("bind_datagram should succeed");
+        let mut buf = [0u8; 8];
+        let (n, peer) = block_on(socket.recv_from(&mut buf)).expect("recv_from should succeed");
+        assert_eq!(&buf[..n], b"udp");
+        assert_eq!(peer, "127.0.0.1:502");
+        assert_eq!(
+            block_on(socket.send_to(b"abc", "127.0.0.1:502")),
+            Ok(3)
+        );
+        assert_eq!(block_on(socket.close()), Ok(()));
     }
 }
