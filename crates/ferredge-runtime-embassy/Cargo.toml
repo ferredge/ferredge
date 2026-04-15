@@ -7,5 +7,11 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+runtime = ["ferredge-core/runtime"]
+net = ["ferredge-core/net"]
+serial = ["ferredge-core/serial"]
+
 [dependencies]
 ferredge-core = { workspace = true }

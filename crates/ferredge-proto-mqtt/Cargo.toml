@@ -11,9 +11,9 @@ rust-version.workspace = true
 # `std` enables common std support. Runtime stack selection happens via stack-specific features.
 default = ["tokio-runtime"]
 std = ["ferredge-core/std", "mqtt_protocol_core/std", "serde/std"]
-tokio-runtime = ["std", "dep:ferredge-runtime-tokio"]
-async-std-runtime = ["std", "dep:ferredge-runtime-async-std"]
-embassy-runtime = ["dep:ferredge-runtime-embassy"]
+tokio-runtime = ["std", "dep:ferredge-runtime-tokio", "ferredge-runtime-tokio/runtime", "ferredge-runtime-tokio/net"]
+async-std-runtime = ["std", "dep:ferredge-runtime-async-std", "ferredge-runtime-async-std/runtime", "ferredge-runtime-async-std/net"]
+embassy-runtime = ["dep:ferredge-runtime-embassy", "ferredge-runtime-embassy/runtime", "ferredge-runtime-embassy/net"]
 mosquitto-tests = []
 
 [dependencies]

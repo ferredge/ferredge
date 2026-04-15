@@ -45,3 +45,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Runtimes
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "io-util"] }
 async-std = { version = "1", features = ["attributes"] }
+tokio-serial = "5.4.5"
+serialport = "4.8.1"
