@@ -384,6 +384,8 @@ pub struct ModbusClientOptions {
     pub unit_id: u8,
     /// Optional end-to-end request timeout.
     pub request_timeout: Option<Duration>,
+    /// Whether TCP/serial sessions should be kept open and reused between requests.
+    pub persistent_session: bool,
     /// Reconnect/retry policy for failed requests.
     pub reconnect: ModbusReconnectConfig,
 }
@@ -393,6 +395,7 @@ impl Default for ModbusClientOptions {
         Self {
             unit_id: 1,
             request_timeout: None,
+            persistent_session: false,
             reconnect: ModbusReconnectConfig::default(),
         }
     }
@@ -732,6 +735,7 @@ mod tests {
             ModbusClientOptions {
                 unit_id: 1,
                 request_timeout: None,
+                persistent_session: false,
                 reconnect: ModbusReconnectConfig::default(),
             }
         );

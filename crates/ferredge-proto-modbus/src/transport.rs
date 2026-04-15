@@ -9,6 +9,7 @@ use crate::{
     StackDatagramSocket, StackSerialPort, StackSocket,
     convert::endpoint_options,
     codec::{build_modbus_response, decode_ascii_wire_frame},
+    types::PersistentSession,
 };
 
 impl Lifecycle for ModbusDriver {
@@ -19,6 +20,7 @@ impl Lifecycle for ModbusDriver {
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
+        self.close_persistent_session().await?;
         Ok(())
     }
 }
@@ -80,6 +82,9 @@ impl ModbusDriver {
         request: &ModbusRequest,
         config: &ModbusTcpEndpointConfig,
     ) -> Result<Vec<u8>, String> {
+        if config.options.persistent_session {
+            return self.execute_tcp_persistent(request, config).await;
+        }
         let mut socket = self.open_tcp_socket(config, request.timeout).await?;
         write_stream_request(&mut socket, &request.frame, "Modbus TCP").await?;
         read_stream_response_socket(&mut socket, request.proto).await
@@ -107,6 +112,15 @@ impl ModbusDriver {
         request: &ModbusRequest,
         config: &ModbusRtuEndpointConfig,
     ) -> Result<Vec<u8>, String> {
+        if config.options.persistent_session {
+            return self.execute_serial_persistent(
+                request,
+                &config.serial,
+                "Modbus RTU",
+                PersistentSessionKind::Rtu,
+            )
+            .await;
+        }
         let mut port = self.open_serial_port(&config.serial, "Modbus RTU").await?;
         write_serial_request(&mut port, &request.frame, "Modbus RTU").await?;
         read_stream_response_serial(&mut port, request.proto).await
@@ -117,10 +131,99 @@ impl ModbusDriver {
         request: &ModbusRequest,
         config: &ModbusAsciiEndpointConfig,
     ) -> Result<Vec<u8>, String> {
+        if config.options.persistent_session {
+            return self.execute_serial_persistent(
+                request,
+                &config.serial,
+                "Modbus ASCII",
+                PersistentSessionKind::Ascii,
+            )
+            .await;
+        }
         let mut port = self.open_serial_port(&config.serial, "Modbus ASCII").await?;
         write_serial_request(&mut port, &request.frame, "Modbus ASCII").await?;
         let raw_ascii = read_stream_response_serial(&mut port, request.proto).await?;
         decode_ascii_wire_frame(&raw_ascii)
+    }
+
+    async fn execute_tcp_persistent(
+        &self,
+        request: &ModbusRequest,
+        config: &ModbusTcpEndpointConfig,
+    ) -> Result<Vec<u8>, String> {
+        let mut socket = match self.take_persistent_session().await? {
+            Some(PersistentSession::Tcp(socket)) => socket,
+            Some(other) => {
+                self.close_session(other).await;
+                self.open_tcp_socket(config, request.timeout).await?
+            }
+            None => self.open_tcp_socket(config, request.timeout).await?,
+        };
+
+        let result = async {
+            write_stream_request(&mut socket, &request.frame, "Modbus TCP").await?;
+            read_stream_response_socket(&mut socket, request.proto).await
+        }
+        .await;
+
+        match result {
+            Ok(frame) => {
+                self.store_persistent_session(PersistentSession::Tcp(socket)).await?;
+                Ok(frame)
+            }
+            Err(error) => {
+                self.close_session(PersistentSession::Tcp(socket)).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn execute_serial_persistent(
+        &self,
+        request: &ModbusRequest,
+        config: &SerialPortConfig,
+        label: &str,
+        kind: PersistentSessionKind,
+    ) -> Result<Vec<u8>, String> {
+        let mut port = match self.take_persistent_session().await? {
+            Some(PersistentSession::Rtu(port)) if kind == PersistentSessionKind::Rtu => port,
+            Some(PersistentSession::Ascii(port)) if kind == PersistentSessionKind::Ascii => port,
+            Some(other) => {
+                self.close_session(other).await;
+                self.open_serial_port(config, label).await?
+            }
+            None => self.open_serial_port(config, label).await?,
+        };
+
+        let result = async {
+            write_serial_request(&mut port, &request.frame, label).await?;
+            let raw = read_stream_response_serial(&mut port, request.proto).await?;
+            if kind == PersistentSessionKind::Ascii {
+                decode_ascii_wire_frame(&raw)
+            } else {
+                Ok(raw)
+            }
+        }
+        .await;
+
+        match result {
+            Ok(frame) => {
+                let session = match kind {
+                    PersistentSessionKind::Rtu => PersistentSession::Rtu(port),
+                    PersistentSessionKind::Ascii => PersistentSession::Ascii(port),
+                };
+                self.store_persistent_session(session).await?;
+                Ok(frame)
+            }
+            Err(error) => {
+                let session = match kind {
+                    PersistentSessionKind::Rtu => PersistentSession::Rtu(port),
+                    PersistentSessionKind::Ascii => PersistentSession::Ascii(port),
+                };
+                self.close_session(session).await;
+                Err(error)
+            }
+        }
     }
 
     async fn open_tcp_socket(
@@ -152,6 +255,49 @@ impl ModbusDriver {
             .await
             .map_err(|e| format!("failed to open {label} serial port: {e:?}"))
     }
+
+    async fn take_persistent_session(&self) -> Result<Option<PersistentSession>, String> {
+        let mut guard = self
+            .persistent_session
+            .lock()
+            .await
+            .map_err(|_| "failed to lock Modbus persistent session".to_string())?;
+        Ok(guard.take())
+    }
+
+    async fn store_persistent_session(&self, session: PersistentSession) -> Result<(), String> {
+        let mut guard = self
+            .persistent_session
+            .lock()
+            .await
+            .map_err(|_| "failed to lock Modbus persistent session".to_string())?;
+        *guard = Some(session);
+        Ok(())
+    }
+
+    async fn close_persistent_session(&self) -> Result<(), String> {
+        if let Some(session) = self.take_persistent_session().await? {
+            self.close_session(session).await;
+        }
+        Ok(())
+    }
+
+    async fn close_session(&self, mut session: PersistentSession) {
+        match &mut session {
+            PersistentSession::Tcp(socket) => {
+                let _ = socket.close().await;
+            }
+            PersistentSession::Rtu(port) | PersistentSession::Ascii(port) => {
+                let _ = port.close().await;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistentSessionKind {
+    Rtu,
+    Ascii,
 }
 
 async fn write_stream_request(
