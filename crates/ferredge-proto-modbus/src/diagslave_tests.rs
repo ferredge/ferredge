@@ -25,6 +25,7 @@ const DIAGSLAVE_START_TIMEOUT_SECS: u64 = 5;
 const DIAGSLAVE_POLL_INTERVAL_MS: u64 = 25;
 const DIAGSLAVE_UDP_START_SETTLE_MS: u64 = 300;
 const DIAGSLAVE_SERIAL_START_SETTLE_MS: u64 = 300;
+const DIAGSLAVE_TCP_START_SETTLE_MS: u64 = 50;
 const SOCAT_START_TIMEOUT_SECS: u64 = 5;
 
 #[cfg(unix)]
@@ -66,10 +67,7 @@ impl SerialPtyGuard {
                     "PTY,raw,echo=0,link={},mode=666",
                     self.master_path.display()
                 ),
-                &format!(
-                    "PTY,raw,echo=0,link={},mode=666",
-                    self.slave_path.display()
-                ),
+                &format!("PTY,raw,echo=0,link={},mode=666", self.slave_path.display()),
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -143,6 +141,7 @@ struct DiagslaveGuard {
     child: Option<Child>,
     port: u16,
     mode: &'static str,
+    serial_port: Option<String>,
 }
 
 impl DiagslaveGuard {
@@ -152,6 +151,7 @@ impl DiagslaveGuard {
             child: None,
             port,
             mode,
+            serial_port: None,
         };
         guard.start_slave();
         guard
@@ -163,6 +163,7 @@ impl DiagslaveGuard {
             child: None,
             port: 0,
             mode,
+            serial_port: Some(serial_port.to_string()),
         };
         guard.start_serial_slave(serial_port);
         guard
@@ -188,6 +189,7 @@ impl DiagslaveGuard {
             let ready = matches!(self.mode, "tcp" | "enc")
                 && TcpStream::connect(("127.0.0.1", self.port)).is_ok();
             if ready {
+                thread::sleep(Duration::from_millis(DIAGSLAVE_TCP_START_SETTLE_MS));
                 break;
             }
             assert!(
@@ -230,6 +232,16 @@ impl DiagslaveGuard {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    fn restart(&mut self) {
+        self.stop_slave();
+        #[cfg(unix)]
+        if let Some(serial_port) = self.serial_port.clone() {
+            self.start_serial_slave(&serial_port);
+            return;
+        }
+        self.start_slave();
     }
 }
 
@@ -301,6 +313,48 @@ fn serial_port_config(path: String) -> SerialPortConfig {
     }
 }
 
+fn modbus_options(persistent_session: bool, max_attempts: u32) -> ModbusClientOptions {
+    ModbusClientOptions {
+        persistent_session,
+        reconnect: ModbusReconnectConfig {
+            enabled: true,
+            initial_delay: Some(Duration::from_millis(50)),
+            max_delay: Some(Duration::from_millis(100)),
+            strategy: BackoffStrategy::Fixed,
+            multiplier: 1,
+            max_attempts,
+            retry_writes: false,
+        },
+        ..ModbusClientOptions::default()
+    }
+}
+
+fn make_tcp_driver(port: u16, options: ModbusClientOptions) -> ModbusDriver {
+    make_driver(DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port,
+        options,
+    }))
+}
+
+fn make_rtu_over_tcp_driver(port: u16, options: ModbusClientOptions) -> ModbusDriver {
+    make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
+        ModbusRtuOverTcpEndpointConfig {
+            addr: "127.0.0.1".to_string(),
+            port,
+            options,
+        },
+    ))
+}
+
+#[cfg(unix)]
+fn make_rtu_driver(path: String, options: ModbusClientOptions) -> ModbusDriver {
+    make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+        serial: serial_port_config(path),
+        options,
+    }))
+}
+
 fn write_command(resource: &str, payload: Vec<u8>) -> Command {
     Command {
         id: format!("write-{resource}"),
@@ -329,15 +383,14 @@ fn read_command(resource: &str) -> Command {
 #[test]
 fn diagslave_tcp_write_then_read_holding() {
     let guard = DiagslaveGuard::start("tcp");
-    let driver = make_driver(DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
-        addr: "127.0.0.1".to_string(),
-        port: guard.port,
-        options: ModbusClientOptions::default(),
-    }));
+    let driver = make_tcp_driver(guard.port, ModbusClientOptions::default());
 
     block_on(async {
         driver
-            .execute_command(&write_command("holding_u16", 0x3456u16.to_be_bytes().to_vec()))
+            .execute_command(&write_command(
+                "holding_u16",
+                0x3456u16.to_be_bytes().to_vec(),
+            ))
             .await
             .expect("holding write should succeed");
         let response = driver
@@ -373,17 +426,14 @@ fn diagslave_udp_write_then_read_coil() {
 #[test]
 fn diagslave_rtu_over_tcp_write_then_read_holding() {
     let guard = DiagslaveGuard::start("enc");
-    let driver = make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
-        ModbusRtuOverTcpEndpointConfig {
-            addr: "127.0.0.1".to_string(),
-            port: guard.port,
-            options: ModbusClientOptions::default(),
-        },
-    ));
+    let driver = make_rtu_over_tcp_driver(guard.port, ModbusClientOptions::default());
 
     block_on(async {
         driver
-            .execute_command(&write_command("holding_u16", 0x5678u16.to_be_bytes().to_vec()))
+            .execute_command(&write_command(
+                "holding_u16",
+                0x5678u16.to_be_bytes().to_vec(),
+            ))
             .await
             .expect("holding write should succeed");
         let response = driver
@@ -399,14 +449,14 @@ fn diagslave_rtu_over_tcp_write_then_read_holding() {
 fn diagslave_rtu_over_pty_write_then_read_holding() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
-    let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
-        serial: serial_port_config(pty.master_path()),
-        options: ModbusClientOptions::default(),
-    }));
+    let driver = make_rtu_driver(pty.master_path(), ModbusClientOptions::default());
 
     block_on(async {
         driver
-            .execute_command(&write_command("holding_u16", 0x4567u16.to_be_bytes().to_vec()))
+            .execute_command(&write_command(
+                "holding_u16",
+                0x4567u16.to_be_bytes().to_vec(),
+            ))
             .await
             .expect("holding write should succeed");
         let response = driver
@@ -437,6 +487,154 @@ fn diagslave_ascii_over_pty_write_then_read_coil() {
             .await
             .expect("coil read should succeed");
         assert_eq!(response.payload, vec![1]);
+    });
+}
+
+#[test]
+fn diagslave_tcp_non_persistent_recovers_after_restart() {
+    let mut guard = DiagslaveGuard::start("tcp");
+    let driver = make_tcp_driver(guard.port, modbus_options(false, 0));
+
+    block_on(async {
+        let before = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("pre-restart read should succeed");
+        assert_eq!(before.payload.len(), 2);
+    });
+
+    guard.restart();
+
+    block_on(async {
+        let after = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("post-restart read should succeed");
+        assert_eq!(after.payload.len(), 2);
+    });
+}
+
+#[test]
+fn diagslave_tcp_persistent_recovers_after_restart() {
+    let mut guard = DiagslaveGuard::start("tcp");
+    let driver = make_tcp_driver(guard.port, modbus_options(true, 2));
+
+    block_on(async {
+        let before = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("pre-restart read should succeed");
+        assert_eq!(before.payload.len(), 2);
+    });
+
+    guard.restart();
+
+    block_on(async {
+        let after = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("persistent reconnect read should succeed");
+        assert_eq!(after.payload.len(), 2);
+    });
+}
+
+#[test]
+fn diagslave_rtu_over_tcp_non_persistent_recovers_after_restart() {
+    let mut guard = DiagslaveGuard::start("enc");
+    let driver = make_rtu_over_tcp_driver(guard.port, modbus_options(false, 0));
+
+    block_on(async {
+        let before = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("pre-restart RTU-over-TCP read should succeed");
+        assert_eq!(before.payload.len(), 2);
+    });
+
+    guard.restart();
+
+    block_on(async {
+        let after = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("post-restart RTU-over-TCP read should succeed");
+        assert_eq!(after.payload.len(), 2);
+    });
+}
+
+#[test]
+fn diagslave_rtu_over_tcp_persistent_recovers_after_restart() {
+    let mut guard = DiagslaveGuard::start("enc");
+    let driver = make_rtu_over_tcp_driver(guard.port, modbus_options(true, 2));
+
+    block_on(async {
+        let before = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("pre-restart RTU-over-TCP read should succeed");
+        assert_eq!(before.payload.len(), 2);
+    });
+
+    guard.restart();
+
+    block_on(async {
+        let after = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("persistent RTU-over-TCP reconnect read should succeed");
+        assert_eq!(after.payload.len(), 2);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn diagslave_rtu_non_persistent_recovers_after_restart() {
+    let pty = SerialPtyGuard::start();
+    let mut guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
+    let driver = make_rtu_driver(pty.master_path(), modbus_options(false, 0));
+
+    block_on(async {
+        let before = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("pre-restart RTU read should succeed");
+        assert_eq!(before.payload.len(), 2);
+    });
+
+    guard.restart();
+
+    block_on(async {
+        let after = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("post-restart RTU read should succeed");
+        assert_eq!(after.payload.len(), 2);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn diagslave_rtu_persistent_recovers_after_restart() {
+    let pty = SerialPtyGuard::start();
+    let mut guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
+    let driver = make_rtu_driver(pty.master_path(), modbus_options(true, 2));
+
+    block_on(async {
+        let before = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("pre-restart RTU read should succeed");
+        assert_eq!(before.payload.len(), 2);
+    });
+
+    guard.restart();
+
+    block_on(async {
+        let after = driver
+            .execute_command(&read_command("holding_u16"))
+            .await
+            .expect("persistent RTU reconnect read should succeed");
+        assert_eq!(after.payload.len(), 2);
     });
 }
 
