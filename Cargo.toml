@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ferredge-core",
     "crates/ferredge-proto-http",
+    "crates/ferredge-proto-modbus",
     "crates/ferredge-proto-mqtt",
     "crates/ferredge-runtime-tokio",
     "crates/ferredge-runtime-async-std",
@@ -20,6 +21,7 @@ rust-version = "1.93"
 # Internal crates
 ferredge-core = { path = "crates/ferredge-core" }
 ferredge-proto-http = { path = "crates/ferredge-proto-http" }
+ferredge-proto-modbus = { path = "crates/ferredge-proto-modbus" }
 ferredge-proto-mqtt = { path = "crates/ferredge-proto-mqtt" }
 ferredge-runtime-tokio = { path = "crates/ferredge-runtime-tokio" }
 ferredge-runtime-async-std = { path = "crates/ferredge-runtime-async-std" }
@@ -47,3 +49,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "
 async-std = { version = "1", features = ["attributes"] }
 tokio-serial = "5.4.5"
 serialport = "4.8.1"
+rmodbus = "0.12.2"
