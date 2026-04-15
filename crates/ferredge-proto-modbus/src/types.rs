@@ -8,8 +8,10 @@ use rmodbus::ModbusProto;
 
 use crate::{
     StackNet, StackRuntime, StackSerial,
-    attributes::ModbusResourceAttributes,
+    StackSerialPort, StackSocket, attributes::ModbusResourceAttributes,
 };
+
+type RuntimeMutex<T> = <StackRuntime as AsyncRuntime>::Mutex<T>;
 
 /// Native Modbus request used by the driver execute path.
 #[derive(Debug, Clone, PartialEq)]
@@ -93,12 +95,19 @@ pub struct ModbusCommandRef<'a> {
     pub command: &'a Command,
 }
 
+pub(crate) enum PersistentSession {
+    Tcp(StackSocket),
+    Rtu(StackSerialPort),
+    Ascii(StackSerialPort),
+}
+
 #[derive(Clone)]
 pub struct ModbusDriver {
     pub dvc: Device<ModbusResourceAttributes>,
     pub(crate) runtime: StackRuntime,
     pub(crate) net: StackNet,
     pub(crate) serial: StackSerial,
+    pub(crate) persistent_session: Shared<RuntimeMutex<Option<PersistentSession>>>,
 }
 
 impl core::fmt::Debug for ModbusDriver {
@@ -111,11 +120,13 @@ impl core::fmt::Debug for ModbusDriver {
 
 impl ModbusDriver {
     pub fn new(dvc: Device<ModbusResourceAttributes>) -> Self {
+        let runtime = StackRuntime::default();
         Self {
             dvc,
-            runtime: StackRuntime::default(),
+            runtime: runtime.clone(),
             net: StackNet::default(),
             serial: StackSerial::default(),
+            persistent_session: Shared::new(runtime.mutex(None)),
         }
     }
 
