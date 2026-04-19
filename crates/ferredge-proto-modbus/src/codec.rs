@@ -6,16 +6,17 @@ use rmodbus::{
     ErrorKind as RmodbusError, ModbusFrameBuf, ModbusProto, client::ModbusRequest as RmodbusRequest,
 };
 
-use crate::{
-    ModbusParserSeed, ModbusRequest, ModbusResponse, ModbusResponseDecoder,
-};
+use crate::{ModbusParserSeed, ModbusRequest, ModbusResponse, ModbusResponseDecoder};
 
 pub(crate) fn build_modbus_response(
     request: &ModbusRequest,
     raw_frame: Vec<u8>,
 ) -> Result<ModbusResponse, String> {
     let payload = decode_modbus_response(request, &raw_frame)?;
-    Ok(ModbusResponse { frame: raw_frame, payload })
+    Ok(ModbusResponse {
+        frame: raw_frame,
+        payload,
+    })
 }
 
 pub(crate) fn decode_modbus_response(
@@ -30,48 +31,72 @@ pub(crate) fn decode_modbus_response(
             .map_err(map_rmodbus_error),
         ModbusResponseDecoder::Bool | ModbusResponseDecoder::Bits { .. } => {
             let mut values = Vec::new();
-            parser.parse_bool_u8(frame, &mut values).map_err(map_rmodbus_error)?;
+            parser
+                .parse_bool_u8(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
             Ok(values)
         }
         ModbusResponseDecoder::U16 => {
             let mut values = Vec::new();
-            parser.parse_u16(frame, &mut values).map_err(map_rmodbus_error)?;
+            parser
+                .parse_u16(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
             Ok(values.into_iter().flat_map(u16::to_be_bytes).collect())
         }
         ModbusResponseDecoder::I16 => {
             let mut values = Vec::new();
-            parser.parse_i16(frame, &mut values).map_err(map_rmodbus_error)?;
+            parser
+                .parse_i16(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
             Ok(values.into_iter().flat_map(i16::to_be_bytes).collect())
         }
         ModbusResponseDecoder::U32Be => {
             let mut values = Vec::new();
-            parser.parse_u32_be(frame, &mut values).map_err(map_rmodbus_error)?;
+            parser
+                .parse_u32_be(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
             Ok(values.into_iter().flat_map(u32::to_be_bytes).collect())
         }
         ModbusResponseDecoder::U32Le => {
             let mut values = Vec::new();
-            parser.parse_u32_le(frame, &mut values).map_err(map_rmodbus_error)?;
+            parser
+                .parse_u32_le(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
             Ok(values.into_iter().flat_map(u32::to_be_bytes).collect())
         }
         ModbusResponseDecoder::I32Be => {
             let mut values = Vec::new();
-            parser.parse_i32_be(frame, &mut values).map_err(map_rmodbus_error)?;
+            parser
+                .parse_i32_be(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
             Ok(values.into_iter().flat_map(i32::to_be_bytes).collect())
         }
         ModbusResponseDecoder::I32Le => {
             let mut values = Vec::new();
-            parser.parse_i32_le(frame, &mut values).map_err(map_rmodbus_error)?;
+            parser
+                .parse_i32_le(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
             Ok(values.into_iter().flat_map(i32::to_be_bytes).collect())
         }
         ModbusResponseDecoder::F32Be => {
             let mut values = Vec::new();
-            parser.parse_f32_be(frame, &mut values).map_err(map_rmodbus_error)?;
-            Ok(values.into_iter().flat_map(|v| v.to_bits().to_be_bytes()).collect())
+            parser
+                .parse_f32_be(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
+            Ok(values
+                .into_iter()
+                .flat_map(|v| v.to_bits().to_be_bytes())
+                .collect())
         }
         ModbusResponseDecoder::F32Le => {
             let mut values = Vec::new();
-            parser.parse_f32_le(frame, &mut values).map_err(map_rmodbus_error)?;
-            Ok(values.into_iter().flat_map(|v| v.to_bits().to_be_bytes()).collect())
+            parser
+                .parse_f32_le(frame, &mut values)
+                .map_err(map_rmodbus_error)?;
+            Ok(values
+                .into_iter()
+                .flat_map(|v| v.to_bits().to_be_bytes())
+                .collect())
         }
         ModbusResponseDecoder::Bytes => parser
             .parse_slice(frame)
@@ -79,7 +104,9 @@ pub(crate) fn decode_modbus_response(
             .map_err(map_rmodbus_error),
         ModbusResponseDecoder::Utf8String => {
             let mut value = String::new();
-            parser.parse_string(frame, &mut value).map_err(map_rmodbus_error)?;
+            parser
+                .parse_string(frame, &mut value)
+                .map_err(map_rmodbus_error)?;
             Ok(value.into_bytes())
         }
     }

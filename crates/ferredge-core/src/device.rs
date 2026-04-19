@@ -227,7 +227,9 @@ impl ModbusReconnectConfig {
                         break;
                     }
                 }
-                Some(Duration::from_millis(millis.min(u128::from(u64::MAX)) as u64))
+                Some(Duration::from_millis(
+                    millis.min(u128::from(u64::MAX)) as u64
+                ))
             }
         }
     }
@@ -769,10 +771,22 @@ mod tests {
             ..ModbusReconnectConfig::default()
         };
 
-        assert_eq!(reconnect.delay_for_attempt(1), Some(Duration::from_millis(100)));
-        assert_eq!(reconnect.delay_for_attempt(2), Some(Duration::from_millis(200)));
-        assert_eq!(reconnect.delay_for_attempt(3), Some(Duration::from_millis(400)));
-        assert_eq!(reconnect.delay_for_attempt(4), Some(Duration::from_millis(500)));
+        assert_eq!(
+            reconnect.delay_for_attempt(1),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            reconnect.delay_for_attempt(2),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(
+            reconnect.delay_for_attempt(3),
+            Some(Duration::from_millis(400))
+        );
+        assert_eq!(
+            reconnect.delay_for_attempt(4),
+            Some(Duration::from_millis(500))
+        );
     }
 
     #[test]

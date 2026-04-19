@@ -1,10 +1,12 @@
-#[cfg(any(feature = "runtime", feature = "net"))]
-use std::time::Duration;
 #[cfg(feature = "runtime")]
 use std::sync::Arc;
+#[cfg(any(feature = "runtime", feature = "net"))]
+use std::time::Duration;
 
 #[cfg(any(feature = "runtime", feature = "net", feature = "serial"))]
 use ferredge_core::prelude::*;
+#[cfg(any(feature = "net", feature = "serial"))]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "net")]
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(feature = "runtime")]
@@ -13,8 +15,6 @@ use tokio::{
     sync::{Mutex, MutexGuard, mpsc},
     task::JoinHandle,
 };
-#[cfg(any(feature = "net", feature = "serial"))]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "serial")]
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
@@ -376,7 +376,10 @@ impl AsyncDatagramSocket for TokioDatagramSocket {
     }
 
     async fn send_to(&mut self, buf: &[u8], address: &str) -> Result<usize, NetError> {
-        self.socket.send_to(buf, address).await.map_err(map_io_error)
+        self.socket
+            .send_to(buf, address)
+            .await
+            .map_err(map_io_error)
     }
 
     async fn close(&mut self) -> Result<(), NetError> {
@@ -576,8 +579,11 @@ mod tests {
                 .expect("local addr should exist")
                 .to_string();
             let connect_address = address.clone();
-            let connect_task =
-                tokio::spawn(async move { net.connect(&connect_address).await.expect("connect should succeed") });
+            let connect_task = tokio::spawn(async move {
+                net.connect(&connect_address)
+                    .await
+                    .expect("connect should succeed")
+            });
             let mut server = listener.accept().await.expect("accept should succeed");
             let mut client = connect_task.await.expect("join should succeed");
 
@@ -614,7 +620,10 @@ mod tests {
                 .await
                 .expect("send_to should succeed");
             let mut buf = [0u8; 8];
-            let (n, _) = server.recv_from(&mut buf).await.expect("recv should succeed");
+            let (n, _) = server
+                .recv_from(&mut buf)
+                .await
+                .expect("recv should succeed");
             assert_eq!(&buf[..n], b"udp");
         });
     }
