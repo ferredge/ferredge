@@ -365,14 +365,26 @@ mod tests {
         assert_eq!(bracket_ipv6_host("example.com"), "example.com");
 
         assert_eq!(format_host_port("2001:db8::10", 502), "[2001:db8::10]:502");
-        assert_eq!(format_host_port("[2001:db8::10]", 502), "[2001:db8::10]:502");
+        assert_eq!(
+            format_host_port("[2001:db8::10]", 502),
+            "[2001:db8::10]:502"
+        );
         assert_eq!(format_host_port("127.0.0.1", 502), "127.0.0.1:502");
 
-        assert_eq!(normalize_host_port("mqtt://ignored", 1883), "mqtt://ignored");
+        assert_eq!(
+            normalize_host_port("mqtt://ignored", 1883),
+            "mqtt://ignored"
+        );
         assert_eq!(normalize_host_port("example.com", 1883), "example.com:1883");
-        assert_eq!(normalize_host_port("example.com:1884", 1883), "example.com:1884");
+        assert_eq!(
+            normalize_host_port("example.com:1884", 1883),
+            "example.com:1884"
+        );
         assert_eq!(normalize_host_port("[::1]", 1883), "[::1]:1883");
         assert_eq!(normalize_host_port("[::1]:1884", 1883), "[::1]:1884");
-        assert_eq!(normalize_host_port("2001:db8::10", 1883), "[2001:db8::10]:1883");
+        assert_eq!(
+            normalize_host_port("2001:db8::10", 1883),
+            "[2001:db8::10]:1883"
+        );
     }
 }
