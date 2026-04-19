@@ -7,7 +7,7 @@ use std::{
 };
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, BrokerBackoffStrategy, BrokerChannelKind, BrokerMessageOptions,
+    Address, BrokerAddress, BackoffStrategy, BrokerChannelKind, BrokerMessageOptions,
     BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
     BrokerSubscriptionProtocolOptions, Command, Correlation, DeliveryGuarantee, Device,
     DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
@@ -53,7 +53,7 @@ fn make_driver_with_client_id_and_keepalive(
             enabled: true,
             initial_delay_ms: 100,
             max_delay_ms: 1_000,
-            strategy: BrokerBackoffStrategy::Exponential,
+            strategy: BackoffStrategy::Exponential,
             multiplier: 2,
             max_attempts: None,
             replay_subscriptions: true,
@@ -340,7 +340,6 @@ fn assert_qos_roundtrip(broker: &MosquittoGuard, delivery: DeliveryGuarantee, su
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_extended_client_flow() {
     let broker = MosquittoGuard::start();
     let subscriber = make_named_driver(
@@ -459,7 +458,6 @@ fn mosquitto_extended_client_flow() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_qos_matrix_roundtrip() {
     let broker = MosquittoGuard::start();
 
@@ -469,7 +467,6 @@ fn mosquitto_qos_matrix_roundtrip() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_keepalive_client_flow_five_seconds() {
     let broker = MosquittoGuard::start();
     let driver = make_driver_with_client_id_and_keepalive(
@@ -498,7 +495,6 @@ fn mosquitto_keepalive_client_flow_five_seconds() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_v5_complex_property_roundtrip() {
     let broker = MosquittoGuard::start();
     let publisher = make_named_driver(
@@ -813,7 +809,6 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_v5_subscription_identifier_and_no_local_work() {
     let broker = MosquittoGuard::start();
     let driver = make_named_driver(
@@ -908,7 +903,6 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_shared_subscriptions_load_balance() {
     let broker = MosquittoGuard::start();
     let subscriber_a = make_named_driver(
@@ -1005,7 +999,6 @@ fn mosquitto_shared_subscriptions_load_balance() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_keepalive_client_flow_thirty_five_seconds() {
     let broker = MosquittoGuard::start();
     let driver = make_driver_with_client_id_and_keepalive(
@@ -1034,7 +1027,6 @@ fn mosquitto_keepalive_client_flow_thirty_five_seconds() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
     let mut broker = MosquittoGuard::start();
     let driver = make_driver_with_config(
@@ -1046,7 +1038,7 @@ fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
             enabled: true,
             initial_delay_ms: 100,
             max_delay_ms: 500,
-            strategy: BrokerBackoffStrategy::Exponential,
+            strategy: BackoffStrategy::Exponential,
             multiplier: 2,
             max_attempts: None,
             replay_subscriptions: true,
@@ -1117,7 +1109,6 @@ fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
     let mut broker = MosquittoGuard::start();
     let driver = make_driver_with_config(
@@ -1129,7 +1120,7 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
             enabled: true,
             initial_delay_ms: 100,
             max_delay_ms: 100,
-            strategy: BrokerBackoffStrategy::Fixed,
+            strategy: BackoffStrategy::Fixed,
             multiplier: 1,
             max_attempts: Some(2),
             replay_subscriptions: true,
@@ -1180,14 +1171,13 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_replays_subscriptions_after_restart() {
     let mut broker = MosquittoGuard::start();
     let reconnect = BrokerReconnectConfig {
         enabled: true,
         initial_delay_ms: 100,
         max_delay_ms: 500,
-        strategy: BrokerBackoffStrategy::Exponential,
+        strategy: BackoffStrategy::Exponential,
         multiplier: 2,
         max_attempts: None,
         replay_subscriptions: true,
@@ -1256,7 +1246,6 @@ fn mosquitto_replays_subscriptions_after_restart() {
 }
 
 #[test]
-#[ignore = "requires local mosquitto process and escalated execution"]
 fn mosquitto_replays_queued_publish_after_restart() {
     let mut broker = MosquittoGuard::start();
     let driver = make_driver_with_config(
@@ -1268,7 +1257,7 @@ fn mosquitto_replays_queued_publish_after_restart() {
             enabled: true,
             initial_delay_ms: 100,
             max_delay_ms: 500,
-            strategy: BrokerBackoffStrategy::Exponential,
+            strategy: BackoffStrategy::Exponential,
             multiplier: 2,
             max_attempts: None,
             replay_subscriptions: true,
