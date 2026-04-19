@@ -1,9 +1,10 @@
 use std::{
     fs,
+    io::Read,
     net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command as ProcessCommand, Stdio},
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -27,6 +28,12 @@ const DIAGSLAVE_UDP_START_SETTLE_MS: u64 = 300;
 const DIAGSLAVE_SERIAL_START_SETTLE_MS: u64 = 300;
 const DIAGSLAVE_TCP_START_SETTLE_MS: u64 = 50;
 const SOCAT_START_TIMEOUT_SECS: u64 = 5;
+const MAX_COIL_START_ADDR: u16 = 4013;
+const MAX_READ_COIL_COUNT: u16 = 2000;
+const MAX_WRITE_COIL_COUNT: usize = 1968;
+const OFFSET_COIL_START_ADDR: u16 = 137;
+const OFFSET_READ_COIL_COUNT: u16 = 37;
+const OFFSET_WRITE_COIL_COUNT: usize = 29;
 
 #[cfg(unix)]
 struct SerialPtyGuard {
@@ -139,6 +146,7 @@ fn reserve_free_port() -> u16 {
 
 struct DiagslaveGuard {
     child: Option<Child>,
+    output_capture: Option<ChildOutputCapture>,
     port: u16,
     mode: &'static str,
     serial_port: Option<String>,
@@ -149,6 +157,7 @@ impl DiagslaveGuard {
         let port = reserve_free_port();
         let mut guard = Self {
             child: None,
+            output_capture: None,
             port,
             mode,
             serial_port: None,
@@ -161,6 +170,7 @@ impl DiagslaveGuard {
     fn start_serial(mode: &'static str, serial_port: &str) -> Self {
         let mut guard = Self {
             child: None,
+            output_capture: None,
             port: 0,
             mode,
             serial_port: Some(serial_port.to_string()),
@@ -171,12 +181,13 @@ impl DiagslaveGuard {
 
     fn start_slave(&mut self) {
         assert!(self.child.is_none(), "diagslave already running");
-        let child = ProcessCommand::new("diagslave")
+        let mut child = ProcessCommand::new("diagslave")
             .args(["-m", self.mode, "-a", "1", "-p", &self.port.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("diagslave should spawn");
+        self.output_capture = Some(ChildOutputCapture::start(&mut child));
         self.child = Some(child);
 
         if self.mode == "udp" {
@@ -203,7 +214,7 @@ impl DiagslaveGuard {
     #[cfg(unix)]
     fn start_serial_slave(&mut self, serial_port: &str) {
         assert!(self.child.is_none(), "diagslave already running");
-        let child = ProcessCommand::new("diagslave")
+        let mut child = ProcessCommand::new("diagslave")
             .args([
                 "-m",
                 self.mode,
@@ -219,10 +230,11 @@ impl DiagslaveGuard {
                 "none",
                 serial_port,
             ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("diagslave serial mode should spawn");
+        self.output_capture = Some(ChildOutputCapture::start(&mut child));
         self.child = Some(child);
         thread::sleep(Duration::from_millis(DIAGSLAVE_SERIAL_START_SETTLE_MS));
     }
@@ -231,6 +243,9 @@ impl DiagslaveGuard {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        if let Some(mut output_capture) = self.output_capture.take() {
+            output_capture.finish(self.mode);
         }
     }
 
@@ -249,6 +264,69 @@ impl Drop for DiagslaveGuard {
     fn drop(&mut self) {
         self.stop_slave();
     }
+}
+
+struct ChildOutputCapture {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    stderr_task: Option<thread::JoinHandle<()>>,
+    stdout_task: Option<thread::JoinHandle<()>>,
+}
+
+impl ChildOutputCapture {
+    fn start(child: &mut Child) -> Self {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let stdout_task = child
+            .stdout
+            .take()
+            .map(|stdout| spawn_output_capture(stdout, Arc::clone(&buffer)));
+        let stderr_task = child
+            .stderr
+            .take()
+            .map(|stderr| spawn_output_capture(stderr, Arc::clone(&buffer)));
+        Self {
+            buffer,
+            stderr_task,
+            stdout_task,
+        }
+    }
+
+    fn finish(&mut self, mode: &str) {
+        if let Some(task) = self.stdout_task.take() {
+            let _ = task.join();
+        }
+        if let Some(task) = self.stderr_task.take() {
+            let _ = task.join();
+        }
+        if thread::panicking() {
+            let output = self
+                .buffer
+                .lock()
+                .expect("diagslave output buffer should lock");
+            if !output.is_empty() {
+                eprintln!(
+                    "captured diagslave {mode} output:\n{}",
+                    String::from_utf8_lossy(&output)
+                );
+            }
+        }
+    }
+}
+
+fn spawn_output_capture<R>(reader: R, buffer: Arc<Mutex<Vec<u8>>>) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = reader;
+        let mut output = Vec::new();
+        let _ = reader.read_to_end(&mut output);
+        if !output.is_empty() {
+            buffer
+                .lock()
+                .expect("diagslave output buffer should lock")
+                .extend_from_slice(&output);
+        }
+    })
 }
 
 fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
@@ -287,6 +365,74 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
             ),
         },
     );
+    resources.insert(
+        "coil_max_read".to_string(),
+        DeviceResource {
+            name: "coil_max_read".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: MAX_COIL_START_ADDR,
+                register_kind: ModbusRegisterKind::Coil,
+                codec: ModbusValueCodec::Bits,
+                quantity: Some(MAX_READ_COIL_COUNT),
+                description: None,
+            },
+            unit: None,
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
+        },
+    );
+    resources.insert(
+        "coil_max_write".to_string(),
+        DeviceResource {
+            name: "coil_max_write".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: MAX_COIL_START_ADDR,
+                register_kind: ModbusRegisterKind::Coil,
+                codec: ModbusValueCodec::Bits,
+                quantity: Some(MAX_WRITE_COIL_COUNT as u16),
+                description: None,
+            },
+            unit: None,
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
+        },
+    );
+    resources.insert(
+        "coil_offset_read".to_string(),
+        DeviceResource {
+            name: "coil_offset_read".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: OFFSET_COIL_START_ADDR,
+                register_kind: ModbusRegisterKind::Coil,
+                codec: ModbusValueCodec::Bits,
+                quantity: Some(OFFSET_READ_COIL_COUNT),
+                description: None,
+            },
+            unit: None,
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
+        },
+    );
+    resources.insert(
+        "coil_offset_write".to_string(),
+        DeviceResource {
+            name: "coil_offset_write".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: OFFSET_COIL_START_ADDR,
+                register_kind: ModbusRegisterKind::Coil,
+                codec: ModbusValueCodec::Bits,
+                quantity: Some(OFFSET_WRITE_COIL_COUNT as u16),
+                description: None,
+            },
+            unit: None,
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
+        },
+    );
 
     ModbusDriver::new(Device {
         id: "diag-1".to_string(),
@@ -308,8 +454,8 @@ fn serial_port_config(path: String) -> SerialPortConfig {
         parity: SerialParity::None,
         stop_bits: SerialStopBits::One,
         flow_control: SerialFlowControl::None,
-        read_timeout: Some(Duration::from_millis(500)),
-        write_timeout: Some(Duration::from_millis(500)),
+        read_timeout: Some(Duration::from_secs(2)),
+        write_timeout: Some(Duration::from_secs(2)),
     }
 }
 
@@ -380,29 +526,59 @@ fn read_command(resource: &str) -> Command {
     }
 }
 
+fn coil_payload(count: usize) -> Vec<u8> {
+    (0..count)
+        .map(|i| if (i * 7) % 11 < 5 { 1 } else { 0 })
+        .collect()
+}
+
+fn expected_coil_read_payload(write_count: usize, read_count: u16) -> Vec<u8> {
+    let mut payload = coil_payload(write_count);
+    payload.resize(read_count as usize, 0);
+    payload
+}
+
+async fn assert_coil_round_trip(
+    driver: &ModbusDriver,
+    write_resource: &str,
+    read_resource: &str,
+    write_count: usize,
+    read_count: u16,
+) {
+    driver
+        .execute_command(&write_command(write_resource, coil_payload(write_count)))
+        .await
+        .expect("coil write should succeed");
+    let response = driver
+        .execute_command(&read_command(read_resource))
+        .await
+        .expect("coil read should succeed");
+    assert_eq!(response.payload, expected_coil_read_payload(write_count, read_count));
+}
+
 #[test]
-fn diagslave_tcp_write_then_read_holding() {
+fn diagslave_tcp_write_then_read_max_coils() {
     let guard = DiagslaveGuard::start("tcp");
-    let driver = make_tcp_driver(guard.port, ModbusClientOptions::default());
+    let driver = make_driver(DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port: guard.port,
+        options: ModbusClientOptions::default(),
+    }));
 
     block_on(async {
-        driver
-            .execute_command(&write_command(
-                "holding_u16",
-                0x3456u16.to_be_bytes().to_vec(),
-            ))
-            .await
-            .expect("holding write should succeed");
-        let response = driver
-            .execute_command(&read_command("holding_u16"))
-            .await
-            .expect("holding read should succeed");
-        assert_eq!(response.payload, 0x3456u16.to_be_bytes().to_vec());
+        assert_coil_round_trip(
+            &driver,
+            "coil_max_write",
+            "coil_max_read",
+            MAX_WRITE_COIL_COUNT,
+            MAX_READ_COIL_COUNT,
+        )
+        .await;
     });
 }
 
 #[test]
-fn diagslave_udp_write_then_read_coil() {
+fn diagslave_udp_write_then_read_max_coils() {
     let guard = DiagslaveGuard::start("udp");
     let driver = make_driver(DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {
         addr: "127.0.0.1".to_string(),
@@ -411,65 +587,65 @@ fn diagslave_udp_write_then_read_coil() {
     }));
 
     block_on(async {
-        driver
-            .execute_command(&write_command("coil_bit", vec![1]))
-            .await
-            .expect("coil write should succeed");
-        let response = driver
-            .execute_command(&read_command("coil_bit"))
-            .await
-            .expect("coil read should succeed");
-        assert_eq!(response.payload, vec![1]);
+        assert_coil_round_trip(
+            &driver,
+            "coil_max_write",
+            "coil_max_read",
+            MAX_WRITE_COIL_COUNT,
+            MAX_READ_COIL_COUNT,
+        )
+        .await;
     });
 }
 
 #[test]
-fn diagslave_rtu_over_tcp_write_then_read_holding() {
+fn diagslave_rtu_over_tcp_write_then_read_max_coils() {
     let guard = DiagslaveGuard::start("enc");
-    let driver = make_rtu_over_tcp_driver(guard.port, ModbusClientOptions::default());
+    let driver = make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
+        ModbusRtuOverTcpEndpointConfig {
+            addr: "127.0.0.1".to_string(),
+            port: guard.port,
+            options: ModbusClientOptions::default(),
+        },
+    ));
 
     block_on(async {
-        driver
-            .execute_command(&write_command(
-                "holding_u16",
-                0x5678u16.to_be_bytes().to_vec(),
-            ))
-            .await
-            .expect("holding write should succeed");
-        let response = driver
-            .execute_command(&read_command("holding_u16"))
-            .await
-            .expect("holding read should succeed");
-        assert_eq!(response.payload, 0x5678u16.to_be_bytes().to_vec());
+        assert_coil_round_trip(
+            &driver,
+            "coil_max_write",
+            "coil_max_read",
+            MAX_WRITE_COIL_COUNT,
+            MAX_READ_COIL_COUNT,
+        )
+        .await;
     });
 }
 
 #[cfg(unix)]
 #[test]
-fn diagslave_rtu_over_pty_write_then_read_holding() {
+fn diagslave_rtu_over_pty_write_then_read_max_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
-    let driver = make_rtu_driver(pty.master_path(), ModbusClientOptions::default());
+    let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+        serial: serial_port_config(pty.master_path()),
+        options: ModbusClientOptions::default(),
+    }));
 
     block_on(async {
-        driver
-            .execute_command(&write_command(
-                "holding_u16",
-                0x4567u16.to_be_bytes().to_vec(),
-            ))
-            .await
-            .expect("holding write should succeed");
-        let response = driver
-            .execute_command(&read_command("holding_u16"))
-            .await
-            .expect("holding read should succeed");
-        assert_eq!(response.payload, 0x4567u16.to_be_bytes().to_vec());
+        assert_coil_round_trip(
+            &driver,
+            "coil_max_write",
+            "coil_max_read",
+            MAX_WRITE_COIL_COUNT,
+            MAX_READ_COIL_COUNT,
+        )
+        .await;
     });
 }
 
 #[cfg(unix)]
 #[test]
-fn diagslave_ascii_over_pty_write_then_read_coil() {
+fn diagslave_ascii_over_pty_write_then_read_max_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("ascii", &pty.slave_path());
     let driver = make_driver(DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
@@ -478,15 +654,123 @@ fn diagslave_ascii_over_pty_write_then_read_coil() {
     }));
 
     block_on(async {
-        driver
-            .execute_command(&write_command("coil_bit", vec![1]))
-            .await
-            .expect("coil write should succeed");
-        let response = driver
-            .execute_command(&read_command("coil_bit"))
-            .await
-            .expect("coil read should succeed");
-        assert_eq!(response.payload, vec![1]);
+        assert_coil_round_trip(
+            &driver,
+            "coil_max_write",
+            "coil_max_read",
+            MAX_WRITE_COIL_COUNT,
+            MAX_READ_COIL_COUNT,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn diagslave_tcp_write_then_read_offset_coils() {
+    let guard = DiagslaveGuard::start("tcp");
+    let driver = make_driver(DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port: guard.port,
+        options: ModbusClientOptions::default(),
+    }));
+
+    block_on(async {
+        assert_coil_round_trip(
+            &driver,
+            "coil_offset_write",
+            "coil_offset_read",
+            OFFSET_WRITE_COIL_COUNT,
+            OFFSET_READ_COIL_COUNT,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn diagslave_udp_write_then_read_offset_coils() {
+    let guard = DiagslaveGuard::start("udp");
+    let driver = make_driver(DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port: guard.port,
+        options: ModbusClientOptions::default(),
+    }));
+
+    block_on(async {
+        assert_coil_round_trip(
+            &driver,
+            "coil_offset_write",
+            "coil_offset_read",
+            OFFSET_WRITE_COIL_COUNT,
+            OFFSET_READ_COIL_COUNT,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn diagslave_rtu_over_tcp_write_then_read_offset_coils() {
+    let guard = DiagslaveGuard::start("enc");
+    let driver = make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
+        ModbusRtuOverTcpEndpointConfig {
+            addr: "127.0.0.1".to_string(),
+            port: guard.port,
+            options: ModbusClientOptions::default(),
+        },
+    ));
+
+    block_on(async {
+        assert_coil_round_trip(
+            &driver,
+            "coil_offset_write",
+            "coil_offset_read",
+            OFFSET_WRITE_COIL_COUNT,
+            OFFSET_READ_COIL_COUNT,
+        )
+        .await;
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn diagslave_rtu_over_pty_write_then_read_offset_coils() {
+    let pty = SerialPtyGuard::start();
+    let _guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
+    let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+        serial: serial_port_config(pty.master_path()),
+        options: ModbusClientOptions::default(),
+    }));
+
+    block_on(async {
+        assert_coil_round_trip(
+            &driver,
+            "coil_offset_write",
+            "coil_offset_read",
+            OFFSET_WRITE_COIL_COUNT,
+            OFFSET_READ_COIL_COUNT,
+        )
+        .await;
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn diagslave_ascii_over_pty_write_then_read_offset_coils() {
+    let pty = SerialPtyGuard::start();
+    let _guard = DiagslaveGuard::start_serial("ascii", &pty.slave_path());
+    let driver = make_driver(DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
+        serial: serial_port_config(pty.master_path()),
+        options: ModbusClientOptions::default(),
+    }));
+
+    block_on(async {
+        assert_coil_round_trip(
+            &driver,
+            "coil_offset_write",
+            "coil_offset_read",
+            OFFSET_WRITE_COIL_COUNT,
+            OFFSET_READ_COIL_COUNT,
+        )
+        .await;
     });
 }
 
@@ -641,9 +925,9 @@ fn diagslave_rtu_persistent_recovers_after_restart() {
 #[cfg(windows)]
 #[test]
 #[ignore = "requires user-provided paired COM ports on Windows; Unix live serial tests use socat-backed PTYs"]
-fn diagslave_rtu_over_pty_write_then_read_holding() {}
+fn diagslave_rtu_over_pty_write_then_read_max_coils() {}
 
 #[cfg(windows)]
 #[test]
 #[ignore = "requires user-provided paired COM ports on Windows; Unix live serial tests use socat-backed PTYs"]
-fn diagslave_ascii_over_pty_write_then_read_coil() {}
+fn diagslave_ascii_over_pty_write_then_read_max_coils() {}
