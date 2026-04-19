@@ -363,8 +363,7 @@ async fn write_stream_request(
     frame: &[u8],
     label: &str,
 ) -> Result<(), String> {
-    socket
-        .write(frame)
+    write_all_socket(socket, frame)
         .await
         .map_err(|e| format!("failed to write {label} request: {e:?}"))?;
     socket
@@ -378,7 +377,7 @@ async fn write_serial_request(
     frame: &[u8],
     label: &str,
 ) -> Result<(), String> {
-    port.write(frame)
+    write_all_serial_port(port, frame)
         .await
         .map_err(|e| format!("failed to write {label} request: {e:?}"))?;
     port.flush()

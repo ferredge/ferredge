@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use ferredge_core::prelude::{AsyncNet, AsyncRuntime, AsyncSocket, NetError};
+use ferredge_core::prelude::{AsyncNet, AsyncRuntime, AsyncSocket, write_all_socket};
 
 use crate::HttpRequest;
 
@@ -124,17 +124,6 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, anyhow::Error> {
             host_header: authority.to_string(),
         })
     }
-}
-
-async fn write_all_socket<S: AsyncSocket>(socket: &mut S, mut buf: &[u8]) -> Result<(), NetError> {
-    while !buf.is_empty() {
-        let written = socket.write(buf).await?;
-        if written == 0 {
-            return Err(NetError::Closed);
-        }
-        buf = &buf[written..];
-    }
-    Ok(())
 }
 
 #[cfg(test)]

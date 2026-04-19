@@ -409,7 +409,7 @@ pub(crate) async fn handle_connection_events_async(
         match event {
             mqtt::connection::Event::RequestSendPacket { packet, .. } => {
                 let bytes = packet.to_continuous_buffer();
-                write_all_socket_async(&mut session.stream, &bytes)
+                write_all_socket(&mut session.stream, &bytes)
                     .await
                     .map_err(|e| format!("failed to write MQTT packet: {e:?}"))?;
                 session
@@ -493,7 +493,7 @@ async fn process_outbound_auth_events_async(
         match event {
             mqtt::connection::Event::RequestSendPacket { packet, .. } => {
                 let bytes = packet.to_continuous_buffer();
-                write_all_socket_async(&mut session.stream, &bytes)
+                write_all_socket(&mut session.stream, &bytes)
                     .await
                     .map_err(|e| format!("failed to write MQTT auth packet: {e:?}"))?;
                 session
@@ -688,17 +688,6 @@ async fn send_keepalive_ping_if_due(
     };
     session.awaiting_pingresp = true;
     let _ = handle_connection_events_async(runtime, session, device_id, None, None, events).await?;
-    Ok(())
-}
-
-async fn write_all_socket_async(socket: &mut StackSocket, mut buf: &[u8]) -> Result<(), NetError> {
-    while !buf.is_empty() {
-        let written = socket.write(buf).await?;
-        if written == 0 {
-            return Err(NetError::Closed);
-        }
-        buf = &buf[written..];
-    }
     Ok(())
 }
 
