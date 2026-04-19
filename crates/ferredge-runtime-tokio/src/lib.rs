@@ -87,6 +87,7 @@ pub struct TokioListener {
 #[cfg(feature = "net")]
 pub struct TokioDatagramSocket {
     socket: UdpSocket,
+    read_timeout: Option<Duration>,
 }
 
 #[cfg(feature = "serial")]
@@ -354,9 +355,23 @@ impl AsyncListener for TokioListener {
 }
 
 #[cfg(feature = "net")]
+impl TokioDatagramSocket {
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+        self.read_timeout = timeout;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "net")]
 impl AsyncDatagramSocket for TokioDatagramSocket {
     async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
-        let (size, address) = self.socket.recv_from(buf).await.map_err(map_io_error)?;
+        let (size, address) = match self.read_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, self.socket.recv_from(buf))
+                .await
+                .map_err(|_| NetError::TimedOut)?
+                .map_err(map_io_error)?,
+            None => self.socket.recv_from(buf).await.map_err(map_io_error)?,
+        };
         Ok((size, address.to_string()))
     }
 
@@ -395,7 +410,10 @@ impl AsyncDatagramNet for TokioNet {
 
     async fn bind_datagram(&self, address: &str) -> Result<Self::DatagramSocket, NetError> {
         let socket = UdpSocket::bind(address).await.map_err(map_io_error)?;
-        Ok(TokioDatagramSocket { socket })
+        Ok(TokioDatagramSocket {
+            socket,
+            read_timeout: None,
+        })
     }
 }
 

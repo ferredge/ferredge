@@ -102,6 +102,9 @@ impl ModbusDriver {
             .await
             .map_err(|e| format!("failed to bind Modbus UDP socket: {e:?}"))?;
         socket
+            .set_read_timeout(request.timeout)
+            .map_err(|e| format!("failed to set Modbus UDP read timeout: {e:?}"))?;
+        socket
             .send_to(&request.frame, &format!("{}:{}", config.addr, config.port))
             .await
             .map_err(|e| format!("failed to send Modbus UDP request: {e:?}"))?;

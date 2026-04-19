@@ -82,6 +82,7 @@ pub struct AsyncStdListener {
 #[cfg(feature = "net")]
 pub struct AsyncStdDatagramSocket {
     socket: UdpSocket,
+    read_timeout: Option<Duration>,
 }
 
 #[cfg(feature = "serial")]
@@ -330,9 +331,23 @@ impl AsyncListener for AsyncStdListener {
 }
 
 #[cfg(feature = "net")]
+impl AsyncStdDatagramSocket {
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+        self.read_timeout = timeout;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "net")]
 impl AsyncDatagramSocket for AsyncStdDatagramSocket {
     async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
-        let (size, address) = self.socket.recv_from(buf).await.map_err(map_io_error)?;
+        let (size, address) = match self.read_timeout {
+            Some(timeout) => async_std::future::timeout(timeout, self.socket.recv_from(buf))
+                .await
+                .map_err(|_| NetError::TimedOut)?
+                .map_err(map_io_error)?,
+            None => self.socket.recv_from(buf).await.map_err(map_io_error)?,
+        };
         Ok((size, address.to_string()))
     }
 
@@ -371,7 +386,10 @@ impl AsyncDatagramNet for AsyncStdNet {
 
     async fn bind_datagram(&self, address: &str) -> Result<Self::DatagramSocket, NetError> {
         let socket = UdpSocket::bind(address).await.map_err(map_io_error)?;
-        Ok(AsyncStdDatagramSocket { socket })
+        Ok(AsyncStdDatagramSocket {
+            socket,
+            read_timeout: None,
+        })
     }
 }
 
