@@ -113,7 +113,7 @@ impl ModbusDriver {
             .set_read_timeout(request.timeout)
             .map_err(|e| format!("failed to set Modbus UDP read timeout: {e:?}"))?;
         socket
-            .send_to(&request.frame, &format!("{}:{}", config.addr, config.port))
+            .send_to(&request.frame, &format_host_port(&config.addr, config.port))
             .await
             .map_err(|e| format!("failed to send Modbus UDP request: {e:?}"))?;
         read_datagram_response(&mut socket).await
@@ -291,7 +291,7 @@ impl ModbusDriver {
     ) -> Result<StackSocket, String> {
         let mut socket = self
             .net
-            .connect(&format!("{addr}:{port}"))
+            .connect(&format_host_port(addr, port))
             .await
             .map_err(|e| format!("failed to connect Modbus TCP socket: {e:?}"))?;
         socket

@@ -54,6 +54,37 @@ pub trait AsyncSocket: Send + Sync + 'static {
     fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + Send;
 }
 
+/// Brackets one bare IPv6 host literal for URI/socket-address use.
+pub fn bracket_ipv6_host(host: &str) -> String {
+    if host.starts_with('[') || host.matches(':').count() <= 1 {
+        host.to_string()
+    } else {
+        format!("[{host}]")
+    }
+}
+
+/// Formats one host plus one explicit port, bracketing bare IPv6 literals as needed.
+pub fn format_host_port(host: &str, port: u16) -> String {
+    format!("{}:{port}", bracket_ipv6_host(host))
+}
+
+/// Appends the default port when the authority omits it, bracketing bare IPv6 literals.
+pub fn normalize_host_port(authority: &str, default_port: u16) -> String {
+    if authority.starts_with('[') {
+        if authority.contains("]:") {
+            authority.to_string()
+        } else {
+            format_host_port(authority, default_port)
+        }
+    } else {
+        match authority.matches(':').count() {
+            0 => format_host_port(authority, default_port),
+            1 => authority.to_string(),
+            _ => format_host_port(authority, default_port),
+        }
+    }
+}
+
 /// Writes the full buffer to one async socket, retrying short writes until completion.
 pub async fn write_all_socket<S>(socket: &mut S, buf: &[u8]) -> Result<(), NetError>
 where
@@ -325,5 +356,23 @@ mod tests {
         block_on(write_all_socket(&mut socket, b"abcdefgh")).expect("write_all should succeed");
 
         assert_eq!(socket.written, b"abcdefgh");
+    }
+
+    #[test]
+    fn host_port_helpers_bracket_bare_ipv6_and_preserve_existing_ports() {
+        assert_eq!(bracket_ipv6_host("2001:db8::10"), "[2001:db8::10]");
+        assert_eq!(bracket_ipv6_host("[2001:db8::10]"), "[2001:db8::10]");
+        assert_eq!(bracket_ipv6_host("example.com"), "example.com");
+
+        assert_eq!(format_host_port("2001:db8::10", 502), "[2001:db8::10]:502");
+        assert_eq!(format_host_port("[2001:db8::10]", 502), "[2001:db8::10]:502");
+        assert_eq!(format_host_port("127.0.0.1", 502), "127.0.0.1:502");
+
+        assert_eq!(normalize_host_port("mqtt://ignored", 1883), "mqtt://ignored");
+        assert_eq!(normalize_host_port("example.com", 1883), "example.com:1883");
+        assert_eq!(normalize_host_port("example.com:1884", 1883), "example.com:1884");
+        assert_eq!(normalize_host_port("[::1]", 1883), "[::1]:1883");
+        assert_eq!(normalize_host_port("[::1]:1884", 1883), "[::1]:1884");
+        assert_eq!(normalize_host_port("2001:db8::10", 1883), "[2001:db8::10]:1883");
     }
 }
