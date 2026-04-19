@@ -353,13 +353,16 @@ fn validate_register_codec(
 }
 
 fn map_rmodbus_build_error(error: RmodbusError) -> ModbusCommandConversionError {
-    ModbusCommandConversionError::InvalidPayload(match error {
-        RmodbusError::OOB => "out of bounds",
-        RmodbusError::FrameBroken => "frame broken",
-        RmodbusError::FrameCRCError => "frame crc error",
-        RmodbusError::Utf8Error => "utf8 error",
-        _ => "rmodbus error",
-    }.to_string())
+    ModbusCommandConversionError::InvalidPayload(
+        match error {
+            RmodbusError::OOB => "out of bounds",
+            RmodbusError::FrameBroken => "frame broken",
+            RmodbusError::FrameCRCError => "frame crc error",
+            RmodbusError::Utf8Error => "utf8 error",
+            _ => "rmodbus error",
+        }
+        .to_string(),
+    )
 }
 
 fn modbus_value_from_payload(
@@ -411,7 +414,9 @@ fn decode_u16(payload: &ModbusValue) -> Result<u16, ModbusCommandConversionError
     match payload {
         ModbusValue::U16(values) if values.len() == 1 => Ok(values[0]),
         ModbusValue::I16(values) if values.len() == 1 => u16::try_from(values[0]).map_err(|_| {
-            ModbusCommandConversionError::InvalidPayload("i16 payload must fit into unsigned u16".to_string())
+            ModbusCommandConversionError::InvalidPayload(
+                "i16 payload must fit into unsigned u16".to_string(),
+            )
         }),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
             "u16 payload must be a single 16-bit value".to_string(),
@@ -588,8 +593,9 @@ fn decode_payload_u16_list(
     payload: &PayloadValue,
 ) -> Result<Vec<u16>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "u16 payload must be unsigned integer", |value| {
-        u16::try_from(value)
-            .map_err(|_| ModbusCommandConversionError::InvalidPayload("u16 payload out of range".to_string()))
+        u16::try_from(value).map_err(|_| {
+            ModbusCommandConversionError::InvalidPayload("u16 payload out of range".to_string())
+        })
     })
 }
 
@@ -597,8 +603,9 @@ fn decode_payload_i16_list(
     payload: &PayloadValue,
 ) -> Result<Vec<i16>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "i16 payload must be integer", |value| {
-        i16::try_from(value)
-            .map_err(|_| ModbusCommandConversionError::InvalidPayload("i16 payload out of range".to_string()))
+        i16::try_from(value).map_err(|_| {
+            ModbusCommandConversionError::InvalidPayload("i16 payload out of range".to_string())
+        })
     })
 }
 
@@ -606,8 +613,9 @@ fn decode_payload_u32_list(
     payload: &PayloadValue,
 ) -> Result<Vec<u32>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "u32 payload must be unsigned integer", |value| {
-        u32::try_from(value)
-            .map_err(|_| ModbusCommandConversionError::InvalidPayload("u32 payload out of range".to_string()))
+        u32::try_from(value).map_err(|_| {
+            ModbusCommandConversionError::InvalidPayload("u32 payload out of range".to_string())
+        })
     })
 }
 
@@ -615,8 +623,9 @@ fn decode_payload_i32_list(
     payload: &PayloadValue,
 ) -> Result<Vec<i32>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "i32 payload must be integer", |value| {
-        i32::try_from(value)
-            .map_err(|_| ModbusCommandConversionError::InvalidPayload("i32 payload out of range".to_string()))
+        i32::try_from(value).map_err(|_| {
+            ModbusCommandConversionError::InvalidPayload("i32 payload out of range".to_string())
+        })
     })
 }
 
@@ -689,9 +698,13 @@ where
             .map(|value| match value {
                 PayloadValue::I64(value) => map(i128::from(*value)),
                 PayloadValue::U64(value) => map(i128::from(*value)),
-                _ => Err(ModbusCommandConversionError::InvalidPayload(scalar_error.to_string())),
+                _ => Err(ModbusCommandConversionError::InvalidPayload(
+                    scalar_error.to_string(),
+                )),
             })
             .collect(),
-        _ => Err(ModbusCommandConversionError::InvalidPayload(scalar_error.to_string())),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            scalar_error.to_string(),
+        )),
     }
 }

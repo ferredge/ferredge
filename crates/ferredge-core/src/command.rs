@@ -174,7 +174,7 @@ pub enum BrokerChannelKind {
 }
 
 /// Protocol-neutral typed payload carried across commands, results, and routing.
-/// 
+///
 /// **Note:** f64 doesn't support `Eq` trait due to `NaN` semantics, so `PayloadValue` either.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PayloadValue {

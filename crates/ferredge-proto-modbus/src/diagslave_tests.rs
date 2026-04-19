@@ -554,7 +554,10 @@ async fn assert_driver_coil_round_trip(
 ) -> Vec<bool> {
     let expected = expected_coil_read_payload(write_count, read_count);
     driver
-        .execute_command(&write_command(write_resource, payload_value_from_coils(&coil_payload(write_count))))
+        .execute_command(&write_command(
+            write_resource,
+            payload_value_from_coils(&coil_payload(write_count)),
+        ))
         .await
         .expect("coil write should succeed");
     let response = driver
