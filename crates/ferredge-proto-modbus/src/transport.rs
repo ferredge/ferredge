@@ -12,6 +12,14 @@ use crate::{
     types::PersistentSession,
 };
 
+/// Use this to load the entire datagram into memory before processing,
+/// since UDP datagrams are atomic and the Modbus TCP/UDP ADU max size (260 bytes)
+/// is small enough to fit comfortably in memory. This also avoids the complexity 
+/// of incremental parsing and buffering for TCP/UDP, which is complicated by rmodbus's
+/// use of u8 for frame length guessing and would require custom handling for valid frames
+/// larger than 255 bytes.
+const MAX_MODBUS_TCP_UDP_FRAME_LEN: usize = 260;
+
 impl Lifecycle for ModbusDriver {
     type Error = String;
 
@@ -41,11 +49,7 @@ impl ModbusDriver {
         let options = endpoint_options(&self.dvc.endpoint)
             .ok_or_else(|| "missing Modbus endpoint options".to_string())?;
         let reconnect = &options.reconnect;
-        let max_attempts = if request.is_write && !reconnect.retry_writes {
-            1
-        } else {
-            reconnect.max_attempts.saturating_add(1)
-        };
+        let max_attempts = request_attempt_budget(reconnect, request.is_write);
         let mut last_error = None;
 
         for attempt in 0..max_attempts {
@@ -386,7 +390,7 @@ async fn read_stream_response_socket(
             break;
         }
         frame.extend_from_slice(&buf[..read_count]);
-        if frame_complete(&frame, proto) || frame.len() >= 256 {
+        if frame_complete(&frame, proto) {
             break;
         }
     }
@@ -414,7 +418,7 @@ async fn read_stream_response_serial(
             break;
         }
         frame.extend_from_slice(&buf[..read_count]);
-        if frame_complete(&frame, proto) || frame.len() >= 256 {
+        if frame_complete(&frame, proto) {
             break;
         }
     }
@@ -423,7 +427,7 @@ async fn read_stream_response_serial(
 }
 
 async fn read_datagram_response(socket: &mut StackDatagramSocket) -> Result<Vec<u8>, String> {
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; MAX_MODBUS_TCP_UDP_FRAME_LEN];
     let (size, _) = socket
         .recv_from(&mut buf)
         .await
@@ -440,20 +444,69 @@ fn min_guess_len(proto: ModbusProto) -> u8 {
 }
 
 fn frame_complete(frame: &[u8], proto: ModbusProto) -> bool {
-    frame.len() >= usize::from(min_guess_len(proto))
-        && rmodbus::guess_response_frame_len(frame, proto)
-            .map(|expected_len| frame.len() >= usize::from(expected_len))
-            .unwrap_or(false)
+    match proto {
+        // Work around rmodbus TCP/UDP length guessing: guess_response_frame_len returns u8 and
+        // treats valid MBAP lengths above 255 bytes as FrameBroken. Large coil/register reads can
+        // exceed that, so completion has to be driven by the MBAP length field directly.
+        ModbusProto::TcpUdp => tcp_udp_frame_len(frame).is_some_and(|expected_len| frame.len() >= expected_len),
+        // Work around rmodbus ASCII length guessing: guess_response_frame_len returns u8 and
+        // treats valid ASCII wire frames longer than 255 bytes as FrameBroken. Large coil reads
+        // can exceed that on the wire, so completion has to be driven by the ASCII terminator.
+        ModbusProto::Ascii => ascii_frame_complete(frame),
+        _ => {
+            frame.len() >= usize::from(min_guess_len(proto))
+                && rmodbus::guess_response_frame_len(frame, proto)
+                    .map(|expected_len| frame.len() >= usize::from(expected_len))
+                    .unwrap_or(false)
+        }
+    }
 }
 
 fn trim_frame(mut frame: Vec<u8>, proto: ModbusProto) -> Vec<u8> {
     if frame.is_empty() {
         return frame;
     }
+    if proto == ModbusProto::TcpUdp {
+        if let Some(frame_end) = tcp_udp_frame_len(&frame) {
+            frame.truncate(frame_end);
+        }
+        return frame;
+    }
+    if proto == ModbusProto::Ascii {
+        // Keep only the first complete ASCII frame. This mirrors the terminator-based completion
+        // above and avoids depending on rmodbus's u8-bounded wire-length helper for ASCII.
+        if let Some(frame_end) = ascii_frame_end(&frame) {
+            frame.truncate(frame_end);
+        }
+        return frame;
+    }
     if let Ok(expected_len) = rmodbus::guess_response_frame_len(&frame, proto) {
         frame.truncate(usize::from(expected_len));
     }
     frame
+}
+
+fn ascii_frame_complete(frame: &[u8]) -> bool {
+    frame.starts_with(b":")
+        && ascii_frame_end(frame)
+            .is_some_and(|frame_end| frame_end >= usize::from(min_guess_len(ModbusProto::Ascii)))
+}
+
+fn tcp_udp_frame_len(frame: &[u8]) -> Option<usize> {
+    if frame.len() < usize::from(min_guess_len(ModbusProto::TcpUdp)) {
+        return None;
+    }
+
+    let protocol_id = u16::from_be_bytes([frame[2], frame[3]]);
+    if protocol_id != 0 {
+        return None;
+    }
+
+    Some(usize::from(u16::from_be_bytes([frame[4], frame[5]])) + 6)
+}
+
+fn ascii_frame_end(frame: &[u8]) -> Option<usize> {
+    frame.windows(2).position(|window| window == b"\r\n").map(|idx| idx + 2)
 }
 
 fn is_retryable_transport_error(error: &str) -> bool {
@@ -464,4 +517,68 @@ fn is_retryable_transport_error(error: &str) -> bool {
         || error.starts_with("failed to write ")
         || error.starts_with("failed to flush ")
         || error.starts_with("failed to read ")
+}
+
+fn request_attempt_budget(reconnect: &ModbusReconnectConfig, is_write: bool) -> u32 {
+    if !reconnect.enabled || (is_write && !reconnect.retry_writes) {
+        1
+    } else {
+        reconnect.max_attempts.saturating_add(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_completion_handles_frames_larger_than_u8_wire_len_limit() {
+        let mut binary = vec![1, 1, 125];
+        binary.extend(core::iter::repeat_n(0xAA, 125));
+
+        let mut ascii = Vec::new();
+        rmodbus::generate_ascii_frame(&binary, &mut ascii).expect("ascii frame should generate");
+
+        assert!(ascii.len() > usize::from(u8::MAX));
+        assert!(rmodbus::guess_response_frame_len(&ascii, ModbusProto::Ascii).is_err());
+        assert!(frame_complete(&ascii, ModbusProto::Ascii));
+        assert_eq!(trim_frame(ascii.clone(), ModbusProto::Ascii), ascii);
+    }
+
+    #[test]
+    fn tcp_completion_handles_frames_larger_than_u8_wire_len_limit() {
+        let mut tcp = vec![0, 1, 0, 0, 0, 253, 1, 1, 250];
+        tcp.extend(core::iter::repeat_n(0xAA, 250));
+
+        assert!(tcp.len() > usize::from(u8::MAX));
+        assert!(rmodbus::guess_response_frame_len(&tcp, ModbusProto::TcpUdp).is_err());
+        assert!(frame_complete(&tcp, ModbusProto::TcpUdp));
+        assert_eq!(trim_frame(tcp.clone(), ModbusProto::TcpUdp), tcp);
+    }
+
+    #[test]
+    fn disabled_reconnect_forces_single_attempt() {
+        let reconnect = ModbusReconnectConfig {
+            enabled: false,
+            max_attempts: 3,
+            retry_writes: true,
+            ..ModbusReconnectConfig::default()
+        };
+
+        assert_eq!(request_attempt_budget(&reconnect, false), 1);
+        assert_eq!(request_attempt_budget(&reconnect, true), 1);
+    }
+
+    #[test]
+    fn write_retries_respect_retry_writes_flag() {
+        let reconnect = ModbusReconnectConfig {
+            enabled: true,
+            max_attempts: 3,
+            retry_writes: false,
+            ..ModbusReconnectConfig::default()
+        };
+
+        assert_eq!(request_attempt_budget(&reconnect, true), 1);
+        assert_eq!(request_attempt_budget(&reconnect, false), 4);
+    }
 }
