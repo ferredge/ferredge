@@ -10,6 +10,7 @@ use crate::{
     ModbusResponseDecoder,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::encode_wire_frame,
+    types::ModbusValue,
 };
 
 impl TryFrom<ModbusCommandRef<'_>> for ModbusRequest {
@@ -120,24 +121,25 @@ fn build_read_request(
 fn build_write_request(
     resource: &str,
     attributes: &ModbusResourceAttributes,
-    payload: &[u8],
+    payload: &PayloadValue,
     proto: ModbusProto,
     options: &ModbusClientOptions,
 ) -> Result<ModbusRequest, ModbusCommandConversionError> {
+    let payload = modbus_value_from_payload(attributes, payload)?;
     let mut builder = RmodbusRequest::new(options.unit_id, proto);
     let mut binary_frame = Vec::new();
     let parser_seed = match attributes.register_kind {
         ModbusRegisterKind::Coil => build_coil_write_request(
             resource,
             attributes,
-            payload,
+            &payload,
             &mut builder,
             &mut binary_frame,
         )?,
         ModbusRegisterKind::HoldingRegister => build_holding_write_request(
             resource,
             attributes,
-            payload,
+            &payload,
             &mut builder,
             &mut binary_frame,
         )?,
@@ -163,7 +165,7 @@ fn build_write_request(
 fn build_coil_write_request(
     resource: &str,
     attributes: &ModbusResourceAttributes,
-    payload: &[u8],
+    payload: &ModbusValue,
     builder: &mut RmodbusRequest,
     binary_frame: &mut Vec<u8>,
 ) -> Result<ModbusParserSeed, ModbusCommandConversionError> {
@@ -179,7 +181,7 @@ fn build_coil_write_request(
             })
         }
         ModbusValueCodec::Bits => {
-            let values = payload.to_vec();
+            let values = decode_bits(payload)?;
             builder
                 .generate_set_coils_bulk(attributes.address, &values, binary_frame)
                 .map_err(map_rmodbus_build_error)?;
@@ -197,7 +199,7 @@ fn build_coil_write_request(
 fn build_holding_write_request(
     resource: &str,
     attributes: &ModbusResourceAttributes,
-    payload: &[u8],
+    payload: &ModbusValue,
     builder: &mut RmodbusRequest,
     binary_frame: &mut Vec<u8>,
 ) -> Result<ModbusParserSeed, ModbusCommandConversionError> {
@@ -228,7 +230,7 @@ fn build_holding_write_request(
             })
         }
         ModbusValueCodec::Bytes => {
-            let values = payload.to_vec();
+            let values = decode_bytes(payload)?;
             builder
                 .generate_set_holdings_bulk_from_slice(attributes.address, &values, binary_frame)
                 .map_err(map_rmodbus_build_error)?;
@@ -238,9 +240,7 @@ fn build_holding_write_request(
             })
         }
         ModbusValueCodec::Utf8String => {
-            let value = core::str::from_utf8(payload)
-                .map_err(|_| ModbusCommandConversionError::InvalidPayload("utf8 string expected"))?
-                .to_string();
+            let value = decode_string(payload)?;
             builder
                 .generate_set_holdings_string(attributes.address, &value, binary_frame)
                 .map_err(map_rmodbus_build_error)?;
@@ -359,74 +359,339 @@ fn map_rmodbus_build_error(error: RmodbusError) -> ModbusCommandConversionError 
         RmodbusError::FrameCRCError => "frame crc error",
         RmodbusError::Utf8Error => "utf8 error",
         _ => "rmodbus error",
-    })
+    }.to_string())
 }
 
-fn decode_bool(payload: &[u8]) -> Result<bool, ModbusCommandConversionError> {
+fn modbus_value_from_payload(
+    attributes: &ModbusResourceAttributes,
+    payload: &PayloadValue,
+) -> Result<ModbusValue, ModbusCommandConversionError> {
+    match attributes.codec {
+        ModbusValueCodec::Bool => Ok(ModbusValue::Bool(decode_payload_bool(payload)?)),
+        ModbusValueCodec::Bits => Ok(ModbusValue::Bits(decode_payload_bits(payload)?)),
+        ModbusValueCodec::U16 => Ok(ModbusValue::U16(decode_payload_u16_list(payload)?)),
+        ModbusValueCodec::I16 => Ok(ModbusValue::I16(decode_payload_i16_list(payload)?)),
+        ModbusValueCodec::U32Be | ModbusValueCodec::U32Le => {
+            Ok(ModbusValue::U32(decode_payload_u32_list(payload)?))
+        }
+        ModbusValueCodec::I32Be | ModbusValueCodec::I32Le => {
+            Ok(ModbusValue::I32(decode_payload_i32_list(payload)?))
+        }
+        ModbusValueCodec::F32Be | ModbusValueCodec::F32Le => {
+            Ok(ModbusValue::F32(decode_payload_f32_list(payload)?))
+        }
+        ModbusValueCodec::Bytes => Ok(ModbusValue::Bytes(decode_bytes_from_payload_value(
+            payload,
+        )?)),
+        ModbusValueCodec::Utf8String => {
+            Ok(ModbusValue::Utf8String(decode_payload_string(payload)?))
+        }
+    }
+}
+
+fn decode_bool(payload: &ModbusValue) -> Result<bool, ModbusCommandConversionError> {
     match payload {
-        [value] => Ok(*value != 0),
+        ModbusValue::Bool(value) => Ok(*value),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
-            "bool payload must be exactly one byte",
+            "bool payload must be a boolean".to_string(),
         )),
     }
 }
 
-fn decode_u16(payload: &[u8]) -> Result<u16, ModbusCommandConversionError> {
-    if payload.len() != 2 {
-        return Err(ModbusCommandConversionError::InvalidPayload(
-            "u16 payload must be exactly two bytes",
-        ));
+fn decode_bits(payload: &ModbusValue) -> Result<Vec<u8>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::Bits(values) => Ok(values.iter().map(|value| u8::from(*value)).collect()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "bits payload must be a boolean list".to_string(),
+        )),
     }
-    Ok(u16::from_be_bytes([payload[0], payload[1]]))
+}
+
+fn decode_u16(payload: &ModbusValue) -> Result<u16, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::U16(values) if values.len() == 1 => Ok(values[0]),
+        ModbusValue::I16(values) if values.len() == 1 => u16::try_from(values[0]).map_err(|_| {
+            ModbusCommandConversionError::InvalidPayload("i16 payload must fit into unsigned u16".to_string())
+        }),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "u16 payload must be a single 16-bit value".to_string(),
+        )),
+    }
 }
 
 fn words_from_payload(
     attributes: &ModbusResourceAttributes,
-    payload: &[u8],
+    payload: &ModbusValue,
 ) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match attributes.codec {
-        ModbusValueCodec::U32Be | ModbusValueCodec::I32Be | ModbusValueCodec::F32Be => {
-            words_from_bytes_be(payload)
-        }
-        ModbusValueCodec::U32Le | ModbusValueCodec::I32Le | ModbusValueCodec::F32Le => {
-            words_from_bytes_le(payload)
-        }
+        ModbusValueCodec::U32Be => words_from_u32_be(payload),
+        ModbusValueCodec::I32Be => words_from_i32_be(payload),
+        ModbusValueCodec::F32Be => words_from_f32_be(payload),
+        ModbusValueCodec::U32Le => words_from_u32_le(payload),
+        ModbusValueCodec::I32Le => words_from_i32_le(payload),
+        ModbusValueCodec::F32Le => words_from_f32_le(payload),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
-            "word conversion requires 32-bit codec",
+            "word conversion requires 32-bit codec".to_string(),
         )),
     }
 }
 
-fn words_from_bytes_be(payload: &[u8]) -> Result<Vec<u16>, ModbusCommandConversionError> {
-    if payload.len() % 4 != 0 {
-        return Err(ModbusCommandConversionError::InvalidPayload(
-            "32-bit payload must be a multiple of four bytes",
-        ));
+fn words_from_u32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::U32(values) => Ok(values
+            .iter()
+            .flat_map(|value: &u32| {
+                let bytes = value.to_be_bytes();
+                [
+                    u16::from_be_bytes([bytes[0], bytes[1]]),
+                    u16::from_be_bytes([bytes[2], bytes[3]]),
+                ]
+            })
+            .collect()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "u32 payload must be numeric".to_string(),
+        )),
     }
-    Ok(payload
-        .chunks_exact(4)
-        .flat_map(|chunk| {
-            [
-                u16::from_be_bytes([chunk[0], chunk[1]]),
-                u16::from_be_bytes([chunk[2], chunk[3]]),
-            ]
-        })
-        .collect())
 }
 
-fn words_from_bytes_le(payload: &[u8]) -> Result<Vec<u16>, ModbusCommandConversionError> {
-    if payload.len() % 4 != 0 {
-        return Err(ModbusCommandConversionError::InvalidPayload(
-            "32-bit payload must be a multiple of four bytes",
-        ));
+fn words_from_i32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::I32(values) => Ok(values
+            .iter()
+            .flat_map(|value: &i32| {
+                let bytes = value.to_be_bytes();
+                [
+                    u16::from_be_bytes([bytes[0], bytes[1]]),
+                    u16::from_be_bytes([bytes[2], bytes[3]]),
+                ]
+            })
+            .collect()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "i32 payload must be numeric".to_string(),
+        )),
     }
-    Ok(payload
-        .chunks_exact(4)
-        .flat_map(|chunk| {
-            [
-                u16::from_be_bytes([chunk[2], chunk[3]]),
-                u16::from_be_bytes([chunk[0], chunk[1]]),
-            ]
+}
+
+fn words_from_f32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::F32(values) => Ok(values
+            .iter()
+            .flat_map(|value: &f32| {
+                let bytes = value.to_bits().to_be_bytes();
+                [
+                    u16::from_be_bytes([bytes[0], bytes[1]]),
+                    u16::from_be_bytes([bytes[2], bytes[3]]),
+                ]
+            })
+            .collect()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "f32 payload must be numeric".to_string(),
+        )),
+    }
+}
+
+fn words_from_u32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::U32(values) => Ok(values
+            .iter()
+            .flat_map(|value: &u32| {
+                let bytes = value.to_le_bytes();
+                [
+                    u16::from_be_bytes([bytes[2], bytes[3]]),
+                    u16::from_be_bytes([bytes[0], bytes[1]]),
+                ]
+            })
+            .collect()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "u32 payload must be numeric".to_string(),
+        )),
+    }
+}
+
+fn words_from_i32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::I32(values) => Ok(values
+            .iter()
+            .flat_map(|value: &i32| {
+                let bytes = value.to_le_bytes();
+                [
+                    u16::from_be_bytes([bytes[2], bytes[3]]),
+                    u16::from_be_bytes([bytes[0], bytes[1]]),
+                ]
+            })
+            .collect()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "i32 payload must be numeric".to_string(),
+        )),
+    }
+}
+
+fn words_from_f32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::F32(values) => Ok(values
+            .iter()
+            .flat_map(|value: &f32| {
+                let bytes = value.to_bits().to_le_bytes();
+                [
+                    u16::from_be_bytes([bytes[2], bytes[3]]),
+                    u16::from_be_bytes([bytes[0], bytes[1]]),
+                ]
+            })
+            .collect()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "f32 payload must be numeric".to_string(),
+        )),
+    }
+}
+
+fn decode_bytes(payload: &ModbusValue) -> Result<Vec<u8>, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::Bytes(bytes) => Ok(bytes.clone()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "bytes payload must be binary data".to_string(),
+        )),
+    }
+}
+
+fn decode_string(payload: &ModbusValue) -> Result<String, ModbusCommandConversionError> {
+    match payload {
+        ModbusValue::Utf8String(value) => Ok(value.clone()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "string payload must be utf8 text".to_string(),
+        )),
+    }
+}
+
+fn decode_payload_bool(payload: &PayloadValue) -> Result<bool, ModbusCommandConversionError> {
+    match payload {
+        PayloadValue::Bool(value) => Ok(*value),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "bool payload must be a boolean".to_string(),
+        )),
+    }
+}
+
+fn decode_payload_bits(payload: &PayloadValue) -> Result<Vec<bool>, ModbusCommandConversionError> {
+    let values = payload_list(payload)?;
+    values
+        .iter()
+        .map(|value| match value {
+            PayloadValue::Bool(flag) => Ok(*flag),
+            _ => Err(ModbusCommandConversionError::InvalidPayload(
+                "bits payload entries must be booleans".to_string(),
+            )),
         })
-        .collect())
+        .collect()
+}
+
+fn decode_payload_u16_list(
+    payload: &PayloadValue,
+) -> Result<Vec<u16>, ModbusCommandConversionError> {
+    decode_numeric_list(payload, "u16 payload must be unsigned integer", |value| {
+        u16::try_from(value)
+            .map_err(|_| ModbusCommandConversionError::InvalidPayload("u16 payload out of range".to_string()))
+    })
+}
+
+fn decode_payload_i16_list(
+    payload: &PayloadValue,
+) -> Result<Vec<i16>, ModbusCommandConversionError> {
+    decode_numeric_list(payload, "i16 payload must be integer", |value| {
+        i16::try_from(value)
+            .map_err(|_| ModbusCommandConversionError::InvalidPayload("i16 payload out of range".to_string()))
+    })
+}
+
+fn decode_payload_u32_list(
+    payload: &PayloadValue,
+) -> Result<Vec<u32>, ModbusCommandConversionError> {
+    decode_numeric_list(payload, "u32 payload must be unsigned integer", |value| {
+        u32::try_from(value)
+            .map_err(|_| ModbusCommandConversionError::InvalidPayload("u32 payload out of range".to_string()))
+    })
+}
+
+fn decode_payload_i32_list(
+    payload: &PayloadValue,
+) -> Result<Vec<i32>, ModbusCommandConversionError> {
+    decode_numeric_list(payload, "i32 payload must be integer", |value| {
+        i32::try_from(value)
+            .map_err(|_| ModbusCommandConversionError::InvalidPayload("i32 payload out of range".to_string()))
+    })
+}
+
+fn decode_payload_f32_list(
+    payload: &PayloadValue,
+) -> Result<Vec<f32>, ModbusCommandConversionError> {
+    match payload {
+        PayloadValue::F64(value) => Ok(vec![*value as f32]),
+        PayloadValue::I64(value) => Ok(vec![*value as f32]),
+        PayloadValue::U64(value) => Ok(vec![*value as f32]),
+        PayloadValue::List(values) => values
+            .iter()
+            .map(|value| match value {
+                PayloadValue::F64(value) => Ok(*value as f32),
+                PayloadValue::I64(value) => Ok(*value as f32),
+                PayloadValue::U64(value) => Ok(*value as f32),
+                _ => Err(ModbusCommandConversionError::InvalidPayload(
+                    "f32 payload entries must be numeric".to_string(),
+                )),
+            })
+            .collect(),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "f32 payload must be numeric".to_string(),
+        )),
+    }
+}
+
+fn decode_bytes_from_payload_value(
+    payload: &PayloadValue,
+) -> Result<Vec<u8>, ModbusCommandConversionError> {
+    match payload {
+        PayloadValue::Bytes(bytes) => Ok(bytes.clone()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "bytes payload must be binary data".to_string(),
+        )),
+    }
+}
+
+fn decode_payload_string(payload: &PayloadValue) -> Result<String, ModbusCommandConversionError> {
+    match payload {
+        PayloadValue::String(value) => Ok(value.clone()),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "string payload must be utf8 text".to_string(),
+        )),
+    }
+}
+
+fn payload_list(payload: &PayloadValue) -> Result<&[PayloadValue], ModbusCommandConversionError> {
+    match payload {
+        PayloadValue::List(values) => Ok(values),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "payload must be a list".to_string(),
+        )),
+    }
+}
+
+fn decode_numeric_list<T, F>(
+    payload: &PayloadValue,
+    scalar_error: &'static str,
+    map: F,
+) -> Result<Vec<T>, ModbusCommandConversionError>
+where
+    F: Fn(i128) -> Result<T, ModbusCommandConversionError>,
+{
+    match payload {
+        PayloadValue::I64(value) => map(i128::from(*value)).map(|value| vec![value]),
+        PayloadValue::U64(value) => map(i128::from(*value)).map(|value| vec![value]),
+        PayloadValue::List(values) => values
+            .iter()
+            .map(|value| match value {
+                PayloadValue::I64(value) => map(i128::from(*value)),
+                PayloadValue::U64(value) => map(i128::from(*value)),
+                _ => Err(ModbusCommandConversionError::InvalidPayload(scalar_error.to_string())),
+            })
+            .collect(),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(scalar_error.to_string())),
+    }
 }

@@ -128,7 +128,7 @@ fn command_read(resource: &str) -> Command {
     }
 }
 
-fn command_write(resource: &str, payload: Vec<u8>) -> Command {
+fn command_write(resource: &str, payload: PayloadValue) -> Command {
     Command {
         id: "cmd-2".to_string(),
         source_device_id: None,
@@ -210,7 +210,7 @@ fn decode_tcp_holding_register_response() {
     .unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
-    assert_eq!(payload, 0x1234u16.to_be_bytes().to_vec());
+    assert_eq!(payload, PayloadValue::U64(0x1234));
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn decode_rtu_coil_response() {
     .unwrap();
     let response = simulate_response(&request, ModbusProto::Rtu);
     let payload = decode_modbus_response(&request, &response).unwrap();
-    assert_eq!(payload, vec![1]);
+    assert_eq!(payload, PayloadValue::Bool(true));
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn decode_ascii_string_response() {
     let response = simulate_response(&request, ModbusProto::Ascii);
     let decoded = decode_ascii_wire_frame(&response).unwrap();
     let payload = decode_modbus_response(&request, &decoded).unwrap();
-    assert_eq!(payload, b"hi!".to_vec());
+    assert_eq!(payload, PayloadValue::String("hi!".to_string()));
 }
 
 #[test]
@@ -258,12 +258,12 @@ fn build_write_single_holding_request() {
     let driver = make_driver(tcp_endpoint());
     let request = ModbusRequest::try_from(ModbusCommandRef {
         device: &driver.dvc,
-        command: &command_write("holding_u16", 0x4321u16.to_be_bytes().to_vec()),
+        command: &command_write("holding_u16", PayloadValue::U64(0x4321)),
     })
     .unwrap();
 
     assert!(request.is_write);
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
-    assert!(payload.is_empty());
+    assert_eq!(payload, PayloadValue::Null);
 }

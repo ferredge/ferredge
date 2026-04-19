@@ -17,7 +17,7 @@ pub enum NetError {
     /// Underlying runtime or driver is unavailable.
     RuntimeUnavailable,
     /// Transport-specific failure string preserved by adapter.
-    Other(&'static str),
+    Other(String),
 }
 
 /// Async datagram socket used by UDP-style protocol adapters.

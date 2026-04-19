@@ -27,10 +27,10 @@ pub struct ModbusRequest {
 }
 
 /// Native Modbus response returned by the driver execute path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModbusResponse {
     pub frame: Vec<u8>,
-    pub payload: Vec<u8>,
+    pub payload: PayloadValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +38,7 @@ pub enum ModbusCommandConversionError {
     UnsupportedIntent,
     UnknownResource(String),
     InvalidResource(String),
-    InvalidPayload(&'static str),
+    InvalidPayload(String),
     UnsupportedWrite(String),
 }
 
@@ -87,6 +87,20 @@ pub enum ModbusResponseDecoder {
     F32Le,
     Bytes,
     Utf8String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ModbusValue {
+    Ack,
+    Bool(bool),
+    Bits(Vec<bool>),
+    U16(Vec<u16>),
+    I16(Vec<i16>),
+    U32(Vec<u32>),
+    I32(Vec<i32>),
+    F32(Vec<f32>),
+    Bytes(Vec<u8>),
+    Utf8String(String),
 }
 
 #[derive(Debug, Clone, Copy)]
