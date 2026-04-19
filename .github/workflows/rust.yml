@@ -56,10 +56,19 @@ jobs:
         arch="$(uname -m)"
         case "$arch" in
           x86_64|amd64)
-            diagslave_dir="linux_x86-64"
+            modbusdriver_dir="x86_64-linux-gnu"
             ;;
           aarch64|arm64)
-            diagslave_dir="linux_aarch64"
+            modbusdriver_dir="aarch64-linux-gnu"
+            ;;
+          armv7l)
+            modbusdriver_dir="arm-linux-gnueabihf"
+            ;;
+          armv6l)
+            modbusdriver_dir="armv6-rpi-linux-gnueabihf"
+            ;;
+          i686|i386)
+            modbusdriver_dir="i686-linux-gnu"
             ;;
           *)
             echo "unsupported arch for diagslave: $arch" >&2
@@ -69,15 +78,27 @@ jobs:
 
         mkdir -p .github/tools/modbusdriver
         if [ ! -x ".github/tools/modbusdriver/diagslave" ]; then
+          extract_dir="$(mktemp -d)"
           curl -fsSL "https://www.modbusdriver.com/downloads/diagslave.tgz" -o /tmp/diagslave.tgz
-          tar -xzf /tmp/diagslave.tgz -C /tmp
-          install -m 0755 "/tmp/diagslave/${diagslave_dir}/diagslave" .github/tools/modbusdriver/diagslave
+          tar -xzf /tmp/diagslave.tgz -C "${extract_dir}"
+          diagslave_path="$(find "${extract_dir}" -path "*/${modbusdriver_dir}/diagslave" -type f | head -n 1)"
+          if [ -z "${diagslave_path}" ]; then
+            echo "diagslave binary not found in archive" >&2
+            exit 1
+          fi
+          install -m 0755 "${diagslave_path}" .github/tools/modbusdriver/diagslave
         fi
 
         if [ ! -x ".github/tools/modbusdriver/modpoll" ]; then
+          extract_dir="$(mktemp -d)"
           curl -fsSL "https://www.modbusdriver.com/downloads/modpoll.tgz" -o /tmp/modpoll.tgz
-          tar -xzf /tmp/modpoll.tgz -C /tmp
-          install -m 0755 "/tmp/modpoll/${diagslave_dir}/modpoll" .github/tools/modbusdriver/modpoll
+          tar -xzf /tmp/modpoll.tgz -C "${extract_dir}"
+          modpoll_path="$(find "${extract_dir}" -path "*/${modbusdriver_dir}/modpoll" -type f | head -n 1)"
+          if [ -z "${modpoll_path}" ]; then
+            echo "modpoll binary not found in archive" >&2
+            exit 1
+          fi
+          install -m 0755 "${modpoll_path}" .github/tools/modbusdriver/modpoll
         fi
 
         sudo install -m 0755 .github/tools/modbusdriver/diagslave /usr/local/bin/diagslave
