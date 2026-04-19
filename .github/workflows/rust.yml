@@ -28,6 +28,9 @@ jobs:
         path: .github/tools/diagslave
         key: diagslave-${{ env.DIAGSLAVE_CACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
 
+    - name: Check formatting
+      run: cargo fmt --check
+
     - name: Build
       run: cargo build --workspace --verbose
 
