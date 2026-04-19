@@ -506,7 +506,7 @@ fn make_rtu_driver(path: String, options: ModbusClientOptions) -> ModbusDriver {
     }))
 }
 
-fn write_command(resource: &str, payload: Vec<u8>) -> Command {
+fn write_command(resource: &str, payload: PayloadValue) -> Command {
     Command {
         id: format!("write-{resource}"),
         source_device_id: None,
@@ -549,17 +549,33 @@ async fn assert_driver_coil_round_trip(
     read_resource: &str,
     write_count: usize,
     read_count: u16,
-) -> Vec<u8> {
+) -> PayloadValue {
     let expected = expected_coil_read_payload(write_count, read_count);
     driver
-        .execute_command(&write_command(write_resource, coil_payload(write_count)))
+        .execute_command(&write_command(
+            write_resource,
+            PayloadValue::List(
+                coil_payload(write_count)
+                    .into_iter()
+                    .map(|value| PayloadValue::Bool(value != 0))
+                    .collect(),
+            ),
+        ))
         .await
         .expect("coil write should succeed");
     let response = driver
         .execute_command(&read_command(read_resource))
         .await
         .expect("coil read should succeed");
-    assert_eq!(response.payload, expected);
+    assert_eq!(
+        response.payload,
+        PayloadValue::List(
+            expected
+                .iter()
+                .map(|value| PayloadValue::Bool(*value != 0))
+                .collect(),
+        )
+    );
     response.payload
 }
 
@@ -960,7 +976,7 @@ fn diagslave_tcp_non_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("pre-restart read should succeed");
-        assert_eq!(before.payload.len(), 2);
+        assert_eq!(before.payload, PayloadValue::U64(0x1234));
     });
 
     guard.restart();
@@ -970,7 +986,7 @@ fn diagslave_tcp_non_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("post-restart read should succeed");
-        assert_eq!(after.payload.len(), 2);
+        assert_eq!(after.payload, PayloadValue::U64(0x1234));
     });
 }
 
@@ -984,7 +1000,7 @@ fn diagslave_tcp_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("pre-restart read should succeed");
-        assert_eq!(before.payload.len(), 2);
+        assert_eq!(before.payload, PayloadValue::U64(0x1234));
     });
 
     guard.restart();
@@ -994,7 +1010,7 @@ fn diagslave_tcp_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("persistent reconnect read should succeed");
-        assert_eq!(after.payload.len(), 2);
+        assert_eq!(after.payload, PayloadValue::U64(0x1234));
     });
 }
 
@@ -1008,7 +1024,7 @@ fn diagslave_rtu_over_tcp_non_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("pre-restart RTU-over-TCP read should succeed");
-        assert_eq!(before.payload.len(), 2);
+        assert_eq!(before.payload, PayloadValue::U64(0x1234));
     });
 
     guard.restart();
@@ -1018,7 +1034,7 @@ fn diagslave_rtu_over_tcp_non_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("post-restart RTU-over-TCP read should succeed");
-        assert_eq!(after.payload.len(), 2);
+        assert_eq!(after.payload, PayloadValue::U64(0x1234));
     });
 }
 
@@ -1032,7 +1048,7 @@ fn diagslave_rtu_over_tcp_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("pre-restart RTU-over-TCP read should succeed");
-        assert_eq!(before.payload.len(), 2);
+        assert_eq!(before.payload, PayloadValue::U64(0x1234));
     });
 
     guard.restart();
@@ -1042,7 +1058,7 @@ fn diagslave_rtu_over_tcp_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("persistent RTU-over-TCP reconnect read should succeed");
-        assert_eq!(after.payload.len(), 2);
+        assert_eq!(after.payload, PayloadValue::U64(0x1234));
     });
 }
 
@@ -1058,7 +1074,7 @@ fn diagslave_rtu_non_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("pre-restart RTU read should succeed");
-        assert_eq!(before.payload.len(), 2);
+        assert_eq!(before.payload, PayloadValue::U64(0x1234));
     });
 
     guard.restart();
@@ -1068,7 +1084,7 @@ fn diagslave_rtu_non_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("post-restart RTU read should succeed");
-        assert_eq!(after.payload.len(), 2);
+        assert_eq!(after.payload, PayloadValue::U64(0x1234));
     });
 }
 
@@ -1084,7 +1100,7 @@ fn diagslave_rtu_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("pre-restart RTU read should succeed");
-        assert_eq!(before.payload.len(), 2);
+        assert_eq!(before.payload, PayloadValue::U64(0x1234));
     });
 
     guard.restart();
@@ -1094,7 +1110,7 @@ fn diagslave_rtu_persistent_recovers_after_restart() {
             .execute_command(&read_command("holding_u16"))
             .await
             .expect("persistent RTU reconnect read should succeed");
-        assert_eq!(after.payload.len(), 2);
+        assert_eq!(after.payload, PayloadValue::U64(0x1234));
     });
 }
 

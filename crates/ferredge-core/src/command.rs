@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
+use core::fmt;
 
 use crate::device::DeviceId;
 use serde::{Deserialize, Serialize};
@@ -172,22 +173,90 @@ pub enum BrokerChannelKind {
     Stream,
 }
 
+/// Protocol-neutral typed payload carried across commands, results, and routing.
+/// 
+/// **Note:** f64 doesn't support `Eq` trait due to `NaN` semantics, so `PayloadValue` either.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PayloadValue {
+    /// Explicit absence of payload content.
+    Null,
+    /// Boolean scalar.
+    Bool(bool),
+    /// Signed integer scalar.
+    I64(i64),
+    /// Unsigned integer scalar.
+    U64(u64),
+    /// Floating-point scalar.
+    F64(f64),
+    /// UTF-8 text payload.
+    String(String),
+    /// Opaque binary payload.
+    Bytes(Vec<u8>),
+    /// Ordered heterogeneous sequence payload.
+    List(Vec<PayloadValue>),
+    /// Ordered object payload.
+    Map(Vec<(String, PayloadValue)>),
+}
+
+impl From<Vec<u8>> for PayloadValue {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Bytes(value)
+    }
+}
+
+impl From<&[u8]> for PayloadValue {
+    fn from(value: &[u8]) -> Self {
+        Self::Bytes(value.to_vec())
+    }
+}
+
+impl From<String> for PayloadValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for PayloadValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl fmt::Display for PayloadValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "null"),
+            Self::Bool(value) => write!(f, "{value}"),
+            Self::I64(value) => write!(f, "{value}"),
+            Self::U64(value) => write!(f, "{value}"),
+            Self::F64(value) => write!(f, "{value}"),
+            Self::String(value) => write!(f, "{value}"),
+            Self::Bytes(_) => write!(f, "<bytes>"),
+            Self::List(_) => write!(f, "<list>"),
+            Self::Map(_) => write!(f, "<map>"),
+        }
+    }
+}
+
 /// Protocol-neutral operation intent routed between adapters.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Intent {
     /// Reads current state from named resource.
     Read { resource: String },
-    /// Writes payload bytes to named resource.
-    Write { resource: String, payload: Vec<u8> },
+    /// Writes typed payload to named resource.
+    Write {
+        resource: String,
+        payload: PayloadValue,
+    },
     /// Invokes operation with optional argument payload.
     Invoke {
         operation: String,
-        args: Option<Vec<u8>>,
+        args: Option<PayloadValue>,
     },
-    /// Sends payload to broker-oriented channel such as topic, subject, queue, or stream.
+    /// Sends typed payload to broker-oriented channel such as topic, subject, queue, or stream.
     Send {
         channel: BrokerAddress,
-        payload: Vec<u8>,
+        payload: PayloadValue,
         options: BrokerMessageOptions,
     },
     /// Subscribes to broker-oriented channel such as topic, subject, queue, or stream.
@@ -200,7 +269,7 @@ pub enum Intent {
 }
 
 /// Represents a protocol-neutral command sent to a device or the core.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Command {
     /// Stable command identifier.
     pub id: CommandId,
@@ -224,7 +293,7 @@ pub struct CommandResult {
     /// Delivery or completion state.
     pub state: DeliveryState,
     /// Optional payload returned by successful completion.
-    pub payload: Option<Vec<u8>>,
+    pub payload: Option<PayloadValue>,
     /// Optional human-readable error description.
     pub error: Option<String>,
     /// Optional correlation metadata preserved from originating command.

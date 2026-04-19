@@ -111,6 +111,8 @@ pub enum MqttCommandConversionError {
     UnsupportedChannelKind,
     /// Routed command omitted packet details required for selected MQTT operation.
     InvalidCommand(String),
+    /// Routed typed payload cannot be encoded as an MQTT publish body.
+    InvalidPayload(String),
     /// Underlying `mqtt_protocol_core` packet builder rejected the request.
     PacketBuild(String),
 }
@@ -123,6 +125,7 @@ impl core::fmt::Display for MqttCommandConversionError {
                 write!(f, "unsupported broker channel kind for MQTT topic mapping")
             }
             Self::InvalidCommand(message) => write!(f, "{message}"),
+            Self::InvalidPayload(message) => write!(f, "{message}"),
             Self::PacketBuild(message) => write!(f, "{message}"),
         }
     }

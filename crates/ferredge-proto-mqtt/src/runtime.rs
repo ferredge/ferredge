@@ -1109,10 +1109,12 @@ pub(crate) fn routed_event_from_v5_publish(
         Address::Channel(channel) => Some(channel.clone()),
         Address::Resource(_) => None,
     });
+    let payload =
+        payload_value_from_mqtt_bytes(packet.payload().as_slice(), payload_format.as_deref());
     RoutedEvent {
         source: mqtt_source(device_id),
         address: Address::Channel(packet.topic_name().to_string()),
-        payload: packet.payload().as_slice().to_vec(),
+        payload,
         correlation: if correlation_id.is_some() || reply_to.is_some() {
             Some(Correlation {
                 request_id: correlation_id.clone().unwrap_or_default(),
@@ -1164,7 +1166,10 @@ fn routed_reply_or_event_from_v5_publish(
                 command_id: route.command_id.clone(),
                 device_id: device_id.to_string(),
                 state: DeliveryState::Completed,
-                payload: Some(packet.payload().as_slice().to_vec()),
+                payload: Some(payload_value_from_mqtt_bytes(
+                    packet.payload().as_slice(),
+                    mqtt_payload_format(packet).as_deref(),
+                )),
                 error: None,
                 correlation: Some(Correlation {
                     request_id: route.command_id,
@@ -1190,7 +1195,7 @@ pub(crate) fn routed_event_from_v3_publish(
     RoutedEvent {
         source: mqtt_source(device_id),
         address: Address::Channel(packet.topic_name().to_string()),
-        payload: packet.payload().as_slice().to_vec(),
+        payload: PayloadValue::Bytes(packet.payload().as_slice().to_vec()),
         correlation: None,
         transport: Some(TransportMeta::Mqtt(MqttMeta {
             topic: packet.topic_name().to_string(),
@@ -1211,6 +1216,24 @@ pub(crate) fn routed_event_from_v3_publish(
             reason_string: None,
         })),
     }
+}
+
+fn mqtt_payload_format(packet: &mqtt::packet::v5_0::Publish) -> Option<String> {
+    for prop in packet.props() {
+        if let mqtt::packet::Property::PayloadFormatIndicator(prop) = prop {
+            return Some(prop.val().to_string());
+        }
+    }
+    None
+}
+
+fn payload_value_from_mqtt_bytes(bytes: &[u8], payload_format: Option<&str>) -> PayloadValue {
+    if payload_format == Some("1")
+        && let Ok(value) = String::from_utf8(bytes.to_vec())
+    {
+        return PayloadValue::String(value);
+    }
+    PayloadValue::Bytes(bytes.to_vec())
 }
 
 fn routed_result_from_v5_puback(

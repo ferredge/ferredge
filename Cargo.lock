@@ -422,6 +422,7 @@ dependencies = [
  "ferredge-runtime-tokio",
  "mqtt-protocol-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

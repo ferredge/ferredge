@@ -10,7 +10,7 @@ use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    command::{Address, Command, CommandResult, Correlation},
+    command::{Address, Command, CommandResult, Correlation, PayloadValue},
     device::{DeviceId, DeviceProtocol},
 };
 
@@ -81,14 +81,14 @@ pub enum TransportMeta {
 }
 
 /// Normalized inbound event emitted by one protocol adapter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutedEvent {
     /// Source endpoint that emitted this event.
     pub source: EndpointRef,
     /// Logical address targeted by event, such as resource or topic.
     pub address: Address,
-    /// Opaque event payload bytes preserved across routing.
-    pub payload: Vec<u8>,
+    /// Typed event payload preserved across routing.
+    pub payload: PayloadValue,
     /// Optional request correlation for reply-topic or async workflows.
     pub correlation: Option<Correlation>,
     /// Optional transport metadata preserved from source protocol.

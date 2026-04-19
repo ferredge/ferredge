@@ -475,7 +475,7 @@ fn map_io_error(error: std::io::Error) -> NetError {
         | ErrorKind::HostUnreachable
         | ErrorKind::NetworkUnreachable => NetError::Unreachable,
         ErrorKind::Unsupported => NetError::Unsupported,
-        _ => NetError::Other("tokio io error"),
+        _ => NetError::Other("tokio io error".to_string()),
     }
 }
 
@@ -491,7 +491,7 @@ fn map_serial_io_error(error: std::io::Error) -> SerialError {
         | ErrorKind::NotConnected => SerialError::Closed,
         ErrorKind::TimedOut | ErrorKind::WouldBlock => SerialError::TimedOut,
         ErrorKind::Unsupported => SerialError::Unsupported,
-        _ => SerialError::Other("tokio serial io error"),
+        _ => SerialError::Other("tokio serial io error".to_string()),
     }
 }
 
@@ -503,7 +503,7 @@ fn map_serial_error(error: serialport::Error) -> SerialError {
         ErrorKind::NoDevice => SerialError::Closed,
         ErrorKind::InvalidInput => SerialError::Unsupported,
         ErrorKind::Io(std::io::ErrorKind::TimedOut) => SerialError::TimedOut,
-        _ => SerialError::Other("tokio serial error"),
+        _ => SerialError::Other("tokio serial error".to_string()),
     }
 }
 

@@ -68,6 +68,8 @@ pub enum HttpCommandConversionError {
     UnsupportedIntent,
     /// Target resource does not exist on concrete device definition.
     UnknownResource(String),
+    /// Payload type cannot be represented as an HTTP request body.
+    InvalidPayload(String),
 }
 
 impl core::fmt::Display for HttpCommandConversionError {
@@ -77,6 +79,7 @@ impl core::fmt::Display for HttpCommandConversionError {
             Self::UnknownResource(resource) => {
                 write!(f, "resource {resource} not found for HTTP driver")
             }
+            Self::InvalidPayload(reason) => write!(f, "invalid HTTP payload: {reason}"),
         }
     }
 }
@@ -168,21 +171,34 @@ impl TryFrom<HttpCommandRef<'_>> for HttpRequest {
                 .device
                 .resources
                 .get(resource)
-                .map(|resource| HttpRequest {
-                    method: resource.resource_attributes.method.clone(),
-                    path: resource.resource_attributes.slug.clone(),
-                    body: Some(payload.clone()),
-                    headers: resource
-                        .resource_attributes
-                        .headers
-                        .clone()
-                        .unwrap_or_default(),
+                .map(|resource| {
+                    Ok(HttpRequest {
+                        method: resource.resource_attributes.method.clone(),
+                        path: resource.resource_attributes.slug.clone(),
+                        body: Some(http_body_from_payload(payload)?),
+                        headers: resource
+                            .resource_attributes
+                            .headers
+                            .clone()
+                            .unwrap_or_default(),
+                    })
                 })
+                .transpose()?
                 .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.clone())),
             Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
                 Err(HttpCommandConversionError::UnsupportedIntent)
             }
         }
+    }
+}
+
+fn http_body_from_payload(payload: &PayloadValue) -> Result<Vec<u8>, HttpCommandConversionError> {
+    match payload {
+        PayloadValue::Bytes(bytes) => Ok(bytes.clone()),
+        PayloadValue::String(value) => Ok(value.clone().into_bytes()),
+        _ => Err(HttpCommandConversionError::InvalidPayload(
+            "HTTP bodies currently support only string or bytes payloads".to_string(),
+        )),
     }
 }
 
@@ -314,7 +330,7 @@ mod tests {
             target_device_id: "device-1".to_string(),
             intent: Intent::Write {
                 resource: "setpoint".to_string(),
-                payload: b"42".to_vec(),
+                payload: PayloadValue::String("42".to_string()),
             },
             correlation: None,
         };
@@ -342,7 +358,7 @@ mod tests {
                     name: "sensors.temp".to_string(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
-                payload: b"42".to_vec(),
+                payload: PayloadValue::String("42".to_string()),
                 options: BrokerMessageOptions::default(),
             },
             correlation: None,

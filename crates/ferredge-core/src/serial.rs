@@ -14,7 +14,7 @@ pub enum SerialError {
     /// Underlying runtime or driver is unavailable.
     RuntimeUnavailable,
     /// Transport-specific failure string preserved by adapter.
-    Other(&'static str),
+    Other(String),
 }
 
 /// Async byte-stream serial port used by protocol adapters such as Modbus RTU or ASCII.

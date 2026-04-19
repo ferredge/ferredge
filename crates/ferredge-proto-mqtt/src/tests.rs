@@ -15,7 +15,7 @@ use ferredge_core::prelude::{
     Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent,
     Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions,
     MqttPayloadFormat, MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions,
-    MqttWillConfig, ProtocolBridge, PubSub, RoutedEvent, RoutedMessage, RoutedResult,
+    MqttWillConfig, PayloadValue, ProtocolBridge, PubSub, RoutedEvent, RoutedMessage, RoutedResult,
     TransportMeta,
 };
 use ferredge_proto_http::{
@@ -389,7 +389,7 @@ impl ProtocolBridge for TestBridge {
                             name: format!("requests/{resource}"),
                             kind: Some(BrokerChannelKind::Topic),
                         },
-                        payload: Vec::new(),
+                        payload: PayloadValue::Bytes(Vec::new()),
                         options: BrokerMessageOptions::default(),
                     },
                     correlation: command.correlation.clone(),
@@ -481,7 +481,7 @@ fn mqtt_send_prefers_v5_packet_when_available() {
                 name: "sensors/temp".to_string(),
                 kind: Some(BrokerChannelKind::Topic),
             },
-            payload: b"42".to_vec(),
+            payload: PayloadValue::Bytes(b"42".to_vec()),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
                 ..BrokerMessageOptions::default()
@@ -515,7 +515,7 @@ fn mqtt_send_falls_back_to_v3_when_v5_not_available() {
                 name: "sensors/temp".to_string(),
                 kind: Some(BrokerChannelKind::Topic),
             },
-            payload: b"42".to_vec(),
+            payload: PayloadValue::Bytes(b"42".to_vec()),
             options: BrokerMessageOptions::default(),
         },
         correlation: None,
@@ -608,7 +608,7 @@ fn mqtt_v5_publish_maps_retain_alias_and_expiry_properties() {
                 name: "state/device".to_string(),
                 kind: Some(BrokerChannelKind::Topic),
             },
-            payload: b"online".to_vec(),
+            payload: PayloadValue::Bytes(b"online".to_vec()),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
                 protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
@@ -713,7 +713,7 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
                 name: "rpc/request".to_string(),
                 kind: Some(BrokerChannelKind::Topic),
             },
-            payload: b"{}".to_vec(),
+            payload: PayloadValue::Bytes(b"{}".to_vec()),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
                 reply_to: Some("rpc/reply".to_string()),
@@ -773,7 +773,7 @@ fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
                 name: "rpc/request".to_string(),
                 kind: Some(BrokerChannelKind::Topic),
             },
-            payload: b"{}".to_vec(),
+            payload: PayloadValue::Bytes(b"{}".to_vec()),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
                 reply_to: Some("rpc/reply".to_string()),
@@ -842,7 +842,7 @@ fn inbound_publish_packet_converts_to_routed_event() {
     match message {
         RoutedMessage::Event(event) => {
             assert_eq!(event.address, Address::Channel("sensors/temp".to_string()));
-            assert_eq!(event.payload, b"42".to_vec());
+            assert_eq!(event.payload, PayloadValue::Bytes(b"42".to_vec()));
             assert_eq!(
                 event.correlation,
                 Some(Correlation {
@@ -905,7 +905,10 @@ fn inbound_reply_publish_converts_to_routed_result_when_correlation_matches() {
                 result.result.state,
                 ferredge_core::prelude::DeliveryState::Completed
             );
-            assert_eq!(result.result.payload, Some(b"done".to_vec()));
+            assert_eq!(
+                result.result.payload,
+                Some(PayloadValue::Bytes(b"done".to_vec()))
+            );
             assert_eq!(
                 result.result.correlation,
                 Some(Correlation {
@@ -1190,7 +1193,7 @@ fn bridge_can_translate_mqtt_event_into_http_request() {
             protocol: ferredge_core::prelude::DeviceProtocol::MQTT,
         },
         address: Address::Channel("sensors/temp".to_string()),
-        payload: b"21".to_vec(),
+        payload: PayloadValue::Bytes(b"21".to_vec()),
         correlation: None,
         transport: None,
     };
@@ -1455,7 +1458,7 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
                     name: "ferredge/control".to_string(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
-                payload: b"same-driver".to_vec(),
+                payload: PayloadValue::Bytes(b"same-driver".to_vec()),
                 options: BrokerMessageOptions::default(),
             },
             correlation: None,

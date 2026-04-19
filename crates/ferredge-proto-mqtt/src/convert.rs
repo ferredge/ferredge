@@ -12,6 +12,7 @@ use alloc::{
 
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
+use serde_json::to_vec;
 
 use crate::types::{
     MqttCommandConversionError, MqttCommandRef, MqttPacketRequest, MqttPublishRequest,
@@ -35,7 +36,7 @@ impl TryFrom<&Command> for MqttPublishRequest {
                 Ok(Self {
                     command_id: command.id.clone(),
                     channel: channel.clone(),
-                    payload: payload.clone(),
+                    payload: mqtt_payload_bytes(payload)?,
                     delivery: options.delivery,
                     retain: mqtt.retain,
                     payload_format: mqtt.payload_format,
@@ -52,6 +53,18 @@ impl TryFrom<&Command> for MqttPublishRequest {
             }
             _ => Err(MqttCommandConversionError::UnsupportedIntent),
         }
+    }
+}
+
+fn mqtt_payload_bytes(payload: &PayloadValue) -> Result<Vec<u8>, MqttCommandConversionError> {
+    match payload {
+        PayloadValue::Bytes(bytes) => Ok(bytes.clone()),
+        PayloadValue::String(value) => Ok(value.clone().into_bytes()),
+        other => to_vec(other).map_err(|error| {
+            MqttCommandConversionError::InvalidPayload(format!(
+                "failed to serialize MQTT payload as JSON: {error}"
+            ))
+        }),
     }
 }
 
