@@ -25,8 +25,8 @@ jobs:
       id: cache-diagslave
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.2.3
       with:
-        path: .github/tools/diagslave
-        key: diagslave-${{ env.DIAGSLAVE_CACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+        path: .github/tools/modbusdriver
+        key: modbusdriver-${{ env.DIAGSLAVE_CACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Check formatting
       run: cargo fmt --check
@@ -42,7 +42,6 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           curl \
-          mbpoll \
           mosquitto \
           mosquitto-clients \
           socat
@@ -61,14 +60,21 @@ jobs:
             ;;
         esac
 
-        mkdir -p .github/tools/diagslave
-        if [ ! -x ".github/tools/diagslave/diagslave" ]; then
+        mkdir -p .github/tools/modbusdriver
+        if [ ! -x ".github/tools/modbusdriver/diagslave" ]; then
           curl -fsSL "https://www.modbusdriver.com/downloads/diagslave.tgz" -o /tmp/diagslave.tgz
           tar -xzf /tmp/diagslave.tgz -C /tmp
-          install -m 0755 "/tmp/diagslave/${diagslave_dir}/diagslave" .github/tools/diagslave/diagslave
+          install -m 0755 "/tmp/diagslave/${diagslave_dir}/diagslave" .github/tools/modbusdriver/diagslave
         fi
 
-        sudo install -m 0755 .github/tools/diagslave/diagslave /usr/local/bin/diagslave
+        if [ ! -x ".github/tools/modbusdriver/modpoll" ]; then
+          curl -fsSL "https://www.modbusdriver.com/downloads/modpoll.tgz" -o /tmp/modpoll.tgz
+          tar -xzf /tmp/modpoll.tgz -C /tmp
+          install -m 0755 "/tmp/modpoll/${diagslave_dir}/modpoll" .github/tools/modbusdriver/modpoll
+        fi
+
+        sudo install -m 0755 .github/tools/modbusdriver/diagslave /usr/local/bin/diagslave
+        sudo install -m 0755 .github/tools/modbusdriver/modpoll /usr/local/bin/modpoll
 
     - name: Run integration tests
       run: cargo test --workspace --verbose --features integration
