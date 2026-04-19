@@ -3,7 +3,10 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use ferredge_core::prelude::{AsyncNet, AsyncRuntime, AsyncSocket, write_all_socket};
+use ferredge_core::prelude::{
+    AsyncNet, AsyncRuntime, AsyncSocket, bracket_ipv6_host, format_host_port, normalize_host_port,
+    write_all_socket,
+};
 
 use crate::HttpRequest;
 
@@ -100,7 +103,7 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, anyhow::Error> {
         let suffix = &authority[bracket_end + 1..];
         return match suffix {
             "" => Ok(ParsedEndpoint {
-                connect_target: format!("{authority}:{default_port}"),
+                connect_target: format_host_port(authority, default_port),
                 host_header: authority.to_string(),
             }),
             _ if suffix.starts_with(':') => Ok(ParsedEndpoint {
@@ -113,14 +116,19 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, anyhow::Error> {
         };
     }
 
-    if authority.contains(':') {
+    if authority.matches(':').count() > 1 {
+        Ok(ParsedEndpoint {
+            connect_target: format_host_port(authority, default_port),
+            host_header: bracket_ipv6_host(authority),
+        })
+    } else if authority.contains(':') {
         Ok(ParsedEndpoint {
             connect_target: authority.to_string(),
             host_header: authority.to_string(),
         })
     } else {
         Ok(ParsedEndpoint {
-            connect_target: format!("{authority}:{default_port}"),
+            connect_target: normalize_host_port(authority, default_port),
             host_header: authority.to_string(),
         })
     }
@@ -162,6 +170,10 @@ mod tests {
         let parsed = parse_endpoint("http://[::1]:8080").expect("ipv6 with port should parse");
         assert_eq!(parsed.connect_target, "[::1]:8080");
         assert_eq!(parsed.host_header, "[::1]:8080");
+
+        let parsed = parse_endpoint("2001:db8::10").expect("bare ipv6 host should parse");
+        assert_eq!(parsed.connect_target, "[2001:db8::10]:80");
+        assert_eq!(parsed.host_header, "[2001:db8::10]");
     }
 
     #[test]
