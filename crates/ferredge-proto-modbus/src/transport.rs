@@ -18,6 +18,8 @@ use crate::{
 /// use of u8 for frame length guessing and would require custom handling for valid frames
 /// larger than 255 bytes.
 const MAX_MODBUS_TCP_UDP_FRAME_LEN: usize = 260;
+const MAX_MODBUS_RTU_FRAME_LEN: usize = 256;
+const MAX_MODBUS_ASCII_FRAME_LEN: usize = (MAX_MODBUS_RTU_FRAME_LEN * 2) + 3;
 
 impl Lifecycle for ModbusDriver {
     type Error = String;
@@ -391,6 +393,7 @@ async fn read_stream_response_socket(
 ) -> Result<Vec<u8>, String> {
     let mut frame = Vec::new();
     let mut buf = [0u8; 64];
+    let frame_len_limit = max_frame_len(proto);
 
     loop {
         let read_count = match socket.read(&mut buf).await {
@@ -403,6 +406,11 @@ async fn read_stream_response_socket(
                 return Err("failed to read Modbus socket response: Closed".to_string());
             }
             break;
+        }
+        if frame.len().saturating_add(read_count) > frame_len_limit {
+            return Err(format!(
+                "failed to read Modbus socket response: frame exceeded {frame_len_limit} bytes"
+            ));
         }
         frame.extend_from_slice(&buf[..read_count]);
         if frame_complete(&frame, proto) {
@@ -419,6 +427,7 @@ async fn read_stream_response_serial(
 ) -> Result<Vec<u8>, String> {
     let mut frame = Vec::new();
     let mut buf = [0u8; 64];
+    let frame_len_limit = max_frame_len(proto);
 
     loop {
         let read_count = match port.read(&mut buf).await {
@@ -431,6 +440,11 @@ async fn read_stream_response_serial(
                 return Err("failed to read Modbus serial response: Closed".to_string());
             }
             break;
+        }
+        if frame.len().saturating_add(read_count) > frame_len_limit {
+            return Err(format!(
+                "failed to read Modbus serial response: frame exceeded {frame_len_limit} bytes"
+            ));
         }
         frame.extend_from_slice(&buf[..read_count]);
         if frame_complete(&frame, proto) {
@@ -455,6 +469,14 @@ fn min_guess_len(proto: ModbusProto) -> u8 {
         ModbusProto::TcpUdp => 6,
         ModbusProto::Rtu => 5,
         ModbusProto::Ascii => 7,
+    }
+}
+
+fn max_frame_len(proto: ModbusProto) -> usize {
+    match proto {
+        ModbusProto::TcpUdp => MAX_MODBUS_TCP_UDP_FRAME_LEN,
+        ModbusProto::Rtu => MAX_MODBUS_RTU_FRAME_LEN,
+        ModbusProto::Ascii => MAX_MODBUS_ASCII_FRAME_LEN,
     }
 }
 
@@ -600,5 +622,12 @@ mod tests {
 
         assert_eq!(request_attempt_budget(&reconnect, true), 1);
         assert_eq!(request_attempt_budget(&reconnect, false), 4);
+    }
+
+    #[test]
+    fn max_frame_len_matches_protocol_limits() {
+        assert_eq!(max_frame_len(ModbusProto::TcpUdp), 260);
+        assert_eq!(max_frame_len(ModbusProto::Rtu), 256);
+        assert_eq!(max_frame_len(ModbusProto::Ascii), 515);
     }
 }
