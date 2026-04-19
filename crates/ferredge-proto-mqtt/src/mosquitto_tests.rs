@@ -12,8 +12,8 @@ use ferredge_core::prelude::{
     BrokerSubscriptionProtocolOptions, Command, Correlation, DeliveryGuarantee, Device,
     DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
     MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat,
-    MqttProtocolVersion, MqttSubscriptionOptions, MqttWillConfig, PubSub, RoutedEvent,
-    TransportMeta,
+    MqttProtocolVersion, MqttSubscriptionOptions, MqttWillConfig, PayloadValue, PubSub,
+    RoutedEvent, TransportMeta,
 };
 
 use crate::{
@@ -249,7 +249,7 @@ fn publish_packet(
                     name: topic.to_string(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
-                payload: payload.to_vec(),
+                payload: payload.into(),
                 options,
             },
             correlation: None,
@@ -265,7 +265,7 @@ fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8])
             .lock()
             .expect("events lock")
             .iter()
-            .find(|event| event.payload == payload)
+            .find(|event| payload_matches(&event.payload, payload))
             .cloned()
         {
             return event;
@@ -273,6 +273,13 @@ fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8])
         assert!(Instant::now() < deadline, "expected inbound MQTT event");
         thread::sleep(Duration::from_millis(MOSQUITTO_POLL_INTERVAL_MS));
     }
+}
+
+fn payload_matches(actual: &PayloadValue, expected: &[u8]) -> bool {
+    *actual == PayloadValue::from(expected)
+        || std::str::from_utf8(expected)
+            .map(|value| *actual == PayloadValue::String(value.to_string()))
+            .unwrap_or(false)
 }
 
 fn wait_for_driver_start(driver: &MqttDriver) {
@@ -550,7 +557,7 @@ fn mosquitto_v5_complex_property_roundtrip() {
         event.address,
         Address::Channel("ferredge/it/v5".to_string())
     );
-    assert_eq!(event.payload, br#"{"ok":true}"#.to_vec());
+    assert_eq!(event.payload, br#"{"ok":true}"#.as_slice().into());
     assert_eq!(
         event.correlation,
         Some(Correlation {
@@ -750,6 +757,7 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
         topic,
         payload,
         BrokerMessageOptions {
+            delivery: Some(DeliveryGuarantee::AtLeastOnce),
             protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
                 retain: true,
                 payload_format: Some(MqttPayloadFormat::Utf8),

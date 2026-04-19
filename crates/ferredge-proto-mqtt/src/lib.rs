@@ -39,7 +39,7 @@ type RuntimeReceiver<T> = <StackRuntime as AsyncRuntime>::Receiver<T>;
 
 type RuntimeMutex<T> = <StackRuntime as AsyncRuntime>::Mutex<T>;
 
-#[cfg(all(test, feature = "mosquitto-tests"))]
+#[cfg(all(test, feature = "integration"))]
 mod mosquitto_tests;
 #[cfg(test)]
 mod tests;

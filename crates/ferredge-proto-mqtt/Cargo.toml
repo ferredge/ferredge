@@ -14,7 +14,8 @@ std = ["ferredge-core/std", "mqtt_protocol_core/std", "serde/std"]
 tokio-runtime = ["std", "dep:ferredge-runtime-tokio", "ferredge-runtime-tokio/runtime", "ferredge-runtime-tokio/net"]
 async-std-runtime = ["std", "dep:ferredge-runtime-async-std", "ferredge-runtime-async-std/runtime", "ferredge-runtime-async-std/net"]
 embassy-runtime = ["dep:ferredge-runtime-embassy", "ferredge-runtime-embassy/runtime", "ferredge-runtime-embassy/net"]
-mosquitto-tests = []
+# Integration tests that require external dependencies or setup can be gated behind this feature.
+integration = []
 
 [dependencies]
 ferredge-core = { workspace = true, features = ["net", "runtime", "sync"] }

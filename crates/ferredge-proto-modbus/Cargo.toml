@@ -30,7 +30,8 @@ embassy-runtime = [
     "ferredge-runtime-embassy/net",
     "ferredge-runtime-embassy/serial",
 ]
-diagslave-tests = []
+# Integration tests that require external dependencies or setup can be gated behind this feature.
+integration = []
 
 [dependencies]
 ferredge-core = { workspace = true, features = ["net", "runtime", "serial"] }
