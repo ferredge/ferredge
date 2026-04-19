@@ -655,7 +655,10 @@ fn normalize_broker_addr_adds_default_port_for_bracketed_ipv6() {
     assert_eq!(normalize_broker_addr("mqtt://[::1]"), "[::1]:1883");
     assert_eq!(normalize_broker_addr("[::1]"), "[::1]:1883");
     assert_eq!(normalize_broker_addr("mqtt://[::1]:1884"), "[::1]:1884");
-    assert_eq!(normalize_broker_addr("mqtt://2001:db8::10"), "[2001:db8::10]:1883");
+    assert_eq!(
+        normalize_broker_addr("mqtt://2001:db8::10"),
+        "[2001:db8::10]:1883"
+    );
     assert_eq!(normalize_broker_addr("2001:db8::10"), "[2001:db8::10]:1883");
 }
 

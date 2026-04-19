@@ -7,7 +7,7 @@ use std::{
 };
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, BackoffStrategy, BrokerChannelKind, BrokerMessageOptions,
+    Address, BackoffStrategy, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
     BrokerSubscriptionProtocolOptions, Command, Correlation, DeliveryGuarantee, Device,
     DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
