@@ -329,6 +329,11 @@ where
     })
 }
 
+enum ModpollEndpoint {
+    Tcp { mode: &'static str, port: u16 },
+    Serial { mode: &'static str, path: String },
+}
+
 fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
     let mut resources = Map::default();
     resources.insert(
@@ -538,13 +543,14 @@ fn expected_coil_read_payload(write_count: usize, read_count: u16) -> Vec<u8> {
     payload
 }
 
-async fn assert_coil_round_trip(
+async fn assert_driver_coil_round_trip(
     driver: &ModbusDriver,
     write_resource: &str,
     read_resource: &str,
     write_count: usize,
     read_count: u16,
-) {
+) -> Vec<u8> {
+    let expected = expected_coil_read_payload(write_count, read_count);
     driver
         .execute_command(&write_command(write_resource, coil_payload(write_count)))
         .await
@@ -553,7 +559,73 @@ async fn assert_coil_round_trip(
         .execute_command(&read_command(read_resource))
         .await
         .expect("coil read should succeed");
-    assert_eq!(response.payload, expected_coil_read_payload(write_count, read_count));
+    assert_eq!(response.payload, expected);
+    response.payload
+}
+
+fn assert_modpoll_coil_read(
+    endpoint: &ModpollEndpoint,
+    start_addr: u16,
+    read_count: u16,
+    expected: &[u8],
+) {
+    let mut command = ProcessCommand::new("modpoll");
+    command.args([
+        "-1",
+        "-a",
+        "1",
+        "-0",
+        "-r",
+        &start_addr.to_string(),
+        "-c",
+        &read_count.to_string(),
+        "-t",
+        "0",
+        "-o",
+        "2",
+    ]);
+    match endpoint {
+        ModpollEndpoint::Tcp { mode, port } => {
+            command.args(["-m", mode, "-p", &port.to_string(), "127.0.0.1"]);
+        }
+        ModpollEndpoint::Serial { mode, path } => {
+            command.args([
+                "-m", mode, "-b", "9600", "-d", "8", "-s", "1", "-p", "none", path,
+            ]);
+        }
+    }
+
+    let output = command
+        .output()
+        .expect("modpoll should run for diagslave validation");
+    if !output.status.success() {
+        panic!(
+            "modpoll read should succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    let actual = parse_modpoll_coils(&output.stdout);
+    assert_eq!(actual, expected);
+}
+
+fn parse_modpoll_coils(stdout: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| {
+            if !line.starts_with('[') {
+                return None;
+            }
+            let (_, value) = line.rsplit_once(':')?;
+            Some(
+                value
+                    .trim()
+                    .parse::<u8>()
+                    .expect("modpoll coil output should parse"),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -564,17 +636,22 @@ fn diagslave_tcp_write_then_read_max_coils() {
         port: guard.port,
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Tcp {
+        mode: "tcp",
+        port: guard.port,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_max_write",
             "coil_max_read",
             MAX_WRITE_COIL_COUNT,
             MAX_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
 }
 
 #[test]
@@ -585,17 +662,22 @@ fn diagslave_udp_write_then_read_max_coils() {
         port: guard.port,
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Tcp {
+        mode: "udp",
+        port: guard.port,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_max_write",
             "coil_max_read",
             MAX_WRITE_COIL_COUNT,
             MAX_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
 }
 
 #[test]
@@ -608,17 +690,22 @@ fn diagslave_rtu_over_tcp_write_then_read_max_coils() {
             options: ModbusClientOptions::default(),
         },
     ));
+    let modpoll = ModpollEndpoint::Tcp {
+        mode: "enc",
+        port: guard.port,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_max_write",
             "coil_max_read",
             MAX_WRITE_COIL_COUNT,
             MAX_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
 }
 
 #[cfg(unix)]
@@ -626,21 +713,27 @@ fn diagslave_rtu_over_tcp_write_then_read_max_coils() {
 fn diagslave_rtu_over_pty_write_then_read_max_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
+    let master_path = pty.master_path();
     let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
-        serial: serial_port_config(pty.master_path()),
+        serial: serial_port_config(master_path.clone()),
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Serial {
+        mode: "rtu",
+        path: master_path,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_max_write",
             "coil_max_read",
             MAX_WRITE_COIL_COUNT,
             MAX_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
 }
 
 #[cfg(unix)]
@@ -648,21 +741,27 @@ fn diagslave_rtu_over_pty_write_then_read_max_coils() {
 fn diagslave_ascii_over_pty_write_then_read_max_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("ascii", &pty.slave_path());
+    let master_path = pty.master_path();
     let driver = make_driver(DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
-        serial: serial_port_config(pty.master_path()),
+        serial: serial_port_config(master_path.clone()),
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Serial {
+        mode: "ascii",
+        path: master_path,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_max_write",
             "coil_max_read",
             MAX_WRITE_COIL_COUNT,
             MAX_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
 }
 
 #[test]
@@ -673,17 +772,22 @@ fn diagslave_tcp_write_then_read_offset_coils() {
         port: guard.port,
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Tcp {
+        mode: "tcp",
+        port: guard.port,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_offset_write",
             "coil_offset_read",
             OFFSET_WRITE_COIL_COUNT,
             OFFSET_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
 }
 
 #[test]
@@ -694,17 +798,22 @@ fn diagslave_udp_write_then_read_offset_coils() {
         port: guard.port,
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Tcp {
+        mode: "udp",
+        port: guard.port,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_offset_write",
             "coil_offset_read",
             OFFSET_WRITE_COIL_COUNT,
             OFFSET_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
 }
 
 #[test]
@@ -717,17 +826,22 @@ fn diagslave_rtu_over_tcp_write_then_read_offset_coils() {
             options: ModbusClientOptions::default(),
         },
     ));
+    let modpoll = ModpollEndpoint::Tcp {
+        mode: "enc",
+        port: guard.port,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_offset_write",
             "coil_offset_read",
             OFFSET_WRITE_COIL_COUNT,
             OFFSET_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
 }
 
 #[cfg(unix)]
@@ -735,21 +849,27 @@ fn diagslave_rtu_over_tcp_write_then_read_offset_coils() {
 fn diagslave_rtu_over_pty_write_then_read_offset_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
+    let master_path = pty.master_path();
     let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
-        serial: serial_port_config(pty.master_path()),
+        serial: serial_port_config(master_path.clone()),
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Serial {
+        mode: "rtu",
+        path: master_path,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_offset_write",
             "coil_offset_read",
             OFFSET_WRITE_COIL_COUNT,
             OFFSET_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
 }
 
 #[cfg(unix)]
@@ -757,21 +877,27 @@ fn diagslave_rtu_over_pty_write_then_read_offset_coils() {
 fn diagslave_ascii_over_pty_write_then_read_offset_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("ascii", &pty.slave_path());
+    let master_path = pty.master_path();
     let driver = make_driver(DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
-        serial: serial_port_config(pty.master_path()),
+        serial: serial_port_config(master_path.clone()),
         options: ModbusClientOptions::default(),
     }));
+    let modpoll = ModpollEndpoint::Serial {
+        mode: "ascii",
+        path: master_path,
+    };
 
-    block_on(async {
-        assert_coil_round_trip(
+    let expected = block_on(async {
+        assert_driver_coil_round_trip(
             &driver,
             "coil_offset_write",
             "coil_offset_read",
             OFFSET_WRITE_COIL_COUNT,
             OFFSET_READ_COIL_COUNT,
         )
-        .await;
+        .await
     });
+    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
 }
 
 #[test]
