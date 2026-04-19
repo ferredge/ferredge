@@ -768,9 +768,11 @@ fn diagslave_ascii_over_pty_write_then_read_max_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("ascii", &pty.slave_path());
     let master_path = pty.master_path();
+    // Large ASCII PTY exchanges can briefly leave the socat-backed master unavailable on CI.
+    // Keep the test non-persistent, but allow a few bounded reopen retries for the follow-up read.
     let driver = make_driver(DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
         serial: serial_port_config(master_path.clone()),
-        options: ModbusClientOptions::default(),
+        options: modbus_options(false, 3),
     }));
     let modpoll = ModpollEndpoint::Serial {
         mode: "ascii",
