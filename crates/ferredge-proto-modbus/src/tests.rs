@@ -4,11 +4,8 @@ use alloc::{string::ToString, vec::Vec};
 
 use ferredge_core::prelude::*;
 use rmodbus::{
-    ModbusFrameBuf, ModbusProto, generate_ascii_frame, server::{
-        ModbusFrame,
-        context::ModbusContext,
-        storage::ModbusStorageFull,
-    },
+    ModbusFrameBuf, ModbusProto, generate_ascii_frame,
+    server::{ModbusFrame, context::ModbusContext, storage::ModbusStorageFull},
 };
 
 use crate::{
@@ -31,7 +28,9 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
                 description: None,
             },
             unit: None,
-            permission: Some(DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE),
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
         },
     );
     resources.insert(
@@ -46,7 +45,9 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
                 description: None,
             },
             unit: None,
-            permission: Some(DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE),
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
         },
     );
     resources.insert(
@@ -61,7 +62,9 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
                 description: None,
             },
             unit: None,
-            permission: Some(DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE),
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
         },
     );
 
@@ -147,20 +150,21 @@ fn simulate_response(request: &ModbusRequest, response_proto: ModbusProto) -> Ve
 
     let mut frame_buf: ModbusFrameBuf = [0; 256];
     let binary_request = if request.proto == ModbusProto::Ascii {
-        let parsed = rmodbus::parse_ascii_frame(
-            &request.frame,
-            request.frame.len(),
-            &mut frame_buf,
-            0,
-        )
-        .unwrap() as usize;
+        let parsed =
+            rmodbus::parse_ascii_frame(&request.frame, request.frame.len(), &mut frame_buf, 0)
+                .unwrap() as usize;
         &frame_buf[..parsed]
     } else {
         &request.frame
     };
 
     let mut response = Vec::new();
-    let mut frame = ModbusFrame::new(request.unit_id, binary_request, response_proto, &mut response);
+    let mut frame = ModbusFrame::new(
+        request.unit_id,
+        binary_request,
+        response_proto,
+        &mut response,
+    );
     frame.parse().unwrap();
     if frame.processing_required {
         if frame.readonly {

@@ -20,10 +20,7 @@ pub enum SerialError {
 /// Async byte-stream serial port used by protocol adapters such as Modbus RTU or ASCII.
 pub trait AsyncSerialPort: Send + Sync + 'static {
     /// Reads bytes into the provided buffer and returns the number of bytes read.
-    fn read(
-        &mut self,
-        buf: &mut [u8],
-    ) -> impl Future<Output = Result<usize, SerialError>> + Send;
+    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, SerialError>> + Send;
 
     /// Writes bytes from the provided buffer and returns the number of bytes written.
     fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize, SerialError>> + Send;

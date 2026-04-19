@@ -7,8 +7,8 @@ use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
 use crate::{
-    StackNet, StackRuntime, StackSerial,
-    StackSerialPort, StackSocket, attributes::ModbusResourceAttributes,
+    StackNet, StackRuntime, StackSerial, StackSerialPort, StackSocket,
+    attributes::ModbusResourceAttributes,
 };
 
 type RuntimeMutex<T> = <StackRuntime as AsyncRuntime>::Mutex<T>;

@@ -255,16 +255,13 @@ mod tests {
     #[test]
     fn mock_async_datagram_net_contract_is_usable() {
         let net = MockNet;
-        let mut socket = block_on(net.bind_datagram("127.0.0.1:0"))
-            .expect("bind_datagram should succeed");
+        let mut socket =
+            block_on(net.bind_datagram("127.0.0.1:0")).expect("bind_datagram should succeed");
         let mut buf = [0u8; 8];
         let (n, peer) = block_on(socket.recv_from(&mut buf)).expect("recv_from should succeed");
         assert_eq!(&buf[..n], b"udp");
         assert_eq!(peer, "127.0.0.1:502");
-        assert_eq!(
-            block_on(socket.send_to(b"abc", "127.0.0.1:502")),
-            Ok(3)
-        );
+        assert_eq!(block_on(socket.send_to(b"abc", "127.0.0.1:502")), Ok(3));
         assert_eq!(block_on(socket.close()), Ok(()));
     }
 }

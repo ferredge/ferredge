@@ -6,10 +6,10 @@ use ferredge_core::prelude::*;
 use rmodbus::{ErrorKind as RmodbusError, ModbusProto, client::ModbusRequest as RmodbusRequest};
 
 use crate::{
-    attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
-    codec::encode_wire_frame,
     ModbusCommandConversionError, ModbusCommandRef, ModbusParserSeed, ModbusRequest,
     ModbusResponseDecoder,
+    attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
+    codec::encode_wire_frame,
 };
 
 impl TryFrom<ModbusCommandRef<'_>> for ModbusRequest {
@@ -17,28 +17,34 @@ impl TryFrom<ModbusCommandRef<'_>> for ModbusRequest {
 
     fn try_from(value: ModbusCommandRef<'_>) -> Result<Self, Self::Error> {
         let proto = proto_from_endpoint(&value.device.endpoint).ok_or_else(|| {
-            ModbusCommandConversionError::InvalidResource("device endpoint is not Modbus".to_string())
+            ModbusCommandConversionError::InvalidResource(
+                "device endpoint is not Modbus".to_string(),
+            )
         })?;
         let options = endpoint_options(&value.device.endpoint).ok_or_else(|| {
-            ModbusCommandConversionError::InvalidResource("missing Modbus endpoint options".to_string())
+            ModbusCommandConversionError::InvalidResource(
+                "missing Modbus endpoint options".to_string(),
+            )
         })?;
 
         match &value.command.intent {
             Intent::Read { resource } => {
-                let resource_def = value
-                    .device
-                    .resources
-                    .get(resource)
-                    .ok_or_else(|| ModbusCommandConversionError::UnknownResource(resource.clone()))?;
+                let resource_def = value.device.resources.get(resource).ok_or_else(|| {
+                    ModbusCommandConversionError::UnknownResource(resource.clone())
+                })?;
                 build_read_request(resource, &resource_def.resource_attributes, proto, options)
             }
             Intent::Write { resource, payload } => {
-                let resource_def = value
-                    .device
-                    .resources
-                    .get(resource)
-                    .ok_or_else(|| ModbusCommandConversionError::UnknownResource(resource.clone()))?;
-                build_write_request(resource, &resource_def.resource_attributes, payload, proto, options)
+                let resource_def = value.device.resources.get(resource).ok_or_else(|| {
+                    ModbusCommandConversionError::UnknownResource(resource.clone())
+                })?;
+                build_write_request(
+                    resource,
+                    &resource_def.resource_attributes,
+                    payload,
+                    proto,
+                    options,
+                )
             }
             Intent::Invoke { .. }
             | Intent::Send { .. }
@@ -63,28 +69,40 @@ fn build_read_request(
             builder
                 .generate_get_coils(attributes.address, quantity, &mut binary_frame)
                 .map_err(map_rmodbus_build_error)?;
-            ModbusParserSeed::ReadCoils { address: attributes.address, quantity }
+            ModbusParserSeed::ReadCoils {
+                address: attributes.address,
+                quantity,
+            }
         }
         ModbusRegisterKind::DiscreteInput => {
             validate_bit_codec(attributes)?;
             builder
                 .generate_get_discretes(attributes.address, quantity, &mut binary_frame)
                 .map_err(map_rmodbus_build_error)?;
-            ModbusParserSeed::ReadDiscretes { address: attributes.address, quantity }
+            ModbusParserSeed::ReadDiscretes {
+                address: attributes.address,
+                quantity,
+            }
         }
         ModbusRegisterKind::HoldingRegister => {
             validate_register_codec(attributes)?;
             builder
                 .generate_get_holdings(attributes.address, quantity, &mut binary_frame)
                 .map_err(map_rmodbus_build_error)?;
-            ModbusParserSeed::ReadHoldings { address: attributes.address, quantity }
+            ModbusParserSeed::ReadHoldings {
+                address: attributes.address,
+                quantity,
+            }
         }
         ModbusRegisterKind::InputRegister => {
             validate_register_codec(attributes)?;
             builder
                 .generate_get_inputs(attributes.address, quantity, &mut binary_frame)
                 .map_err(map_rmodbus_build_error)?;
-            ModbusParserSeed::ReadInputs { address: attributes.address, quantity }
+            ModbusParserSeed::ReadInputs {
+                address: attributes.address,
+                quantity,
+            }
         }
     };
     Ok(ModbusRequest {
@@ -124,7 +142,9 @@ fn build_write_request(
             &mut binary_frame,
         )?,
         ModbusRegisterKind::DiscreteInput | ModbusRegisterKind::InputRegister => {
-            return Err(ModbusCommandConversionError::UnsupportedWrite(resource.to_string()))
+            return Err(ModbusCommandConversionError::UnsupportedWrite(
+                resource.to_string(),
+            ));
         }
     };
 
@@ -168,7 +188,9 @@ fn build_coil_write_request(
                 values,
             })
         }
-        _ => Err(ModbusCommandConversionError::UnsupportedWrite(resource.to_string())),
+        _ => Err(ModbusCommandConversionError::UnsupportedWrite(
+            resource.to_string(),
+        )),
     }
 }
 
@@ -227,16 +249,18 @@ fn build_holding_write_request(
                 value,
             })
         }
-        ModbusValueCodec::Bool | ModbusValueCodec::Bits => {
-            Err(ModbusCommandConversionError::UnsupportedWrite(resource.to_string()))
-        }
+        ModbusValueCodec::Bool | ModbusValueCodec::Bits => Err(
+            ModbusCommandConversionError::UnsupportedWrite(resource.to_string()),
+        ),
     }
 }
 
 pub(crate) fn proto_from_endpoint(endpoint: &DeviceEndpoint) -> Option<ModbusProto> {
     match endpoint {
         DeviceEndpoint::ModbusTCP(_) | DeviceEndpoint::ModbusUDP(_) => Some(ModbusProto::TcpUdp),
-        DeviceEndpoint::ModbusRTUOverTCP(_) | DeviceEndpoint::ModbusRTU(_) => Some(ModbusProto::Rtu),
+        DeviceEndpoint::ModbusRTUOverTCP(_) | DeviceEndpoint::ModbusRTU(_) => {
+            Some(ModbusProto::Rtu)
+        }
         DeviceEndpoint::ModbusASCII(_) => Some(ModbusProto::Ascii),
         _ => None,
     }
@@ -276,15 +300,18 @@ fn quantity_for_read(
         | ModbusValueCodec::I32Le
         | ModbusValueCodec::F32Be
         | ModbusValueCodec::F32Le => Ok(2),
-        ModbusValueCodec::Bytes | ModbusValueCodec::Utf8String => Err(
-            ModbusCommandConversionError::InvalidResource(
+        ModbusValueCodec::Bytes | ModbusValueCodec::Utf8String => {
+            Err(ModbusCommandConversionError::InvalidResource(
                 "quantity is required for raw bytes and string codecs".to_string(),
-            ),
-        ),
+            ))
+        }
     }
 }
 
-fn decoder_for_codec(attributes: &ModbusResourceAttributes, quantity: u16) -> ModbusResponseDecoder {
+fn decoder_for_codec(
+    attributes: &ModbusResourceAttributes,
+    quantity: u16,
+) -> ModbusResponseDecoder {
     match attributes.codec {
         ModbusValueCodec::Bool => ModbusResponseDecoder::Bool,
         ModbusValueCodec::Bits => ModbusResponseDecoder::Bits { quantity },
@@ -316,11 +343,11 @@ fn validate_register_codec(
     attributes: &ModbusResourceAttributes,
 ) -> Result<(), ModbusCommandConversionError> {
     match attributes.codec {
-        ModbusValueCodec::Bool | ModbusValueCodec::Bits => Err(
-            ModbusCommandConversionError::InvalidResource(
+        ModbusValueCodec::Bool | ModbusValueCodec::Bits => {
+            Err(ModbusCommandConversionError::InvalidResource(
                 "register resources cannot use Bool or Bits codec".to_string(),
-            ),
-        ),
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -358,12 +385,12 @@ fn words_from_payload(
     payload: &[u8],
 ) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match attributes.codec {
-        ModbusValueCodec::U32Be
-        | ModbusValueCodec::I32Be
-        | ModbusValueCodec::F32Be => words_from_bytes_be(payload),
-        ModbusValueCodec::U32Le
-        | ModbusValueCodec::I32Le
-        | ModbusValueCodec::F32Le => words_from_bytes_le(payload),
+        ModbusValueCodec::U32Be | ModbusValueCodec::I32Be | ModbusValueCodec::F32Be => {
+            words_from_bytes_be(payload)
+        }
+        ModbusValueCodec::U32Le | ModbusValueCodec::I32Le | ModbusValueCodec::F32Le => {
+            words_from_bytes_le(payload)
+        }
         _ => Err(ModbusCommandConversionError::InvalidPayload(
             "word conversion requires 32-bit codec",
         )),

@@ -5,16 +5,15 @@ use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
 use crate::{
-    ModbusDriver, ModbusRequest, ModbusResponse,
-    StackDatagramSocket, StackSerialPort, StackSocket,
-    convert::endpoint_options,
+    ModbusDriver, ModbusRequest, ModbusResponse, StackDatagramSocket, StackSerialPort, StackSocket,
     codec::{build_modbus_response, decode_ascii_wire_frame},
+    convert::endpoint_options,
     types::PersistentSession,
 };
 
 /// Use this to load the entire datagram into memory before processing,
 /// since UDP datagrams are atomic and the Modbus TCP/UDP ADU max size (260 bytes)
-/// is small enough to fit comfortably in memory. This also avoids the complexity 
+/// is small enough to fit comfortably in memory. This also avoids the complexity
 /// of incremental parsing and buffering for TCP/UDP, which is complicated by rmodbus's
 /// use of u8 for frame length guessing and would require custom handling for valid frames
 /// larger than 255 bytes.
@@ -45,7 +44,10 @@ impl RequestResponse for ModbusDriver {
 }
 
 impl ModbusDriver {
-    pub(crate) async fn execute_on_endpoint(&self, request: &ModbusRequest) -> Result<Vec<u8>, String> {
+    pub(crate) async fn execute_on_endpoint(
+        &self,
+        request: &ModbusRequest,
+    ) -> Result<Vec<u8>, String> {
         let options = endpoint_options(&self.dvc.endpoint)
             .ok_or_else(|| "missing Modbus endpoint options".to_string())?;
         let reconnect = &options.reconnect;
@@ -74,7 +76,9 @@ impl ModbusDriver {
     async fn execute_once(&self, request: &ModbusRequest) -> Result<Vec<u8>, String> {
         match &self.dvc.endpoint {
             DeviceEndpoint::ModbusTCP(config) => self.execute_tcp(request, config).await,
-            DeviceEndpoint::ModbusRTUOverTCP(config) => self.execute_rtu_over_tcp(request, config).await,
+            DeviceEndpoint::ModbusRTUOverTCP(config) => {
+                self.execute_rtu_over_tcp(request, config).await
+            }
             DeviceEndpoint::ModbusUDP(config) => self.execute_udp(request, config).await,
             DeviceEndpoint::ModbusRTU(config) => self.execute_rtu(request, config).await,
             DeviceEndpoint::ModbusASCII(config) => self.execute_ascii(request, config).await,
@@ -121,7 +125,9 @@ impl ModbusDriver {
         config: &ModbusRtuOverTcpEndpointConfig,
     ) -> Result<Vec<u8>, String> {
         if config.options.persistent_session {
-            return self.execute_tcp_persistent_on_addr(request, &config.addr, config.port).await;
+            return self
+                .execute_tcp_persistent_on_addr(request, &config.addr, config.port)
+                .await;
         }
         let mut socket = self
             .open_tcp_socket_addr(&config.addr, config.port, request.timeout)
@@ -136,13 +142,14 @@ impl ModbusDriver {
         config: &ModbusRtuEndpointConfig,
     ) -> Result<Vec<u8>, String> {
         if config.options.persistent_session {
-            return self.execute_serial_persistent(
-                request,
-                &config.serial,
-                "Modbus RTU",
-                PersistentSessionKind::Rtu,
-            )
-            .await;
+            return self
+                .execute_serial_persistent(
+                    request,
+                    &config.serial,
+                    "Modbus RTU",
+                    PersistentSessionKind::Rtu,
+                )
+                .await;
         }
         let mut port = self.open_serial_port(&config.serial, "Modbus RTU").await?;
         write_serial_request(&mut port, &request.frame, "Modbus RTU").await?;
@@ -155,15 +162,18 @@ impl ModbusDriver {
         config: &ModbusAsciiEndpointConfig,
     ) -> Result<Vec<u8>, String> {
         if config.options.persistent_session {
-            return self.execute_serial_persistent(
-                request,
-                &config.serial,
-                "Modbus ASCII",
-                PersistentSessionKind::Ascii,
-            )
-            .await;
+            return self
+                .execute_serial_persistent(
+                    request,
+                    &config.serial,
+                    "Modbus ASCII",
+                    PersistentSessionKind::Ascii,
+                )
+                .await;
         }
-        let mut port = self.open_serial_port(&config.serial, "Modbus ASCII").await?;
+        let mut port = self
+            .open_serial_port(&config.serial, "Modbus ASCII")
+            .await?;
         write_serial_request(&mut port, &request.frame, "Modbus ASCII").await?;
         let raw_ascii = read_stream_response_serial(&mut port, request.proto).await?;
         decode_ascii_wire_frame(&raw_ascii)
@@ -188,9 +198,13 @@ impl ModbusDriver {
             Some(PersistentSession::Tcp(socket)) => socket,
             Some(other) => {
                 self.close_session(other).await;
-                self.open_tcp_socket_addr(addr, port, request.timeout).await?
+                self.open_tcp_socket_addr(addr, port, request.timeout)
+                    .await?
             }
-            None => self.open_tcp_socket_addr(addr, port, request.timeout).await?,
+            None => {
+                self.open_tcp_socket_addr(addr, port, request.timeout)
+                    .await?
+            }
         };
 
         let result = async {
@@ -201,7 +215,8 @@ impl ModbusDriver {
 
         match result {
             Ok(frame) => {
-                self.store_persistent_session(PersistentSession::Tcp(socket)).await?;
+                self.store_persistent_session(PersistentSession::Tcp(socket))
+                    .await?;
                 Ok(frame)
             }
             Err(error) => {
@@ -264,7 +279,8 @@ impl ModbusDriver {
         config: &ModbusTcpEndpointConfig,
         timeout: Option<Duration>,
     ) -> Result<StackSocket, String> {
-        self.open_tcp_socket_addr(&config.addr, config.port, timeout).await
+        self.open_tcp_socket_addr(&config.addr, config.port, timeout)
+            .await
     }
 
     async fn open_tcp_socket_addr(
@@ -448,7 +464,9 @@ fn frame_complete(frame: &[u8], proto: ModbusProto) -> bool {
         // Work around rmodbus TCP/UDP length guessing: guess_response_frame_len returns u8 and
         // treats valid MBAP lengths above 255 bytes as FrameBroken. Large coil/register reads can
         // exceed that, so completion has to be driven by the MBAP length field directly.
-        ModbusProto::TcpUdp => tcp_udp_frame_len(frame).is_some_and(|expected_len| frame.len() >= expected_len),
+        ModbusProto::TcpUdp => {
+            tcp_udp_frame_len(frame).is_some_and(|expected_len| frame.len() >= expected_len)
+        }
         // Work around rmodbus ASCII length guessing: guess_response_frame_len returns u8 and
         // treats valid ASCII wire frames longer than 255 bytes as FrameBroken. Large coil reads
         // can exceed that on the wire, so completion has to be driven by the ASCII terminator.
@@ -506,7 +524,10 @@ fn tcp_udp_frame_len(frame: &[u8]) -> Option<usize> {
 }
 
 fn ascii_frame_end(frame: &[u8]) -> Option<usize> {
-    frame.windows(2).position(|window| window == b"\r\n").map(|idx| idx + 2)
+    frame
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .map(|idx| idx + 2)
 }
 
 fn is_retryable_transport_error(error: &str) -> bool {
