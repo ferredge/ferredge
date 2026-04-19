@@ -5,7 +5,7 @@ extern crate alloc;
 pub mod attributes;
 mod codec;
 mod convert;
-#[cfg(all(test, feature = "diagslave-tests"))]
+#[cfg(all(test, feature = "integration"))]
 mod diagslave_tests;
 #[cfg(test)]
 mod tests;

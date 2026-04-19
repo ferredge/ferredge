@@ -1678,6 +1678,7 @@ fn mqtt_listener_handles_reauthentication_auth_packets() {
         .expect("test broker should have local addr");
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let (reauth_seen_tx, reauth_seen_rx) = mpsc::channel();
+    let (reauth_start_tx, reauth_start_rx) = mpsc::channel();
 
     let broker_handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("broker should accept client");
@@ -1697,6 +1698,10 @@ fn mqtt_listener_handles_reauthentication_auth_packets() {
             .build()
             .expect("connack should build");
         send_server_packet(&mut stream, &mut connection, connack.into());
+
+        reauth_start_rx
+            .recv_timeout(Duration::from_secs(TEST_STATUS_TIMEOUT_SECS))
+            .expect("test should signal when listener is ready for reauth");
 
         let reauth = mqtt::packet::v5_0::Auth::builder()
             .reason_code(mqtt::result_code::AuthReasonCode::ReAuthenticate)
@@ -1783,6 +1788,9 @@ fn mqtt_listener_handles_reauthentication_auth_packets() {
     }
 
     block_on(driver.start_listening(NoopSink)).expect("listener should start");
+    reauth_start_tx
+        .send(())
+        .expect("test should signal broker to start reauth");
     reauth_seen_rx
         .recv_timeout(Duration::from_secs(TEST_STATUS_TIMEOUT_SECS))
         .expect("broker should receive reauth response");
