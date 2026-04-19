@@ -32,6 +32,22 @@ pub trait AsyncSerialPort: Send + Sync + 'static {
     fn close(&mut self) -> impl Future<Output = Result<(), SerialError>> + Send;
 }
 
+/// Writes the full buffer to one async serial port, retrying short writes until completion.
+pub async fn write_all_serial_port<P>(port: &mut P, buf: &[u8]) -> Result<(), SerialError>
+where
+    P: AsyncSerialPort,
+{
+    let mut written = 0;
+    while written < buf.len() {
+        let count = port.write(&buf[written..]).await?;
+        if count == 0 {
+            return Err(SerialError::Closed);
+        }
+        written += count;
+    }
+    Ok(())
+}
+
 /// Async serial transport factory shared by protocol adapters.
 pub trait AsyncSerial: Clone + Send + Sync + 'static {
     /// Open serial port type returned by `open`.
@@ -48,7 +64,7 @@ pub trait AsyncSerial: Clone + Send + Sync + 'static {
 mod tests {
     use super::*;
     extern crate alloc;
-    use alloc::string::ToString;
+    use alloc::{string::ToString, vec, vec::Vec};
     use core::{
         pin::Pin,
         task::{Context, Poll, Waker},
@@ -82,6 +98,40 @@ mod tests {
 
         async fn close(&mut self) -> Result<(), SerialError> {
             self.closed = true;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockPartialWriteSerialPort {
+        write_plan: Vec<usize>,
+        written: Vec<u8>,
+    }
+
+    impl AsyncSerialPort for MockPartialWriteSerialPort {
+        async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, SerialError> {
+            Err(SerialError::Closed)
+        }
+
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, SerialError> {
+            let count = self
+                .write_plan
+                .first()
+                .copied()
+                .unwrap_or(buf.len())
+                .min(buf.len());
+            if !self.write_plan.is_empty() {
+                self.write_plan.remove(0);
+            }
+            self.written.extend_from_slice(&buf[..count]);
+            Ok(count)
+        }
+
+        async fn flush(&mut self) -> Result<(), SerialError> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<(), SerialError> {
             Ok(())
         }
     }
@@ -127,5 +177,17 @@ mod tests {
         assert_eq!(block_on(port.write(b"abc")), Ok(3));
         assert_eq!(block_on(port.flush()), Ok(()));
         assert_eq!(block_on(port.close()), Ok(()));
+    }
+
+    #[test]
+    fn write_all_serial_port_retries_short_writes() {
+        let mut port = MockPartialWriteSerialPort {
+            write_plan: vec![1, 2, 5],
+            ..Default::default()
+        };
+
+        block_on(write_all_serial_port(&mut port, b"abcdefgh")).expect("write_all should succeed");
+
+        assert_eq!(port.written, b"abcdefgh");
     }
 }

@@ -54,6 +54,22 @@ pub trait AsyncSocket: Send + Sync + 'static {
     fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + Send;
 }
 
+/// Writes the full buffer to one async socket, retrying short writes until completion.
+pub async fn write_all_socket<S>(socket: &mut S, buf: &[u8]) -> Result<(), NetError>
+where
+    S: AsyncSocket,
+{
+    let mut written = 0;
+    while written < buf.len() {
+        let count = socket.write(&buf[written..]).await?;
+        if count == 0 {
+            return Err(NetError::Closed);
+        }
+        written += count;
+    }
+    Ok(())
+}
+
 /// Async listener that accepts inbound sockets.
 pub trait AsyncListener: Send + Sync + 'static {
     /// Socket type produced by this listener.
@@ -99,7 +115,7 @@ pub trait AsyncDatagramNet: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
+    use alloc::{string::ToString, vec, vec::Vec};
     use core::{
         pin::Pin,
         task::{Context, Poll, Waker},
@@ -133,6 +149,40 @@ mod tests {
 
         async fn close(&mut self) -> Result<(), NetError> {
             self.closed = true;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockPartialWriteSocket {
+        write_plan: Vec<usize>,
+        written: Vec<u8>,
+    }
+
+    impl AsyncSocket for MockPartialWriteSocket {
+        async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, NetError> {
+            Err(NetError::Closed)
+        }
+
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, NetError> {
+            let count = self
+                .write_plan
+                .first()
+                .copied()
+                .unwrap_or(buf.len())
+                .min(buf.len());
+            if !self.write_plan.is_empty() {
+                self.write_plan.remove(0);
+            }
+            self.written.extend_from_slice(&buf[..count]);
+            Ok(count)
+        }
+
+        async fn flush(&mut self) -> Result<(), NetError> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<(), NetError> {
             Ok(())
         }
     }
@@ -263,5 +313,17 @@ mod tests {
         assert_eq!(peer, "127.0.0.1:502");
         assert_eq!(block_on(socket.send_to(b"abc", "127.0.0.1:502")), Ok(3));
         assert_eq!(block_on(socket.close()), Ok(()));
+    }
+
+    #[test]
+    fn write_all_socket_retries_short_writes() {
+        let mut socket = MockPartialWriteSocket {
+            write_plan: vec![2, 3, 8],
+            ..Default::default()
+        };
+
+        block_on(write_all_socket(&mut socket, b"abcdefgh")).expect("write_all should succeed");
+
+        assert_eq!(socket.written, b"abcdefgh");
     }
 }
