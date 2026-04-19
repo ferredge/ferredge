@@ -651,7 +651,12 @@ fn diagslave_tcp_write_then_read_max_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        MAX_COIL_START_ADDR,
+        MAX_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[test]
@@ -677,7 +682,12 @@ fn diagslave_udp_write_then_read_max_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        MAX_COIL_START_ADDR,
+        MAX_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[test]
@@ -705,7 +715,12 @@ fn diagslave_rtu_over_tcp_write_then_read_max_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        MAX_COIL_START_ADDR,
+        MAX_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[cfg(unix)]
@@ -733,7 +748,12 @@ fn diagslave_rtu_over_pty_write_then_read_max_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        MAX_COIL_START_ADDR,
+        MAX_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[cfg(unix)]
@@ -761,7 +781,12 @@ fn diagslave_ascii_over_pty_write_then_read_max_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, MAX_COIL_START_ADDR, MAX_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        MAX_COIL_START_ADDR,
+        MAX_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[test]
@@ -787,7 +812,12 @@ fn diagslave_tcp_write_then_read_offset_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        OFFSET_COIL_START_ADDR,
+        OFFSET_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[test]
@@ -813,7 +843,12 @@ fn diagslave_udp_write_then_read_offset_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        OFFSET_COIL_START_ADDR,
+        OFFSET_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[test]
@@ -841,7 +876,12 @@ fn diagslave_rtu_over_tcp_write_then_read_offset_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        OFFSET_COIL_START_ADDR,
+        OFFSET_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[cfg(unix)]
@@ -869,7 +909,12 @@ fn diagslave_rtu_over_pty_write_then_read_offset_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        OFFSET_COIL_START_ADDR,
+        OFFSET_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[cfg(unix)]
@@ -897,7 +942,12 @@ fn diagslave_ascii_over_pty_write_then_read_offset_coils() {
         )
         .await
     });
-    assert_modpoll_coil_read(&modpoll, OFFSET_COIL_START_ADDR, OFFSET_READ_COIL_COUNT, &expected);
+    assert_modpoll_coil_read(
+        &modpoll,
+        OFFSET_COIL_START_ADDR,
+        OFFSET_READ_COIL_COUNT,
+        &expected,
+    );
 }
 
 #[test]
