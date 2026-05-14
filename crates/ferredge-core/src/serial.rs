@@ -3,17 +3,22 @@ use core::future::Future;
 use crate::device::SerialPortConfig;
 
 /// Error returned by abstract async serial operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SerialError {
     /// Remote endpoint or device closed the serial session.
+    #[error("serial port is closed")]
     Closed,
     /// Operation timed out before completion.
+    #[error("serial operation timed out")]
     TimedOut,
     /// Requested operation is unsupported by this transport.
+    #[error("serial operation is unsupported")]
     Unsupported,
     /// Underlying runtime or driver is unavailable.
+    #[error("serial runtime is unavailable")]
     RuntimeUnavailable,
     /// Transport-specific failure string preserved by adapter.
+    #[error("{0}")]
     Other(String),
 }
 

@@ -62,26 +62,17 @@ pub struct HttpResponse {
 }
 
 /// Conversion error raised when routed command cannot be represented as HTTP request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HttpCommandConversionError {
     /// Routed command intent cannot be executed via HTTP request/response semantics.
+    #[error("unsupported intent for HTTP driver")]
     UnsupportedIntent,
     /// Target resource does not exist on concrete device definition.
+    #[error("resource {0} not found for HTTP driver")]
     UnknownResource(String),
     /// Payload type cannot be represented as an HTTP request body.
+    #[error("invalid HTTP payload: {0}")]
     InvalidPayload(String),
-}
-
-impl core::fmt::Display for HttpCommandConversionError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::UnsupportedIntent => write!(f, "unsupported intent for HTTP driver"),
-            Self::UnknownResource(resource) => {
-                write!(f, "resource {resource} not found for HTTP driver")
-            }
-            Self::InvalidPayload(reason) => write!(f, "invalid HTTP payload: {reason}"),
-        }
-    }
 }
 
 /// HTTP protocol adapter implementing lifecycle and request/response capabilities.

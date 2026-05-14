@@ -33,29 +33,18 @@ pub struct ModbusResponse {
     pub payload: PayloadValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ModbusCommandConversionError {
+    #[error("unsupported intent for Modbus driver")]
     UnsupportedIntent,
+    #[error("resource {0} not found for Modbus driver")]
     UnknownResource(String),
+    #[error("invalid Modbus resource: {0}")]
     InvalidResource(String),
+    #[error("invalid Modbus payload: {0}")]
     InvalidPayload(String),
+    #[error("resource {0} is not writable via Modbus")]
     UnsupportedWrite(String),
-}
-
-impl core::fmt::Display for ModbusCommandConversionError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::UnsupportedIntent => write!(f, "unsupported intent for Modbus driver"),
-            Self::UnknownResource(resource) => {
-                write!(f, "resource {resource} not found for Modbus driver")
-            }
-            Self::InvalidResource(resource) => write!(f, "invalid Modbus resource: {resource}"),
-            Self::InvalidPayload(reason) => write!(f, "invalid Modbus payload: {reason}"),
-            Self::UnsupportedWrite(resource) => {
-                write!(f, "resource {resource} is not writable via Modbus")
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -18,7 +18,7 @@ embassy-runtime = ["dep:ferredge-runtime-embassy", "ferredge-runtime-embassy/run
 httparse = { version = "1.10.1", default-features = false }
 serde = { workspace = true }
 ferredge-core = { workspace = true, features = ["net", "runtime"] }
-anyhow = { workspace = true }
+thiserror = { workspace = true }
 ferredge-runtime-tokio = { workspace = true, optional = true }
 ferredge-runtime-async-std = { workspace = true, optional = true }
 ferredge-runtime-embassy = { workspace = true, optional = true }
