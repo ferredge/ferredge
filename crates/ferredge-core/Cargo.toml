@@ -20,5 +20,6 @@ serial = []
 serde = { workspace = true }
 bitflags = { version = "2.10.0", features = ["serde"] }
 hashbrown = { version = "0.17", optional = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]

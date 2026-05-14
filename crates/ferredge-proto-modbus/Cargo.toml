@@ -37,6 +37,7 @@ integration = []
 ferredge-core = { workspace = true, features = ["net", "runtime", "serial"] }
 serde = { workspace = true }
 rmodbus = { workspace = true }
+thiserror = { workspace = true }
 ferredge-runtime-tokio = { workspace = true, optional = true }
 ferredge-runtime-async-std = { workspace = true, optional = true }
 ferredge-runtime-embassy = { workspace = true, optional = true }

@@ -12,11 +12,13 @@ pub use alloc::sync::Arc as Shared;
 pub use core::sync::atomic::{AtomicBool as AtomicFlag, Ordering as AtomicOrdering};
 
 /// Error returned by async mutex operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MutexError {
     /// Mutex is currently held by another task and try-lock could not acquire it.
+    #[error("mutex is busy")]
     Busy,
     /// Locking failed because the underlying runtime is unavailable.
+    #[error("runtime is unavailable")]
     RuntimeUnavailable,
 }
 

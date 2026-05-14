@@ -22,6 +22,7 @@ ferredge-core = { workspace = true, features = ["net", "runtime", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 mqtt_protocol_core = { package = "mqtt-protocol-core", version = "0.7.7", default-features = false }
+thiserror = { workspace = true }
 ferredge-runtime-tokio = { workspace = true, optional = true }
 ferredge-runtime-async-std = { workspace = true, optional = true }
 ferredge-runtime-embassy = { workspace = true, optional = true }

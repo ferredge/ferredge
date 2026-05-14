@@ -3,24 +3,30 @@ use core::{future::Future, time::Duration};
 use crate::sync::AsyncMutex;
 
 /// Error returned by runtime-backed task handles.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TaskJoinError {
     /// Task was cancelled or aborted before successful completion.
+    #[error("task was cancelled")]
     Cancelled,
     /// Task failed because underlying runtime shut down unexpectedly.
+    #[error("runtime is unavailable")]
     RuntimeUnavailable,
 }
 
 /// Error returned by runtime-backed channel operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ChannelError {
     /// Channel is full and cannot currently accept more messages.
+    #[error("channel is full")]
     Full,
     /// Channel currently has no item available for nonblocking receive.
+    #[error("channel is empty")]
     Empty,
     /// Channel was closed by the receiver or runtime.
+    #[error("channel is closed")]
     Closed,
     /// Channel operation failed because runtime resources are unavailable.
+    #[error("runtime is unavailable")]
     RuntimeUnavailable,
 }
 

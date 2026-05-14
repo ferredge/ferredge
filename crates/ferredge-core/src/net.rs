@@ -4,19 +4,25 @@ use alloc::string::String;
 use core::future::Future;
 
 /// Error returned by abstract async network operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NetError {
     /// Remote endpoint closed the connection.
+    #[error("network transport is closed")]
     Closed,
     /// Operation timed out before completion.
+    #[error("network operation timed out")]
     TimedOut,
     /// Address could not be resolved or connected.
+    #[error("network target is unreachable")]
     Unreachable,
     /// Requested operation is unsupported by this transport.
+    #[error("network operation is unsupported")]
     Unsupported,
     /// Underlying runtime or driver is unavailable.
+    #[error("network runtime is unavailable")]
     RuntimeUnavailable,
     /// Transport-specific failure string preserved by adapter.
+    #[error("{0}")]
     Other(String),
 }
 

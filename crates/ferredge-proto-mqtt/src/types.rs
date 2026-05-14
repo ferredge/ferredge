@@ -103,32 +103,29 @@ pub struct MqttPacketRequest {
 }
 
 /// MQTT conversion errors raised while projecting routed commands into MQTT packets.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum MqttCommandConversionError {
     /// Routed command intent does not map to MQTT pub/sub semantics.
+    #[error("unsupported intent for MQTT driver")]
     UnsupportedIntent,
     /// Requested broker channel kind cannot be mapped to MQTT topic semantics.
-    UnsupportedChannelKind,
-    /// Routed command omitted packet details required for selected MQTT operation.
-    InvalidCommand(String),
+    #[error("unsupported broker channel kind for MQTT topic mapping: {0:?}")]
+    UnsupportedChannelKind(BrokerChannelKind),
+    /// Bound device endpoint is not configured for MQTT.
+    #[error("device endpoint is not MQTT")]
+    NonMqttEndpoint,
+    /// MQTT 3.1.1 cannot represent selected publish options.
+    #[error("MQTT 3.1.1 publish does not support MQTT v5 properties")]
+    MqttV5PublishOptionsOnV3,
+    /// MQTT 3.1.1 cannot represent selected subscription options.
+    #[error("MQTT 3.1.1 subscribe does not support requested MQTT v5 subscription options")]
+    MqttV5SubscriptionOptionsOnV3,
     /// Routed typed payload cannot be encoded as an MQTT publish body.
-    InvalidPayload(String),
+    #[error("failed to serialize MQTT payload as JSON: {0}")]
+    InvalidPayload(#[from] serde_json::Error),
     /// Underlying `mqtt_protocol_core` packet builder rejected the request.
-    PacketBuild(String),
-}
-
-impl core::fmt::Display for MqttCommandConversionError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::UnsupportedIntent => write!(f, "unsupported intent for MQTT driver"),
-            Self::UnsupportedChannelKind => {
-                write!(f, "unsupported broker channel kind for MQTT topic mapping")
-            }
-            Self::InvalidCommand(message) => write!(f, "{message}"),
-            Self::InvalidPayload(message) => write!(f, "{message}"),
-            Self::PacketBuild(message) => write!(f, "{message}"),
-        }
-    }
+    #[error("failed to build MQTT packet: {0}")]
+    PacketBuild(#[from] mqtt::result_code::MqttError),
 }
 
 /// Borrowed view carrying enough context to convert routed command into MQTT packets.
@@ -145,9 +142,7 @@ impl MqttCommandRef<'_> {
     pub fn endpoint_config(&self) -> Result<&MqttEndpointConfig, MqttCommandConversionError> {
         match &self.device.endpoint {
             DeviceEndpoint::Mqtt(config) => Ok(config),
-            _ => Err(MqttCommandConversionError::InvalidCommand(
-                "device endpoint is not MQTT".to_string(),
-            )),
+            _ => Err(MqttCommandConversionError::NonMqttEndpoint),
         }
     }
 }

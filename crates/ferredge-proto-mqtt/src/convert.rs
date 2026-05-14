@@ -2,13 +2,10 @@
 extern crate alloc;
 
 #[cfg(feature = "std")]
-use std::string::{String, ToString};
+use std::string::String;
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-    string::{String, ToString},
-    vec,
-};
+use alloc::{string::String, vec};
 
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
@@ -60,11 +57,7 @@ fn mqtt_payload_bytes(payload: &PayloadValue) -> Result<Vec<u8>, MqttCommandConv
     match payload {
         PayloadValue::Bytes(bytes) => Ok(bytes.clone()),
         PayloadValue::String(value) => Ok(value.clone().into_bytes()),
-        other => to_vec(other).map_err(|error| {
-            MqttCommandConversionError::InvalidPayload(format!(
-                "failed to serialize MQTT payload as JSON: {error}"
-            ))
-        }),
+        other => to_vec(other).map_err(MqttCommandConversionError::InvalidPayload),
     }
 }
 
@@ -152,8 +145,7 @@ pub fn build_publish_packet(
         MqttProtocolVersion::V5_0 => {
             let props = build_v5_publish_props(&publish)?;
             let mut builder = mqtt::packet::v5_0::Publish::builder()
-                .topic_name(topic.as_str())
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?
+                .topic_name(topic.as_str())?
                 .qos(qos)
                 .retain(publish.retain)
                 .payload(publish.payload)
@@ -167,13 +159,12 @@ pub fn build_publish_packet(
                     command_id: publish.command_id,
                     packet: MqttWirePacket::V5Publish(packet),
                 })
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+                .map_err(Into::into)
         }
         MqttProtocolVersion::V3_1_1 => {
             validate_v3_publish_support(&publish)?;
             let mut builder = mqtt::packet::v3_1_1::Publish::builder()
-                .topic_name(topic.as_str())
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?
+                .topic_name(topic.as_str())?
                 .qos(qos)
                 .retain(publish.retain)
                 .payload(publish.payload);
@@ -186,7 +177,7 @@ pub fn build_publish_packet(
                     command_id: publish.command_id,
                     packet: MqttWirePacket::V3Publish(packet),
                 })
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+                .map_err(Into::into)
         }
     }
 }
@@ -204,8 +195,7 @@ pub fn build_subscribe_packet(
     if let Some(retain_handling) = subscription.retain_handling {
         sub_opts = sub_opts.set_rh(retain_handling_from_core(retain_handling));
     }
-    let entry = mqtt::packet::SubEntry::new(topic.as_str(), sub_opts)
-        .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?;
+    let entry = mqtt::packet::SubEntry::new(topic.as_str(), sub_opts)?;
 
     match version {
         MqttProtocolVersion::V5_0 => {
@@ -219,7 +209,7 @@ pub fn build_subscribe_packet(
                     command_id: subscription.command_id.clone(),
                     packet: MqttWirePacket::V5Subscribe(packet),
                 })
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+                .map_err(Into::into)
         }
         MqttProtocolVersion::V3_1_1 => {
             validate_v3_subscribe_support(&subscription)?;
@@ -231,7 +221,7 @@ pub fn build_subscribe_packet(
                     command_id: subscription.command_id.clone(),
                     packet: MqttWirePacket::V3Subscribe(packet),
                 })
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+                .map_err(Into::into)
         }
     }
 }
@@ -248,28 +238,26 @@ pub fn build_unsubscribe_packet(
             let props = build_v5_unsubscribe_props(&subscription)?;
             mqtt::packet::v5_0::Unsubscribe::builder()
                 .packet_id(1u16)
-                .entries(vec![topic.as_str()])
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?
+                .entries(vec![topic.as_str()])?
                 .props(props)
                 .build()
                 .map(|packet| MqttPacketRequest {
                     command_id: subscription.command_id.clone(),
                     packet: MqttWirePacket::V5Unsubscribe(packet),
                 })
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+                .map_err(Into::into)
         }
         MqttProtocolVersion::V3_1_1 => {
             validate_v3_subscribe_support(&subscription)?;
             mqtt::packet::v3_1_1::Unsubscribe::builder()
                 .packet_id(1u16)
-                .entries(vec![topic.as_str()])
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?
+                .entries(vec![topic.as_str()])?
                 .build()
                 .map(|packet| MqttPacketRequest {
                     command_id: subscription.command_id,
                     packet: MqttWirePacket::V3Unsubscribe(packet),
                 })
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))
+                .map_err(Into::into)
         }
     }
 }
@@ -284,20 +272,17 @@ pub fn build_v5_publish_props(
             mqtt::packet::PayloadFormatIndicator::new(match payload_format {
                 MqttPayloadFormat::Bytes => mqtt::packet::PayloadFormat::Binary,
                 MqttPayloadFormat::Utf8 => mqtt::packet::PayloadFormat::String,
-            })
-            .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            })?,
         ));
     }
     if let Some(expiry) = publish.message_expiry_interval_secs {
         props.push(mqtt::packet::Property::MessageExpiryInterval(
-            mqtt::packet::MessageExpiryInterval::new(expiry)
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::MessageExpiryInterval::new(expiry)?,
         ));
     }
     if let Some(topic_alias) = publish.topic_alias {
         props.push(mqtt::packet::Property::TopicAlias(
-            mqtt::packet::TopicAlias::new(topic_alias)
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::TopicAlias::new(topic_alias)?,
         ));
     }
 
@@ -307,14 +292,12 @@ pub fn build_v5_publish_props(
         .or(publish.reply_to.as_ref())
     {
         props.push(mqtt::packet::Property::ResponseTopic(
-            mqtt::packet::ResponseTopic::new(reply_to.as_str())
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::ResponseTopic::new(reply_to.as_str())?,
         ));
     }
     if let Some(content_type) = &publish.content_type {
         props.push(mqtt::packet::Property::ContentType(
-            mqtt::packet::ContentType::new(content_type.as_str())
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::ContentType::new(content_type.as_str())?,
         ));
     }
 
@@ -333,23 +316,20 @@ pub fn build_v5_publish_props(
     });
     if let Some(correlation_data) = correlation_data {
         props.push(mqtt::packet::Property::CorrelationData(
-            mqtt::packet::CorrelationData::new(correlation_data)
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::CorrelationData::new(correlation_data)?,
         ));
     }
 
     for (key, value) in &publish.headers {
         if !key.eq_ignore_ascii_case("content-type") {
             props.push(mqtt::packet::Property::UserProperty(
-                mqtt::packet::UserProperty::new(key.as_str(), value.as_str())
-                    .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+                mqtt::packet::UserProperty::new(key.as_str(), value.as_str())?,
             ));
         }
     }
     for (key, value) in &publish.user_properties {
         props.push(mqtt::packet::Property::UserProperty(
-            mqtt::packet::UserProperty::new(key.as_str(), value.as_str())
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::UserProperty::new(key.as_str(), value.as_str())?,
         ));
     }
 
@@ -363,14 +343,12 @@ pub fn build_v5_subscribe_props(
 
     if let Some(subscription_identifier) = subscription.subscription_identifier {
         props.push(mqtt::packet::Property::SubscriptionIdentifier(
-            mqtt::packet::SubscriptionIdentifier::new(subscription_identifier)
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::SubscriptionIdentifier::new(subscription_identifier)?,
         ));
     }
     for (key, value) in &subscription.user_properties {
         props.push(mqtt::packet::Property::UserProperty(
-            mqtt::packet::UserProperty::new(key.as_str(), value.as_str())
-                .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+            mqtt::packet::UserProperty::new(key.as_str(), value.as_str())?,
         ));
     }
 
@@ -382,8 +360,7 @@ pub fn build_v5_unsubscribe_props(
 ) -> Result<mqtt::packet::Properties, MqttCommandConversionError> {
     let mut props = mqtt::packet::Properties::new();
     props.push(mqtt::packet::Property::UserProperty(
-        mqtt::packet::UserProperty::new("ferredge-command-id", subscription.command_id.as_str())
-            .map_err(|e| MqttCommandConversionError::PacketBuild(e.to_string()))?,
+        mqtt::packet::UserProperty::new("ferredge-command-id", subscription.command_id.as_str())?,
     ));
     Ok(props)
 }
@@ -395,8 +372,8 @@ pub fn mqtt_topic_from_address(
         None | Some(BrokerChannelKind::Topic) | Some(BrokerChannelKind::Subject) => {
             Ok(value.name.clone())
         }
-        Some(BrokerChannelKind::Queue) | Some(BrokerChannelKind::Stream) => {
-            Err(MqttCommandConversionError::UnsupportedChannelKind)
+        Some(kind @ (BrokerChannelKind::Queue | BrokerChannelKind::Stream)) => {
+            Err(MqttCommandConversionError::UnsupportedChannelKind(kind))
         }
     }
 }
@@ -436,9 +413,7 @@ fn validate_v3_publish_support(
         || publish.reply_to.is_some()
         || publish.correlation_id.is_some()
     {
-        return Err(MqttCommandConversionError::InvalidCommand(
-            "MQTT 3.1.1 publish does not support MQTT v5 properties".to_string(),
-        ));
+        return Err(MqttCommandConversionError::MqttV5PublishOptionsOnV3);
     }
     Ok(())
 }
@@ -453,10 +428,7 @@ fn validate_v3_subscribe_support(
         || !subscription.user_properties.is_empty()
         || subscription.durable_name.is_some()
     {
-        return Err(MqttCommandConversionError::InvalidCommand(
-            "MQTT 3.1.1 subscribe does not support requested MQTT v5 subscription options"
-                .to_string(),
-        ));
+        return Err(MqttCommandConversionError::MqttV5SubscriptionOptionsOnV3);
     }
     Ok(())
 }
