@@ -44,8 +44,8 @@ pub(crate) use runtime_stack::{
     StackDatagramSocket, StackNet, StackRuntime, StackSerial, StackSerialPort, StackSocket,
 };
 
-pub use types::{
-    ModbusCommandConversionError, ModbusDriver, ModbusParserSeed, ModbusRequest, ModbusResponse,
-    ModbusResponseDecoder,
-};
 pub use convert::ModbusBridgeCodec;
+pub use types::{
+    ModbusBridgeAdapter, ModbusCommandConversionError, ModbusDriver, ModbusParserSeed,
+    ModbusRequest, ModbusResponse, ModbusResponseDecoder,
+};

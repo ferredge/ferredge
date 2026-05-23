@@ -8,8 +8,8 @@ use alloc::{
 };
 
 use ferredge_bridge::{
-    BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, BridgePlannerError, RequestResponseAction,
-    planner,
+    BridgeAdapter, BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, BridgePlannerError,
+    RequestResponseAction, planner,
 };
 use ferredge_core::prelude::*;
 
@@ -118,6 +118,9 @@ pub struct HttpBridgeCodec<'a> {
     device: &'a Device<attributes::HttpResourceAttributes>,
 }
 
+/// Bridge adapter for HTTP request/response semantics.
+pub struct HttpBridgeAdapter;
+
 impl HttpDriver {
     /// Creates a new HTTP driver from device metadata.
     pub fn new(dvc: Device<attributes::HttpResourceAttributes>) -> Self {
@@ -144,6 +147,22 @@ impl HttpDriver {
     ) -> Result<HttpRequest, HttpCommandConversionError> {
         let message = planner::command_to_request_response(command)?;
         HttpBridgeCodec { device: &self.dvc }.encode(&message)
+    }
+}
+
+impl BridgeAdapter for HttpBridgeAdapter {
+    type Error = BridgePlannerError;
+
+    fn command_to_bridge(&self, command: &Command) -> Result<BridgeMessage, Self::Error> {
+        planner::command_to_request_response(command)
+    }
+
+    fn event_to_bridge(&self, event: &RoutedEvent) -> Result<BridgeMessage, Self::Error> {
+        Ok(planner::routed_event_to_bridge(event))
+    }
+
+    fn result_to_bridge(&self, result: &RoutedResult) -> Result<BridgeMessage, Self::Error> {
+        Ok(planner::routed_result_to_bridge(result))
     }
 }
 

@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
-use ferredge_bridge::{BridgeCodec, planner};
+use ferredge_bridge::{BridgeAdapter, BridgeCodec, BridgeMessage, planner};
 use ferredge_core::prelude::*;
 
 mod convert;
@@ -60,6 +60,9 @@ pub use types::{
 
 #[cfg(feature = "std")]
 type MqttAuthHandler = Shared<dyn MqttAuthProvider>;
+
+/// Bridge adapter for MQTT messaging semantics.
+pub struct MqttBridgeAdapter;
 
 const MQTT_CONNECT_IO_TIMEOUT_MS: u64 = 1_000;
 const MQTT_ACK_READ_TIMEOUT_MS: u64 = 250;
@@ -1338,5 +1341,21 @@ fn planner_message_for_command(
             planner::command_to_messaging(command).map_err(Into::into)
         }
         _ => Err(MqttCommandConversionError::UnsupportedIntent),
+    }
+}
+
+impl BridgeAdapter for MqttBridgeAdapter {
+    type Error = MqttCommandConversionError;
+
+    fn command_to_bridge(&self, command: &Command) -> Result<BridgeMessage, Self::Error> {
+        planner_message_for_command(command)
+    }
+
+    fn event_to_bridge(&self, event: &RoutedEvent) -> Result<BridgeMessage, Self::Error> {
+        Ok(planner::routed_event_to_bridge(event))
+    }
+
+    fn result_to_bridge(&self, result: &RoutedResult) -> Result<BridgeMessage, Self::Error> {
+        Ok(planner::routed_result_to_bridge(result))
     }
 }

@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
-use ferredge_bridge::{BridgeCodec, BridgePlannerError, planner};
+use ferredge_bridge::{BridgeAdapter, BridgeCodec, BridgeMessage, BridgePlannerError, planner};
 use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
@@ -102,6 +102,11 @@ pub(crate) struct ModbusCommandRef<'a> {
     pub device: &'a Device<ModbusResourceAttributes>,
 }
 
+/// Bridge adapter for Modbus register-access semantics.
+pub struct ModbusBridgeAdapter<'a> {
+    device: &'a Device<ModbusResourceAttributes>,
+}
+
 pub(crate) enum PersistentSession {
     Tcp(StackSocket),
     Rtu(StackSerialPort),
@@ -186,5 +191,68 @@ impl ModbusDriver {
         )?;
 
         crate::ModbusBridgeCodec::new(&self.dvc, &resource, &attributes).encode(&message)
+    }
+}
+
+impl<'a> ModbusBridgeAdapter<'a> {
+    /// Creates a bridge adapter bound to one Modbus device definition.
+    pub fn new(device: &'a Device<ModbusResourceAttributes>) -> Self {
+        Self { device }
+    }
+}
+
+impl BridgeAdapter for ModbusBridgeAdapter<'_> {
+    type Error = ModbusCommandConversionError;
+
+    fn command_to_bridge(&self, command: &Command) -> Result<BridgeMessage, Self::Error> {
+        let (_resource, attributes) = match &command.intent {
+            Intent::Read { resource } | Intent::Write { resource, .. } => {
+                let resource_def = self.device.resources.get(resource).ok_or_else(|| {
+                    ModbusCommandConversionError::UnknownResource(resource.clone())
+                })?;
+                (resource.clone(), resource_def.resource_attributes.clone())
+            }
+            _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
+        };
+
+        let unit_id = endpoint_options(&self.device.endpoint)
+            .ok_or_else(|| {
+                ModbusCommandConversionError::InvalidResource(
+                    "missing Modbus endpoint options".to_string(),
+                )
+            })?
+            .unit_id;
+
+        planner::command_to_register_access(
+            command,
+            ferredge_bridge::RegisterMeta {
+                address: attributes.address,
+                kind: match attributes.register_kind {
+                    crate::attributes::ModbusRegisterKind::Coil => {
+                        ferredge_bridge::RegisterKind::Coil
+                    }
+                    crate::attributes::ModbusRegisterKind::DiscreteInput => {
+                        ferredge_bridge::RegisterKind::DiscreteInput
+                    }
+                    crate::attributes::ModbusRegisterKind::HoldingRegister => {
+                        ferredge_bridge::RegisterKind::HoldingRegister
+                    }
+                    crate::attributes::ModbusRegisterKind::InputRegister => {
+                        ferredge_bridge::RegisterKind::InputRegister
+                    }
+                },
+                quantity: attributes.quantity,
+            },
+            unit_id,
+        )
+        .map_err(Into::into)
+    }
+
+    fn event_to_bridge(&self, event: &RoutedEvent) -> Result<BridgeMessage, Self::Error> {
+        Ok(planner::routed_event_to_bridge(event))
+    }
+
+    fn result_to_bridge(&self, result: &RoutedResult) -> Result<BridgeMessage, Self::Error> {
+        Ok(planner::routed_result_to_bridge(result))
     }
 }

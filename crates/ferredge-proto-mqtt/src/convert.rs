@@ -24,7 +24,10 @@ pub struct MqttBridgeCodec<'a> {
 
 impl<'a> MqttBridgeCodec<'a> {
     /// Creates a codec bound to one MQTT device and source command context.
-    pub fn new(device: &'a Device<crate::types::MqttResourceAttributes>, command: &'a Command) -> Self {
+    pub fn new(
+        device: &'a Device<crate::types::MqttResourceAttributes>,
+        command: &'a Command,
+    ) -> Self {
         Self {
             value: MqttCommandRef { device, command },
         }
