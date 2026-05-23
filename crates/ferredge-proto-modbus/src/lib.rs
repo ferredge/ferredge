@@ -45,6 +45,6 @@ pub(crate) use runtime_stack::{
 };
 
 pub use types::{
-    ModbusCommandConversionError, ModbusCommandRef, ModbusDriver, ModbusParserSeed, ModbusRequest,
-    ModbusResponse, ModbusResponseDecoder,
+    ModbusCommandConversionError, ModbusDriver, ModbusParserSeed, ModbusRequest, ModbusResponse,
+    ModbusResponseDecoder,
 };

@@ -1,0 +1,17 @@
+[package]
+name = "ferredge-bridge"
+description = "Shared bridge intermediate representation for ferredge protocols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+std = ["ferredge-core/std", "serde/std"]
+
+[dependencies]
+ferredge-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

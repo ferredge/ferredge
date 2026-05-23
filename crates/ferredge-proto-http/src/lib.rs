@@ -7,6 +7,10 @@ use alloc::{
     vec::Vec,
 };
 
+use ferredge_bridge::{
+    BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, BridgePlannerError, RequestResponseAction,
+    planner,
+};
 use ferredge_core::prelude::*;
 
 pub mod attributes;
@@ -73,6 +77,12 @@ pub enum HttpCommandConversionError {
     /// Payload type cannot be represented as an HTTP request body.
     #[error("invalid HTTP payload: {0}")]
     InvalidPayload(String),
+    /// Bridge layer rejected semantic planning.
+    #[error("invalid bridge request: {0}")]
+    Bridge(#[from] BridgePlannerError),
+    /// Bridge message kind cannot be represented as outbound HTTP request.
+    #[error("bridge message does not describe an HTTP request")]
+    InvalidBridgeMessage,
 }
 
 /// HTTP protocol adapter implementing lifecycle and request/response capabilities.
@@ -104,13 +114,8 @@ impl core::fmt::Debug for HttpDriver {
     }
 }
 
-/// Viewer that carries enough context to convert routed command into native HTTP request.
-#[derive(Debug, Clone, Copy)]
-pub struct HttpCommandRef<'a> {
-    /// Driver-side device metadata used to resolve resources.
-    pub device: &'a Device<attributes::HttpResourceAttributes>,
-    /// Routed command to convert.
-    pub command: &'a Command,
+pub struct HttpBridgeCodec<'a> {
+    device: &'a Device<attributes::HttpResourceAttributes>,
 }
 
 impl HttpDriver {
@@ -132,61 +137,79 @@ impl HttpDriver {
             net: StackNet::default(),
         }
     }
-}
 
-impl TryFrom<HttpCommandRef<'_>> for HttpRequest {
-    type Error = HttpCommandConversionError;
-
-    fn try_from(value: HttpCommandRef<'_>) -> Result<Self, Self::Error> {
-        match &value.command.intent {
-            Intent::Read { resource }
-            | Intent::Invoke {
-                operation: resource,
-                ..
-            } => value
-                .device
-                .resources
-                .get(resource)
-                .map(|resource| HttpRequest {
-                    method: resource.resource_attributes.method.clone(),
-                    path: resource.resource_attributes.slug.clone(),
-                    body: None,
-                    headers: resource
-                        .resource_attributes
-                        .headers
-                        .clone()
-                        .unwrap_or_default(),
-                })
-                .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.clone())),
-            Intent::Write { resource, payload } => value
-                .device
-                .resources
-                .get(resource)
-                .map(|resource| {
-                    Ok(HttpRequest {
-                        method: resource.resource_attributes.method.clone(),
-                        path: resource.resource_attributes.slug.clone(),
-                        body: Some(http_body_from_payload(payload)?),
-                        headers: resource
-                            .resource_attributes
-                            .headers
-                            .clone()
-                            .unwrap_or_default(),
-                    })
-                })
-                .transpose()?
-                .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.clone())),
-            Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
-                Err(HttpCommandConversionError::UnsupportedIntent)
-            }
-        }
+    pub fn bridge_request(
+        &self,
+        command: &Command,
+    ) -> Result<HttpRequest, HttpCommandConversionError> {
+        let message = planner::command_to_request_response(command)?;
+        HttpBridgeCodec { device: &self.dvc }.encode(&message)
     }
 }
 
-fn http_body_from_payload(payload: &PayloadValue) -> Result<Vec<u8>, HttpCommandConversionError> {
+impl<'a> HttpBridgeCodec<'a> {
+    pub fn new(device: &'a Device<attributes::HttpResourceAttributes>) -> Self {
+        Self { device }
+    }
+}
+
+impl BridgeCodec<HttpRequest> for HttpBridgeCodec<'_> {
+    type Error = HttpCommandConversionError;
+
+    fn encode(&self, message: &BridgeMessage) -> Result<HttpRequest, Self::Error> {
+        let BridgeMessage::Command(command) = message else {
+            return Err(HttpCommandConversionError::InvalidBridgeMessage);
+        };
+        let BridgeOp::RequestResponse(operation) = &command.operation else {
+            return Err(HttpCommandConversionError::InvalidBridgeMessage);
+        };
+        let resource = command
+            .meta
+            .resource
+            .as_ref()
+            .ok_or(HttpCommandConversionError::InvalidBridgeMessage)?;
+        let resource_def = self
+            .device
+            .resources
+            .get(resource)
+            .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.clone()))?;
+        let body = match operation.action {
+            RequestResponseAction::Read | RequestResponseAction::Invoke => command
+                .payload
+                .as_ref()
+                .map(http_body_from_bridge_payload)
+                .transpose()?,
+            RequestResponseAction::Write => command
+                .payload
+                .as_ref()
+                .map(http_body_from_bridge_payload)
+                .transpose()?,
+        };
+
+        Ok(HttpRequest {
+            method: resource_def.resource_attributes.method.clone(),
+            path: resource_def.resource_attributes.slug.clone(),
+            body,
+            headers: resource_def
+                .resource_attributes
+                .headers
+                .clone()
+                .unwrap_or_default(),
+        })
+    }
+
+    fn decode(&self, _native: HttpRequest) -> Result<BridgeMessage, Self::Error> {
+        Err(HttpCommandConversionError::InvalidBridgeMessage)
+    }
+}
+
+fn http_body_from_bridge_payload(
+    payload: &BridgePayload,
+) -> Result<Vec<u8>, HttpCommandConversionError> {
     match payload {
-        PayloadValue::Bytes(bytes) => Ok(bytes.clone()),
-        PayloadValue::String(value) => Ok(value.clone().into_bytes()),
+        BridgePayload::Binary(bytes) => Ok(bytes.clone()),
+        BridgePayload::Text(value) => Ok(value.clone().into_bytes()),
+        BridgePayload::Empty => Ok(Vec::new()),
         _ => Err(HttpCommandConversionError::InvalidPayload(
             "HTTP bodies currently support only string or bytes payloads".to_string(),
         )),
@@ -297,11 +320,9 @@ mod tests {
             correlation: None,
         };
 
-        let request = HttpRequest::try_from(HttpCommandRef {
-            device: &driver.dvc,
-            command: &command,
-        })
-        .expect("read intent should convert");
+        let request = driver
+            .bridge_request(&command)
+            .expect("read intent should convert");
 
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/api/temp");
@@ -326,11 +347,9 @@ mod tests {
             correlation: None,
         };
 
-        let request = HttpRequest::try_from(HttpCommandRef {
-            device: &driver.dvc,
-            command: &command,
-        })
-        .expect("write intent should convert");
+        let request = driver
+            .bridge_request(&command)
+            .expect("write intent should convert");
 
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/api/setpoint");
@@ -355,12 +374,13 @@ mod tests {
             correlation: None,
         };
 
-        let error = HttpRequest::try_from(HttpCommandRef {
-            device: &driver.dvc,
-            command: &command,
-        })
-        .expect_err("broker send intent should be unsupported");
+        let error = driver
+            .bridge_request(&command)
+            .expect_err("broker send intent should be unsupported");
 
-        assert_eq!(error, HttpCommandConversionError::UnsupportedIntent);
+        assert_eq!(
+            error,
+            HttpCommandConversionError::Bridge(BridgePlannerError::UnsupportedIntent)
+        );
     }
 }

@@ -7,6 +7,7 @@ use std::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec};
 
+use ferredge_bridge::{BridgeMessage, BridgeOp, BridgePayload, MessagingAction};
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use serde_json::to_vec;
@@ -16,104 +17,122 @@ use crate::types::{
     MqttSubscriptionRequest, MqttWirePacket,
 };
 
-impl TryFrom<&Command> for MqttPublishRequest {
-    type Error = MqttCommandConversionError;
+pub(crate) fn encode_packet_request(
+    value: MqttCommandRef<'_>,
+    message: &BridgeMessage,
+) -> Result<MqttPacketRequest, MqttCommandConversionError> {
+    let config = value.endpoint_config()?;
+    let version = config.preferred_protocol_version();
+    let BridgeMessage::Command(command) = message else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
+    let BridgeOp::Messaging(operation) = &command.operation else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
 
-    fn try_from(command: &Command) -> Result<Self, Self::Error> {
-        match &command.intent {
-            Intent::Send {
-                channel,
-                payload,
-                options,
-            } => {
-                let mqtt = match &options.protocol {
-                    Some(BrokerMessageProtocolOptions::Mqtt(mqtt)) => mqtt.clone(),
-                    None => MqttMessageOptions::default(),
-                };
-                Ok(Self {
-                    command_id: command.id.clone(),
-                    channel: channel.clone(),
-                    payload: mqtt_payload_bytes(payload)?,
-                    delivery: options.delivery,
-                    retain: mqtt.retain,
-                    payload_format: mqtt.payload_format,
-                    content_type: mqtt.content_type,
-                    message_expiry_interval_secs: mqtt.message_expiry_interval_secs,
-                    topic_alias: mqtt.topic_alias,
-                    headers: options.headers.clone(),
-                    user_properties: mqtt.user_properties,
-                    reply_to: options.reply_to.clone(),
-                    response_topic: mqtt.response_topic,
-                    correlation_id: options.correlation_id.clone(),
-                    correlation_data: mqtt.correlation_data,
-                })
-            }
-            _ => Err(MqttCommandConversionError::UnsupportedIntent),
-        }
+    match operation.action {
+        MessagingAction::Publish => build_publish_packet(value.command, message, version),
+        MessagingAction::Subscribe => build_subscribe_packet(value.command, message, version),
+        MessagingAction::Unsubscribe => build_unsubscribe_packet(value.command, message, version),
     }
 }
 
-fn mqtt_payload_bytes(payload: &PayloadValue) -> Result<Vec<u8>, MqttCommandConversionError> {
+fn mqtt_payload_bytes(payload: &BridgePayload) -> Result<Vec<u8>, MqttCommandConversionError> {
     match payload {
-        PayloadValue::Bytes(bytes) => Ok(bytes.clone()),
-        PayloadValue::String(value) => Ok(value.clone().into_bytes()),
-        other => to_vec(other).map_err(MqttCommandConversionError::InvalidPayload),
+        BridgePayload::Binary(bytes) => Ok(bytes.clone()),
+        BridgePayload::Text(value) => Ok(value.clone().into_bytes()),
+        BridgePayload::Empty => Ok(Vec::new()),
+        other => to_vec(&PayloadValue::from(other.clone()))
+            .map_err(MqttCommandConversionError::InvalidPayload),
     }
 }
 
-impl TryFrom<&Command> for MqttSubscriptionRequest {
-    type Error = MqttCommandConversionError;
+fn publish_request_from_bridge(
+    command: &Command,
+    message: &BridgeMessage,
+) -> Result<MqttPublishRequest, MqttCommandConversionError> {
+    let BridgeMessage::Command(bridge) = message else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
+    let Intent::Send {
+        channel, options, ..
+    } = &command.intent
+    else {
+        return Err(MqttCommandConversionError::UnsupportedIntent);
+    };
+    let mqtt = match &options.protocol {
+        Some(BrokerMessageProtocolOptions::Mqtt(mqtt)) => mqtt.clone(),
+        None => MqttMessageOptions::default(),
+    };
+    Ok(MqttPublishRequest {
+        command_id: bridge.id.clone(),
+        channel: channel.clone(),
+        payload: mqtt_payload_bytes(
+            bridge
+                .payload
+                .as_ref()
+                .ok_or(MqttCommandConversionError::InvalidBridgeMessage)?,
+        )?,
+        delivery: options.delivery,
+        retain: mqtt.retain,
+        payload_format: mqtt.payload_format,
+        content_type: mqtt
+            .content_type
+            .or_else(|| bridge.meta.content_type.clone()),
+        message_expiry_interval_secs: mqtt.message_expiry_interval_secs,
+        topic_alias: mqtt.topic_alias,
+        headers: options.headers.clone(),
+        user_properties: mqtt.user_properties,
+        reply_to: options.reply_to.clone(),
+        response_topic: mqtt.response_topic,
+        correlation_id: options
+            .correlation_id
+            .clone()
+            .or_else(|| bridge.meta.correlation_id.clone()),
+        correlation_data: mqtt.correlation_data,
+    })
+}
 
-    fn try_from(command: &Command) -> Result<Self, Self::Error> {
-        match &command.intent {
-            Intent::Subscribe { channel, options } => {
-                let mqtt = match &options.protocol {
-                    Some(BrokerSubscriptionProtocolOptions::Mqtt(mqtt)) => mqtt.clone(),
-                    None => MqttSubscriptionOptions::default(),
-                };
-                Ok(Self {
-                    command_id: command.id.clone(),
-                    channel: channel.clone(),
-                    delivery: options.delivery,
-                    durable_name: options.durable_name.clone(),
-                    shared_group: options.shared_group.clone(),
-                    no_local: mqtt.no_local,
-                    retain_as_published: mqtt.retain_as_published,
-                    retain_handling: mqtt.retain_handling,
-                    subscription_identifier: mqtt.subscription_identifier,
-                    user_properties: mqtt.user_properties,
-                })
-            }
-            Intent::Unsubscribe { channel } => Ok(Self {
-                command_id: command.id.clone(),
+fn subscription_request_from_bridge(
+    command: &Command,
+    message: &BridgeMessage,
+) -> Result<MqttSubscriptionRequest, MqttCommandConversionError> {
+    let BridgeMessage::Command(bridge) = message else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
+
+    match &command.intent {
+        Intent::Subscribe { channel, options } => {
+            let mqtt = match &options.protocol {
+                Some(BrokerSubscriptionProtocolOptions::Mqtt(mqtt)) => mqtt.clone(),
+                None => MqttSubscriptionOptions::default(),
+            };
+            Ok(MqttSubscriptionRequest {
+                command_id: bridge.id.clone(),
                 channel: channel.clone(),
-                delivery: None,
-                durable_name: None,
-                shared_group: None,
-                no_local: false,
-                retain_as_published: false,
-                retain_handling: None,
-                subscription_identifier: None,
-                user_properties: Vec::new(),
-            }),
-            _ => Err(MqttCommandConversionError::UnsupportedIntent),
+                delivery: options.delivery,
+                durable_name: options.durable_name.clone(),
+                shared_group: options.shared_group.clone(),
+                no_local: mqtt.no_local,
+                retain_as_published: mqtt.retain_as_published,
+                retain_handling: mqtt.retain_handling,
+                subscription_identifier: mqtt.subscription_identifier,
+                user_properties: mqtt.user_properties,
+            })
         }
-    }
-}
-
-impl TryFrom<MqttCommandRef<'_>> for MqttPacketRequest {
-    type Error = MqttCommandConversionError;
-
-    fn try_from(value: MqttCommandRef<'_>) -> Result<Self, Self::Error> {
-        let config = value.endpoint_config()?;
-        let version = config.preferred_protocol_version();
-
-        match &value.command.intent {
-            Intent::Send { .. } => build_publish_packet(value.command, version),
-            Intent::Subscribe { .. } => build_subscribe_packet(value.command, version),
-            Intent::Unsubscribe { .. } => build_unsubscribe_packet(value.command, version),
-            _ => Err(MqttCommandConversionError::UnsupportedIntent),
-        }
+        Intent::Unsubscribe { channel } => Ok(MqttSubscriptionRequest {
+            command_id: bridge.id.clone(),
+            channel: channel.to_owned(),
+            delivery: None,
+            durable_name: None,
+            shared_group: None,
+            no_local: false,
+            retain_as_published: false,
+            retain_handling: None,
+            subscription_identifier: None,
+            user_properties: Vec::new(),
+        }),
+        _ => Err(MqttCommandConversionError::UnsupportedIntent),
     }
 }
 
@@ -134,9 +153,10 @@ pub fn packet_id_for_qos(qos: mqtt::packet::Qos) -> Option<u16> {
 
 pub fn build_publish_packet(
     command: &Command,
+    message: &BridgeMessage,
     version: MqttProtocolVersion,
 ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-    let publish = MqttPublishRequest::try_from(command)?;
+    let publish = publish_request_from_bridge(command, message)?;
     let topic = mqtt_topic_from_address(&publish.channel)?;
     let qos = qos_from_delivery(publish.delivery);
     let packet_id = packet_id_for_qos(qos);
@@ -184,9 +204,10 @@ pub fn build_publish_packet(
 
 pub fn build_subscribe_packet(
     command: &Command,
+    message: &BridgeMessage,
     version: MqttProtocolVersion,
 ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-    let subscription = MqttSubscriptionRequest::try_from(command)?;
+    let subscription = subscription_request_from_bridge(command, message)?;
     let topic = mqtt_topic_from_subscription(&subscription)?;
     let mut sub_opts =
         mqtt::packet::SubOpts::new().set_qos(qos_from_delivery(subscription.delivery));
@@ -228,9 +249,10 @@ pub fn build_subscribe_packet(
 
 pub fn build_unsubscribe_packet(
     command: &Command,
+    message: &BridgeMessage,
     version: MqttProtocolVersion,
 ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-    let subscription = MqttSubscriptionRequest::try_from(command)?;
+    let subscription = subscription_request_from_bridge(command, message)?;
     let topic = mqtt_topic_from_subscription(&subscription)?;
 
     match version {

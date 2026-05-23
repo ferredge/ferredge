@@ -372,6 +372,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "ferredge-bridge"
+version = "0.1.0"
+dependencies = [
+ "ferredge-core",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "ferredge-core"
 version = "0.1.0"
 dependencies = [
@@ -385,6 +394,7 @@ dependencies = [
 name = "ferredge-proto-http"
 version = "0.1.0"
 dependencies = [
+ "ferredge-bridge",
  "ferredge-core",
  "ferredge-runtime-async-std",
  "ferredge-runtime-embassy",
@@ -398,6 +408,7 @@ dependencies = [
 name = "ferredge-proto-modbus"
 version = "0.1.0"
 dependencies = [
+ "ferredge-bridge",
  "ferredge-core",
  "ferredge-runtime-async-std",
  "ferredge-runtime-embassy",
@@ -411,6 +422,7 @@ dependencies = [
 name = "ferredge-proto-mqtt"
 version = "0.1.0"
 dependencies = [
+ "ferredge-bridge",
  "ferredge-core",
  "ferredge-proto-http",
  "ferredge-runtime-async-std",

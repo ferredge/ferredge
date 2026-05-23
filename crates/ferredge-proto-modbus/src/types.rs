@@ -3,12 +3,13 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
+use ferredge_bridge::{BridgePlannerError, planner};
 use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
 use crate::{
     StackNet, StackRuntime, StackSerial, StackSerialPort, StackSocket,
-    attributes::ModbusResourceAttributes,
+    attributes::ModbusResourceAttributes, convert::endpoint_options,
 };
 
 type RuntimeMutex<T> = <StackRuntime as AsyncRuntime>::Mutex<T>;
@@ -45,6 +46,10 @@ pub enum ModbusCommandConversionError {
     InvalidPayload(String),
     #[error("resource {0} is not writable via Modbus")]
     UnsupportedWrite(String),
+    #[error("invalid bridge request: {0}")]
+    Bridge(#[from] BridgePlannerError),
+    #[error("bridge message does not describe a Modbus register request")]
+    InvalidBridgeMessage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,9 +98,8 @@ pub(crate) enum ModbusValue {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ModbusCommandRef<'a> {
+pub(crate) struct ModbusCommandRef<'a> {
     pub device: &'a Device<ModbusResourceAttributes>,
-    pub command: &'a Command,
 }
 
 pub(crate) enum PersistentSession {
@@ -134,11 +138,58 @@ impl ModbusDriver {
     }
 
     pub async fn execute_command(&self, command: &Command) -> Result<ModbusResponse, String> {
-        let request = ModbusRequest::try_from(ModbusCommandRef {
-            device: &self.dvc,
-            command,
-        })
-        .map_err(|e| e.to_string())?;
+        let request = self.bridge_request(command).map_err(|e| e.to_string())?;
         self.execute(request).await
+    }
+
+    pub fn bridge_request(
+        &self,
+        command: &Command,
+    ) -> Result<ModbusRequest, ModbusCommandConversionError> {
+        let (resource, attributes) = match &command.intent {
+            Intent::Read { resource } | Intent::Write { resource, .. } => {
+                let resource_def = self.dvc.resources.get(resource).ok_or_else(|| {
+                    ModbusCommandConversionError::UnknownResource(resource.clone())
+                })?;
+                (resource.clone(), resource_def.resource_attributes.clone())
+            }
+            _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
+        };
+
+        let message = planner::command_to_register_access(
+            command,
+            ferredge_bridge::RegisterMeta {
+                address: attributes.address,
+                kind: match attributes.register_kind {
+                    crate::attributes::ModbusRegisterKind::Coil => {
+                        ferredge_bridge::RegisterKind::Coil
+                    }
+                    crate::attributes::ModbusRegisterKind::DiscreteInput => {
+                        ferredge_bridge::RegisterKind::DiscreteInput
+                    }
+                    crate::attributes::ModbusRegisterKind::HoldingRegister => {
+                        ferredge_bridge::RegisterKind::HoldingRegister
+                    }
+                    crate::attributes::ModbusRegisterKind::InputRegister => {
+                        ferredge_bridge::RegisterKind::InputRegister
+                    }
+                },
+                quantity: attributes.quantity,
+            },
+            endpoint_options(&self.dvc.endpoint)
+                .ok_or_else(|| {
+                    ModbusCommandConversionError::InvalidResource(
+                        "missing Modbus endpoint options".to_string(),
+                    )
+                })?
+                .unit_id,
+        )?;
+
+        crate::convert::encode_request(
+            ModbusCommandRef { device: &self.dvc },
+            &message,
+            &resource,
+            &attributes,
+        )
     }
 }

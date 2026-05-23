@@ -2,57 +2,53 @@ extern crate alloc;
 
 use alloc::{string::ToString, vec::Vec};
 
+use ferredge_bridge::{BridgeMessage, BridgeOp, BridgePayload, RegisterAccessAction};
 use ferredge_core::prelude::*;
 use rmodbus::{ErrorKind as RmodbusError, ModbusProto, client::ModbusRequest as RmodbusRequest};
 
 use crate::{
-    ModbusCommandConversionError, ModbusCommandRef, ModbusParserSeed, ModbusRequest,
-    ModbusResponseDecoder,
+    ModbusCommandConversionError, ModbusParserSeed, ModbusRequest, ModbusResponseDecoder,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::encode_wire_frame,
+    types::ModbusCommandRef,
     types::ModbusValue,
 };
 
-impl TryFrom<ModbusCommandRef<'_>> for ModbusRequest {
-    type Error = ModbusCommandConversionError;
+pub(crate) fn encode_request(
+    value: ModbusCommandRef<'_>,
+    message: &BridgeMessage,
+    resource: &str,
+    attributes: &ModbusResourceAttributes,
+) -> Result<ModbusRequest, ModbusCommandConversionError> {
+    let proto = proto_from_endpoint(&value.device.endpoint).ok_or_else(|| {
+        ModbusCommandConversionError::InvalidResource("device endpoint is not Modbus".to_string())
+    })?;
+    let options = endpoint_options(&value.device.endpoint).ok_or_else(|| {
+        ModbusCommandConversionError::InvalidResource("missing Modbus endpoint options".to_string())
+    })?;
+    let BridgeMessage::Command(command) = message else {
+        return Err(ModbusCommandConversionError::InvalidBridgeMessage);
+    };
+    let BridgeOp::RegisterAccess(operation) = &command.operation else {
+        return Err(ModbusCommandConversionError::InvalidBridgeMessage);
+    };
 
-    fn try_from(value: ModbusCommandRef<'_>) -> Result<Self, Self::Error> {
-        let proto = proto_from_endpoint(&value.device.endpoint).ok_or_else(|| {
-            ModbusCommandConversionError::InvalidResource(
-                "device endpoint is not Modbus".to_string(),
-            )
-        })?;
-        let options = endpoint_options(&value.device.endpoint).ok_or_else(|| {
-            ModbusCommandConversionError::InvalidResource(
-                "missing Modbus endpoint options".to_string(),
-            )
-        })?;
-
-        match &value.command.intent {
-            Intent::Read { resource } => {
-                let resource_def = value.device.resources.get(resource).ok_or_else(|| {
-                    ModbusCommandConversionError::UnknownResource(resource.clone())
-                })?;
-                build_read_request(resource, &resource_def.resource_attributes, proto, options)
-            }
-            Intent::Write { resource, payload } => {
-                let resource_def = value.device.resources.get(resource).ok_or_else(|| {
-                    ModbusCommandConversionError::UnknownResource(resource.clone())
-                })?;
-                build_write_request(
-                    resource,
-                    &resource_def.resource_attributes,
-                    payload,
-                    proto,
-                    options,
-                )
-            }
-            Intent::Invoke { .. }
-            | Intent::Send { .. }
-            | Intent::Subscribe { .. }
-            | Intent::Unsubscribe { .. } => Err(ModbusCommandConversionError::UnsupportedIntent),
+    match operation.action {
+        RegisterAccessAction::Read => build_read_request(resource, attributes, proto, options),
+        RegisterAccessAction::Write => {
+            let payload = bridge_payload_to_payload_value(
+                command
+                    .payload
+                    .as_ref()
+                    .ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?,
+            );
+            build_write_request(resource, attributes, &payload, proto, options)
         }
     }
+}
+
+fn bridge_payload_to_payload_value(payload: &BridgePayload) -> PayloadValue {
+    PayloadValue::from(payload.clone())
 }
 
 fn build_read_request(

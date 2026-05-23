@@ -9,7 +9,7 @@ use rmodbus::{
 };
 
 use crate::{
-    ModbusCommandRef, ModbusDriver, ModbusRequest,
+    ModbusDriver, ModbusRequest,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::{decode_ascii_wire_frame, decode_modbus_response},
 };
@@ -188,11 +188,7 @@ fn simulate_response(request: &ModbusRequest, response_proto: ModbusProto) -> Ve
 #[test]
 fn build_read_request_for_holding_register() {
     let driver = make_driver(tcp_endpoint());
-    let request = ModbusRequest::try_from(ModbusCommandRef {
-        device: &driver.dvc,
-        command: &command_read("holding_u16"),
-    })
-    .unwrap();
+    let request = driver.bridge_request(&command_read("holding_u16")).unwrap();
 
     assert_eq!(request.proto, ModbusProto::TcpUdp);
     assert_eq!(request.decoder, crate::ModbusResponseDecoder::U16);
@@ -203,11 +199,7 @@ fn build_read_request_for_holding_register() {
 #[test]
 fn decode_tcp_holding_register_response() {
     let driver = make_driver(tcp_endpoint());
-    let request = ModbusRequest::try_from(ModbusCommandRef {
-        device: &driver.dvc,
-        command: &command_read("holding_u16"),
-    })
-    .unwrap();
+    let request = driver.bridge_request(&command_read("holding_u16")).unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, PayloadValue::U64(0x1234));
@@ -216,11 +208,7 @@ fn decode_tcp_holding_register_response() {
 #[test]
 fn decode_rtu_coil_response() {
     let driver = make_driver(rtu_endpoint());
-    let request = ModbusRequest::try_from(ModbusCommandRef {
-        device: &driver.dvc,
-        command: &command_read("coil_bit"),
-    })
-    .unwrap();
+    let request = driver.bridge_request(&command_read("coil_bit")).unwrap();
     let response = simulate_response(&request, ModbusProto::Rtu);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, PayloadValue::Bool(true));
@@ -229,11 +217,7 @@ fn decode_rtu_coil_response() {
 #[test]
 fn build_rtu_over_tcp_request_uses_rtu_proto() {
     let driver = make_driver(rtu_over_tcp_endpoint());
-    let request = ModbusRequest::try_from(ModbusCommandRef {
-        device: &driver.dvc,
-        command: &command_read("holding_u16"),
-    })
-    .unwrap();
+    let request = driver.bridge_request(&command_read("holding_u16")).unwrap();
 
     assert_eq!(request.proto, ModbusProto::Rtu);
     assert!(!request.is_write);
@@ -242,11 +226,9 @@ fn build_rtu_over_tcp_request_uses_rtu_proto() {
 #[test]
 fn decode_ascii_string_response() {
     let driver = make_driver(ascii_endpoint());
-    let request = ModbusRequest::try_from(ModbusCommandRef {
-        device: &driver.dvc,
-        command: &command_read("holding_text"),
-    })
-    .unwrap();
+    let request = driver
+        .bridge_request(&command_read("holding_text"))
+        .unwrap();
     let response = simulate_response(&request, ModbusProto::Ascii);
     let decoded = decode_ascii_wire_frame(&response).unwrap();
     let payload = decode_modbus_response(&request, &decoded).unwrap();
@@ -256,11 +238,9 @@ fn decode_ascii_string_response() {
 #[test]
 fn build_write_single_holding_request() {
     let driver = make_driver(tcp_endpoint());
-    let request = ModbusRequest::try_from(ModbusCommandRef {
-        device: &driver.dvc,
-        command: &command_write("holding_u16", PayloadValue::U64(0x4321)),
-    })
-    .unwrap();
+    let request = driver
+        .bridge_request(&command_write("holding_u16", PayloadValue::U64(0x4321)))
+        .unwrap();
 
     assert!(request.is_write);
     let response = simulate_response(&request, ModbusProto::TcpUdp);

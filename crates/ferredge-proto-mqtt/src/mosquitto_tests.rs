@@ -17,9 +17,7 @@ use ferredge_core::prelude::{
 };
 
 use crate::{
-    MqttDriver, MqttListenerStatus,
-    runtime_stack::StackRuntime,
-    types::{MqttCommandRef, MqttPacketRequest},
+    MqttDriver, MqttListenerStatus, runtime_stack::StackRuntime, types::MqttPacketRequest,
 };
 
 const MOSQUITTO_START_TIMEOUT_SECS: u64 = 5;
@@ -193,9 +191,8 @@ impl EventSink for RecordingSink {
 }
 
 fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
-    MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &Command {
+    driver
+        .bridge_packet_request(&Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -207,15 +204,13 @@ fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketReq
                 options: BrokerSubscriptionOptions::default(),
             },
             correlation: None,
-        },
-    })
-    .expect("subscribe packet should build")
+        })
+        .expect("subscribe packet should build")
 }
 
 fn unsubscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
-    MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &Command {
+    driver
+        .bridge_packet_request(&Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -226,9 +221,8 @@ fn unsubscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketR
                 },
             },
             correlation: None,
-        },
-    })
-    .expect("unsubscribe packet should build")
+        })
+        .expect("unsubscribe packet should build")
 }
 
 fn publish_packet(
@@ -238,9 +232,8 @@ fn publish_packet(
     payload: &[u8],
     options: BrokerMessageOptions,
 ) -> MqttPacketRequest {
-    MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &Command {
+    driver
+        .bridge_packet_request(&Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -253,9 +246,8 @@ fn publish_packet(
                 options,
             },
             correlation: None,
-        },
-    })
-    .expect("publish packet should build")
+        })
+        .expect("publish packet should build")
 }
 
 fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8]) -> RoutedEvent {
@@ -830,9 +822,8 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
     block_on(driver.start()).expect("driver should connect");
     block_on(
         driver.subscribe(
-            MqttPacketRequest::try_from(MqttCommandRef {
-                device: &driver.dvc,
-                command: &Command {
+            driver
+                .bridge_packet_request(&Command {
                     id: "subopts-sub".to_string(),
                     source_device_id: None,
                     target_device_id: driver.dvc.id.clone(),
@@ -854,9 +845,8 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
                         },
                     },
                     correlation: None,
-                },
-            })
-            .expect("subscribe packet should build"),
+                })
+                .expect("subscribe packet should build"),
             RecordingSink {
                 events: Arc::clone(&events),
             },
@@ -939,9 +929,8 @@ fn mosquitto_shared_subscriptions_load_balance() {
         block_on(driver.start()).expect("subscriber should connect");
         block_on(
             driver.subscribe(
-                MqttPacketRequest::try_from(MqttCommandRef {
-                    device: &driver.dvc,
-                    command: &Command {
+                driver
+                    .bridge_packet_request(&Command {
                         id: sub_id.to_string(),
                         source_device_id: None,
                         target_device_id: driver.dvc.id.clone(),
@@ -956,9 +945,8 @@ fn mosquitto_shared_subscriptions_load_balance() {
                             },
                         },
                         correlation: None,
-                    },
-                })
-                .expect("shared subscribe should build"),
+                    })
+                    .expect("shared subscribe should build"),
                 RecordingSink {
                     events: Arc::clone(&events),
                 },

@@ -8,19 +8,17 @@ use std::{
     time::Duration,
 };
 
+use ferredge_bridge::planner;
 use ferredge_core::prelude::{
-    ActionEmitter, Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
+    Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
     BrokerSubscriptionProtocolOptions, ChannelReceiver, Command, Correlation, DeliveryGuarantee,
     Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent,
     Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions,
     MqttPayloadFormat, MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions,
-    MqttWillConfig, PayloadValue, ProtocolBridge, PubSub, RoutedEvent, RoutedMessage, RoutedResult,
-    TransportMeta,
+    MqttWillConfig, PayloadValue, PubSub, RoutedEvent, RoutedMessage, TransportMeta,
 };
-use ferredge_proto_http::{
-    HttpCommandRef, HttpDriver, HttpRequest, attributes::HttpResourceAttributes,
-};
+use ferredge_proto_http::{HttpDriver, attributes::HttpResourceAttributes};
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
@@ -29,7 +27,7 @@ use crate::{
     MqttListenerStatus,
     runtime::{build_connect_packet, normalize_broker_addr, routed_message_from_packet},
     runtime_stack::StackRuntime,
-    types::{MqttCommandRef, MqttPacketRequest, MqttWirePacket},
+    types::{MqttPacketRequest, MqttWirePacket},
 };
 
 type RuntimeReceiver<T> = <StackRuntime as AsyncRuntime>::Receiver<T>;
@@ -68,6 +66,12 @@ fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> 
 
 fn make_default_driver() -> MqttDriver {
     make_driver("mqtt://broker".to_string(), vec![MqttProtocolVersion::V5_0])
+}
+
+fn packet_request(driver: &MqttDriver, command: &Command) -> MqttPacketRequest {
+    driver
+        .bridge_packet_request(command)
+        .expect("mqtt packet should build")
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -358,84 +362,6 @@ impl EventSink for RecordingSink {
     }
 }
 
-struct CollectEmitter(Vec<RoutedMessage>);
-
-impl ActionEmitter for CollectEmitter {
-    type Error = ();
-
-    fn emit(&mut self, action: RoutedMessage) -> Result<(), Self::Error> {
-        self.0.push(action);
-        Ok(())
-    }
-}
-
-struct TestBridge;
-
-impl ProtocolBridge for TestBridge {
-    type Error = ();
-
-    async fn bridge_command<E>(&self, command: &Command, emitter: &mut E) -> Result<(), Self::Error>
-    where
-        E: ActionEmitter + Send,
-    {
-        if let Intent::Read { resource } = &command.intent {
-            emitter
-                .emit(RoutedMessage::Command(Command {
-                    id: format!("{}-mqtt", command.id),
-                    source_device_id: Some(command.target_device_id.clone()),
-                    target_device_id: "mqtt-device-1".to_string(),
-                    intent: Intent::Send {
-                        channel: BrokerAddress {
-                            name: format!("requests/{resource}"),
-                            kind: Some(BrokerChannelKind::Topic),
-                        },
-                        payload: PayloadValue::Bytes(Vec::new()),
-                        options: BrokerMessageOptions::default(),
-                    },
-                    correlation: command.correlation.clone(),
-                }))
-                .map_err(|_| ())?;
-        }
-        Ok(())
-    }
-
-    async fn bridge_event<E>(&self, event: &RoutedEvent, emitter: &mut E) -> Result<(), Self::Error>
-    where
-        E: ActionEmitter + Send,
-    {
-        if let Address::Channel(channel) = &event.address
-            && channel == "sensors/temp"
-        {
-            emitter
-                .emit(RoutedMessage::Command(Command {
-                    id: "bridge-http-write".to_string(),
-                    source_device_id: Some(event.source.device_id.clone()),
-                    target_device_id: "http-device-1".to_string(),
-                    intent: Intent::Write {
-                        resource: "setpoint".to_string(),
-                        payload: event.payload.clone(),
-                    },
-                    correlation: event.correlation.clone(),
-                }))
-                .map_err(|_| ())?;
-        }
-        Ok(())
-    }
-
-    async fn bridge_result<E>(
-        &self,
-        result: &RoutedResult,
-        emitter: &mut E,
-    ) -> Result<(), Self::Error>
-    where
-        E: ActionEmitter + Send,
-    {
-        emitter
-            .emit(RoutedMessage::Result(result.clone()))
-            .map_err(|_| ())
-    }
-}
-
 fn make_http_driver() -> HttpDriver {
     let mut resources = Map::default();
     resources.insert(
@@ -490,11 +416,7 @@ fn mqtt_send_prefers_v5_packet_when_available() {
         correlation: None,
     };
 
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &command,
-    })
-    .expect("v5 publish should build");
+    let packet = packet_request(&driver, &command);
 
     assert_eq!(packet.command_id, "cmd-1");
     assert!(matches!(packet.packet, MqttWirePacket::V5Publish(_)));
@@ -521,11 +443,7 @@ fn mqtt_send_falls_back_to_v3_when_v5_not_available() {
         correlation: None,
     };
 
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &command,
-    })
-    .expect("v3 publish should build");
+    let packet = packet_request(&driver, &command);
 
     assert_eq!(packet.command_id, "cmd-2");
     assert!(matches!(packet.packet, MqttWirePacket::V3Publish(_)));
@@ -562,11 +480,7 @@ fn mqtt_subscribe_builds_version_specific_packet() {
         correlation: None,
     };
 
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &command,
-    })
-    .expect("subscribe should build");
+    let packet = packet_request(&driver, &command);
 
     assert_eq!(packet.command_id, "cmd-3");
     match packet.packet {
@@ -624,11 +538,7 @@ fn mqtt_v5_publish_maps_retain_alias_and_expiry_properties() {
         correlation: None,
     };
 
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &command,
-    })
-    .expect("v5 publish should build");
+    let packet = packet_request(&driver, &command);
 
     match packet.packet {
         MqttWirePacket::V5Publish(packet) => {
@@ -678,11 +588,7 @@ fn mqtt_unsubscribe_v5_includes_command_id_user_property() {
         correlation: None,
     };
 
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &command,
-    })
-    .expect("unsubscribe should build");
+    let packet = packet_request(&driver, &command);
 
     match packet.packet {
         MqttWirePacket::V5Unsubscribe(packet) => {
@@ -728,11 +634,7 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
         correlation: None,
     };
 
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &command,
-    })
-    .expect("v5 publish should build");
+    let packet = packet_request(&driver, &command);
 
     match packet.packet {
         MqttWirePacket::V5Publish(packet) => {
@@ -783,11 +685,7 @@ fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
         correlation: None,
     };
 
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &command,
-    })
-    .expect("v5 publish should build");
+    let packet = packet_request(&driver, &command);
 
     match packet.packet {
         MqttWirePacket::V5Publish(packet) => {
@@ -1184,9 +1082,7 @@ fn mqtt_listener_reports_failed_when_sink_rejects_event() {
 
 #[test]
 fn bridge_can_translate_mqtt_event_into_http_request() {
-    let bridge = TestBridge;
     let http = make_http_driver();
-    let mut emitter = CollectEmitter(Vec::new());
     let event = RoutedEvent {
         source: ferredge_core::prelude::EndpointRef {
             device_id: "mqtt-device-1".to_string(),
@@ -1198,16 +1094,20 @@ fn bridge_can_translate_mqtt_event_into_http_request() {
         transport: None,
     };
 
-    block_on(bridge.bridge_event(&event, &mut emitter)).expect("bridge should succeed");
-    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command")
-    else {
-        panic!("expected bridged command");
+    let _bridge_event = planner::routed_event_to_bridge(&event);
+    let command = Command {
+        id: "bridge-http-write".to_string(),
+        source_device_id: Some(event.source.device_id.clone()),
+        target_device_id: "http-device-1".to_string(),
+        intent: Intent::Write {
+            resource: "setpoint".to_string(),
+            payload: event.payload.clone(),
+        },
+        correlation: event.correlation.clone(),
     };
-    let request = HttpRequest::try_from(HttpCommandRef {
-        device: &http.dvc,
-        command: &command,
-    })
-    .expect("bridged command should convert to http request");
+    let request = http
+        .bridge_request(&command)
+        .expect("bridged command should convert to http request");
 
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/setpoint");
@@ -1216,9 +1116,7 @@ fn bridge_can_translate_mqtt_event_into_http_request() {
 
 #[test]
 fn bridge_can_translate_http_command_into_mqtt_publish() {
-    let bridge = TestBridge;
     let mqtt = make_default_driver();
-    let mut emitter = CollectEmitter(Vec::new());
     let command = Command {
         id: "http-read-1".to_string(),
         source_device_id: Some("http-device-1".to_string()),
@@ -1229,16 +1127,27 @@ fn bridge_can_translate_http_command_into_mqtt_publish() {
         correlation: None,
     };
 
-    block_on(bridge.bridge_command(&command, &mut emitter)).expect("bridge should succeed");
-    let RoutedMessage::Command(command) = emitter.0.pop().expect("bridge should emit command")
-    else {
-        panic!("expected bridged command");
+    let mapped_command = match &command.intent {
+        Intent::Read { resource } => Command {
+            id: format!("{}-mqtt", command.id),
+            source_device_id: Some(command.target_device_id.clone()),
+            target_device_id: "mqtt-device-1".to_string(),
+            intent: Intent::Send {
+                channel: BrokerAddress {
+                    name: format!("requests/{resource}"),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                payload: PayloadValue::Bytes(Vec::new()),
+                options: BrokerMessageOptions::default(),
+            },
+            correlation: command.correlation.clone(),
+        },
+        _ => panic!("expected read intent"),
     };
-    let packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &mqtt.dvc,
-        command: &command,
-    })
-    .expect("bridged command should convert to mqtt packet");
+    let _bridge_message = planner::command_to_messaging(&mapped_command).unwrap();
+    let packet = mqtt
+        .bridge_packet_request(&mapped_command)
+        .expect("bridged command should convert to mqtt packet");
 
     match packet.packet {
         MqttWirePacket::V5Publish(packet) => {
@@ -1412,9 +1321,9 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
     let (broker, shutdown_tx, broker_handle) = spawn_keepalive_test_broker_v5();
     let driver = make_driver(broker, vec![MqttProtocolVersion::V5_0]);
 
-    let subscribe_packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &Command {
+    let subscribe_packet = packet_request(
+        &driver,
+        &Command {
             id: "same-driver-sub".to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -1427,12 +1336,11 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
             },
             correlation: None,
         },
-    })
-    .expect("subscribe packet should build");
+    );
 
-    let unsubscribe_packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &Command {
+    let unsubscribe_packet = packet_request(
+        &driver,
+        &Command {
             id: "same-driver-unsub".to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -1444,12 +1352,11 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
             },
             correlation: None,
         },
-    })
-    .expect("unsubscribe packet should build");
+    );
 
-    let publish_packet = MqttPacketRequest::try_from(MqttCommandRef {
-        device: &driver.dvc,
-        command: &Command {
+    let publish_packet = packet_request(
+        &driver,
+        &Command {
             id: "same-driver-pub".to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -1463,8 +1370,7 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
             },
             correlation: None,
         },
-    })
-    .expect("publish packet should build");
+    );
 
     block_on(driver.start_listening(NoopSink)).expect("listener should start");
     block_on(driver.subscribe(subscribe_packet, NoopSink))

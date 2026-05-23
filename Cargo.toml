@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ferredge-bridge",
     "crates/ferredge-core",
     "crates/ferredge-proto-http",
     "crates/ferredge-proto-modbus",
@@ -19,6 +20,7 @@ rust-version = "1.93"
 
 [workspace.dependencies]
 # Internal crates
+ferredge-bridge = { path = "crates/ferredge-bridge" }
 ferredge-core = { path = "crates/ferredge-core" }
 ferredge-proto-http = { path = "crates/ferredge-proto-http" }
 ferredge-proto-modbus = { path = "crates/ferredge-proto-modbus" }

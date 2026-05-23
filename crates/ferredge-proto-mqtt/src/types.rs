@@ -6,6 +6,7 @@ use alloc::{
     vec::Vec,
 };
 
+use ferredge_bridge::BridgePlannerError;
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use serde::{Deserialize, Serialize};
@@ -126,11 +127,15 @@ pub enum MqttCommandConversionError {
     /// Underlying `mqtt_protocol_core` packet builder rejected the request.
     #[error("failed to build MQTT packet: {0}")]
     PacketBuild(#[from] mqtt::result_code::MqttError),
+    #[error("invalid bridge request: {0}")]
+    Bridge(#[from] BridgePlannerError),
+    #[error("bridge message does not describe an MQTT packet request")]
+    InvalidBridgeMessage,
 }
 
 /// Borrowed view carrying enough context to convert routed command into MQTT packets.
 #[derive(Debug, Clone, Copy)]
-pub struct MqttCommandRef<'a> {
+pub(crate) struct MqttCommandRef<'a> {
     /// Device-side broker configuration and metadata.
     pub device: &'a Device<MqttResourceAttributes>,
     /// Routed command to convert.
