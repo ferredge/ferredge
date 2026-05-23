@@ -483,7 +483,7 @@ fn map_io_error(error: std::io::Error) -> NetError {
         | ErrorKind::HostUnreachable
         | ErrorKind::NetworkUnreachable => NetError::Unreachable,
         ErrorKind::Unsupported => NetError::Unsupported,
-        _ => NetError::Other("async-std io error"),
+        _ => NetError::Other("async-std io error".to_string()),
     }
 }
 
@@ -499,7 +499,7 @@ fn map_serial_io_error(error: std::io::Error) -> SerialError {
         | ErrorKind::NotConnected => SerialError::Closed,
         ErrorKind::TimedOut | ErrorKind::WouldBlock => SerialError::TimedOut,
         ErrorKind::Unsupported => SerialError::Unsupported,
-        _ => SerialError::Other("async-std serial io error"),
+        _ => SerialError::Other("async-std serial io error".to_string()),
     }
 }
 
@@ -511,7 +511,7 @@ fn map_serial_error(error: serialport::Error) -> SerialError {
         ErrorKind::NoDevice => SerialError::Closed,
         ErrorKind::InvalidInput => SerialError::Unsupported,
         ErrorKind::Io(std::io::ErrorKind::TimedOut) => SerialError::TimedOut,
-        _ => SerialError::Other("async-std serial error"),
+        _ => SerialError::Other("async-std serial error".to_string()),
     }
 }
 
