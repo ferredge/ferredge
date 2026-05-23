@@ -2,7 +2,7 @@ extern crate alloc;
 
 use alloc::{string::ToString, vec::Vec};
 
-use ferredge_bridge::{BridgeMessage, BridgeOp, BridgePayload, RegisterAccessAction};
+use ferredge_bridge::{BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, RegisterAccessAction};
 use ferredge_core::prelude::*;
 use rmodbus::{ErrorKind as RmodbusError, ModbusProto, client::ModbusRequest as RmodbusRequest};
 
@@ -14,36 +14,67 @@ use crate::{
     types::ModbusValue,
 };
 
-pub(crate) fn encode_request(
-    value: ModbusCommandRef<'_>,
-    message: &BridgeMessage,
-    resource: &str,
-    attributes: &ModbusResourceAttributes,
-) -> Result<ModbusRequest, ModbusCommandConversionError> {
-    let proto = proto_from_endpoint(&value.device.endpoint).ok_or_else(|| {
-        ModbusCommandConversionError::InvalidResource("device endpoint is not Modbus".to_string())
-    })?;
-    let options = endpoint_options(&value.device.endpoint).ok_or_else(|| {
-        ModbusCommandConversionError::InvalidResource("missing Modbus endpoint options".to_string())
-    })?;
-    let BridgeMessage::Command(command) = message else {
-        return Err(ModbusCommandConversionError::InvalidBridgeMessage);
-    };
-    let BridgeOp::RegisterAccess(operation) = &command.operation else {
-        return Err(ModbusCommandConversionError::InvalidBridgeMessage);
-    };
+/// Bridge codec that turns a planned bridge message into a native Modbus request.
+pub struct ModbusBridgeCodec<'a> {
+    value: ModbusCommandRef<'a>,
+    resource: &'a str,
+    attributes: &'a ModbusResourceAttributes,
+}
 
-    match operation.action {
-        RegisterAccessAction::Read => build_read_request(resource, attributes, proto, options),
-        RegisterAccessAction::Write => {
-            let payload = bridge_payload_to_payload_value(
-                command
-                    .payload
-                    .as_ref()
-                    .ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?,
-            );
-            build_write_request(resource, attributes, &payload, proto, options)
+impl<'a> ModbusBridgeCodec<'a> {
+    /// Creates a codec bound to one Modbus device/resource context.
+    pub fn new(
+        device: &'a Device<ModbusResourceAttributes>,
+        resource: &'a str,
+        attributes: &'a ModbusResourceAttributes,
+    ) -> Self {
+        Self {
+            value: ModbusCommandRef { device },
+            resource,
+            attributes,
         }
+    }
+}
+
+impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
+    type Error = ModbusCommandConversionError;
+
+    fn encode(&self, message: &BridgeMessage) -> Result<ModbusRequest, Self::Error> {
+        let proto = proto_from_endpoint(&self.value.device.endpoint).ok_or_else(|| {
+            ModbusCommandConversionError::InvalidResource(
+                "device endpoint is not Modbus".to_string(),
+            )
+        })?;
+        let options = endpoint_options(&self.value.device.endpoint).ok_or_else(|| {
+            ModbusCommandConversionError::InvalidResource(
+                "missing Modbus endpoint options".to_string(),
+            )
+        })?;
+        let BridgeMessage::Command(command) = message else {
+            return Err(ModbusCommandConversionError::InvalidBridgeMessage);
+        };
+        let BridgeOp::RegisterAccess(operation) = &command.operation else {
+            return Err(ModbusCommandConversionError::InvalidBridgeMessage);
+        };
+
+        match operation.action {
+            RegisterAccessAction::Read => {
+                build_read_request(self.resource, self.attributes, proto, options)
+            }
+            RegisterAccessAction::Write => {
+                let payload = bridge_payload_to_payload_value(
+                    command
+                        .payload
+                        .as_ref()
+                        .ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?,
+                );
+                build_write_request(self.resource, self.attributes, &payload, proto, options)
+            }
+        }
+    }
+
+    fn decode(&self, _native: ModbusRequest) -> Result<BridgeMessage, Self::Error> {
+        Err(ModbusCommandConversionError::InvalidBridgeMessage)
     }
 }
 

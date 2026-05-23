@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
-use ferredge_bridge::{BridgePlannerError, planner};
+use ferredge_bridge::{BridgeCodec, BridgePlannerError, planner};
 use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
@@ -185,11 +185,6 @@ impl ModbusDriver {
                 .unit_id,
         )?;
 
-        crate::convert::encode_request(
-            ModbusCommandRef { device: &self.dvc },
-            &message,
-            &resource,
-            &attributes,
-        )
+        crate::ModbusBridgeCodec::new(&self.dvc, &resource, &attributes).encode(&message)
     }
 }

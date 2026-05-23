@@ -48,3 +48,4 @@ pub use types::{
     ModbusCommandConversionError, ModbusDriver, ModbusParserSeed, ModbusRequest, ModbusResponse,
     ModbusResponseDecoder,
 };
+pub use convert::ModbusBridgeCodec;

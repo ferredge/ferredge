@@ -7,7 +7,7 @@ use std::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec};
 
-use ferredge_bridge::{BridgeMessage, BridgeOp, BridgePayload, MessagingAction};
+use ferredge_bridge::{BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, MessagingAction};
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use serde_json::to_vec;
@@ -17,23 +17,46 @@ use crate::types::{
     MqttSubscriptionRequest, MqttWirePacket,
 };
 
-pub(crate) fn encode_packet_request(
-    value: MqttCommandRef<'_>,
-    message: &BridgeMessage,
-) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-    let config = value.endpoint_config()?;
-    let version = config.preferred_protocol_version();
-    let BridgeMessage::Command(command) = message else {
-        return Err(MqttCommandConversionError::InvalidBridgeMessage);
-    };
-    let BridgeOp::Messaging(operation) = &command.operation else {
-        return Err(MqttCommandConversionError::InvalidBridgeMessage);
-    };
+/// Bridge codec that turns a planned bridge message into a version-specific MQTT packet request.
+pub struct MqttBridgeCodec<'a> {
+    value: MqttCommandRef<'a>,
+}
 
-    match operation.action {
-        MessagingAction::Publish => build_publish_packet(value.command, message, version),
-        MessagingAction::Subscribe => build_subscribe_packet(value.command, message, version),
-        MessagingAction::Unsubscribe => build_unsubscribe_packet(value.command, message, version),
+impl<'a> MqttBridgeCodec<'a> {
+    /// Creates a codec bound to one MQTT device and source command context.
+    pub fn new(device: &'a Device<crate::types::MqttResourceAttributes>, command: &'a Command) -> Self {
+        Self {
+            value: MqttCommandRef { device, command },
+        }
+    }
+}
+
+impl BridgeCodec<MqttPacketRequest> for MqttBridgeCodec<'_> {
+    type Error = MqttCommandConversionError;
+
+    fn encode(&self, message: &BridgeMessage) -> Result<MqttPacketRequest, Self::Error> {
+        let config = self.value.endpoint_config()?;
+        let version = config.preferred_protocol_version();
+        let BridgeMessage::Command(command) = message else {
+            return Err(MqttCommandConversionError::InvalidBridgeMessage);
+        };
+        let BridgeOp::Messaging(operation) = &command.operation else {
+            return Err(MqttCommandConversionError::InvalidBridgeMessage);
+        };
+
+        match operation.action {
+            MessagingAction::Publish => build_publish_packet(self.value.command, message, version),
+            MessagingAction::Subscribe => {
+                build_subscribe_packet(self.value.command, message, version)
+            }
+            MessagingAction::Unsubscribe => {
+                build_unsubscribe_packet(self.value.command, message, version)
+            }
+        }
+    }
+
+    fn decode(&self, _native: MqttPacketRequest) -> Result<BridgeMessage, Self::Error> {
+        Err(MqttCommandConversionError::InvalidBridgeMessage)
     }
 }
 

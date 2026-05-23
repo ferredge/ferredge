@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
-use ferredge_bridge::planner;
+use ferredge_bridge::{BridgeCodec, planner};
 use ferredge_core::prelude::*;
 
 mod convert;
@@ -45,13 +45,14 @@ mod mosquitto_tests;
 #[cfg(test)]
 mod tests;
 
-use types::{MqttCommandRef, MqttPacketRequest, MqttResourceAttributes};
+use types::{MqttPacketRequest, MqttResourceAttributes};
 
 use runtime::{
     MqttClientSession, build_connect_packet, disconnect_session, mqtt_version_from_core,
     normalize_broker_addr, read_from_session_async, send_packet_request_async,
 };
 
+pub use convert::MqttBridgeCodec;
 pub use types::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
     MqttCommandConversionError, MqttPublishRequest, MqttSubscriptionRequest, MqttWirePacket,
@@ -148,13 +149,7 @@ impl MqttDriver {
         command: &Command,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
         let message = planner_message_for_command(command)?;
-        convert::encode_packet_request(
-            MqttCommandRef {
-                device: &self.dvc,
-                command,
-            },
-            &message,
-        )
+        MqttBridgeCodec::new(&self.dvc, command).encode(&message)
     }
 
     /// Registers enhanced MQTT v5 auth callback used for connect-time and re-auth exchanges.
