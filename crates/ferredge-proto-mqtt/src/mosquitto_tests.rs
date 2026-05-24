@@ -123,7 +123,7 @@ impl EventSink for RecordingSink {
 
 fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(Command {
+        .native_packet_request(Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -141,7 +141,7 @@ fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketReq
 
 fn unsubscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(Command {
+        .native_packet_request(Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -164,7 +164,7 @@ fn publish_packet(
     options: BrokerMessageOptions,
 ) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(Command {
+        .native_packet_request(Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),

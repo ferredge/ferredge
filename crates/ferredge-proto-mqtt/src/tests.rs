@@ -76,8 +76,14 @@ fn make_default_driver() -> MqttDriver {
 
 fn packet_request(driver: &MqttDriver, command: &Command) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(command.clone())
+        .native_packet_request(command.clone())
         .expect("mqtt packet should build")
+}
+
+fn bridge_packet_request(driver: &MqttDriver, command: &Command) -> MqttPacketRequest {
+    driver
+        .bridge_packet_request(command.clone())
+        .expect("mqtt bridge packet should build")
 }
 
 fn encode_bridge_message(driver: &MqttDriver, message: &BridgeMessage<'_>) -> MqttPacketRequest {
@@ -432,6 +438,56 @@ fn mqtt_send_falls_back_to_v3_when_v5_not_available() {
 }
 
 #[test]
+fn mqtt_native_and_bridge_packet_requests_match_for_supported_commands() {
+    let driver = make_default_driver();
+    for command in [
+        Command {
+            id: "cmd-native-send".to_string(),
+            source_device_id: None,
+            target_device_id: "mqtt-device-1".to_string(),
+            intent: Intent::Send {
+                channel: BrokerAddress {
+                    name: "sensors/temp".to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                payload: PayloadValue::Bytes(b"42".to_vec().into()),
+                options: BrokerMessageOptions::default(),
+            },
+            correlation: None,
+        },
+        Command {
+            id: "cmd-native-sub".to_string(),
+            source_device_id: None,
+            target_device_id: "mqtt-device-1".to_string(),
+            intent: Intent::Subscribe {
+                channel: BrokerAddress {
+                    name: "alerts/#".to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                options: BrokerSubscriptionOptions::default(),
+            },
+            correlation: None,
+        },
+        Command {
+            id: "cmd-native-unsub".to_string(),
+            source_device_id: None,
+            target_device_id: "mqtt-device-1".to_string(),
+            intent: Intent::Unsubscribe {
+                channel: BrokerAddress {
+                    name: "alerts/#".to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+            },
+            correlation: None,
+        },
+    ] {
+        let native = packet_request(&driver, &command);
+        let bridge = bridge_packet_request(&driver, &command);
+        assert_eq!(native, bridge);
+    }
+}
+
+#[test]
 fn mqtt_subscribe_builds_version_specific_packet() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
@@ -516,11 +572,47 @@ fn mqtt_v3_rejects_shared_subscriptions() {
     };
 
     let error = driver
-        .bridge_packet_request(command)
+        .native_packet_request(command)
         .expect_err("v3 shared subscriptions should be rejected");
     assert!(matches!(
         error,
         crate::types::MqttCommandConversionError::MqttV5SubscriptionOptionsOnV3
+    ));
+}
+
+#[test]
+fn mqtt_v3_rejects_v5_publish_options_on_native_path() {
+    let driver = make_driver(
+        "mqtt://broker".to_string(),
+        vec![MqttProtocolVersion::V3_1_1],
+    );
+    let command = Command {
+        id: "cmd-v3-publish-options".to_string(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".to_string(),
+        intent: Intent::Send {
+            channel: BrokerAddress {
+                name: "state/device".to_string(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: PayloadValue::Bytes(b"online".to_vec().into()),
+            options: BrokerMessageOptions {
+                protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
+                    content_type: Some("text/plain".to_string()),
+                    ..MqttMessageOptions::default()
+                })),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    let error = driver
+        .native_packet_request(command)
+        .expect_err("v3 publish options should be rejected");
+    assert!(matches!(
+        error,
+        crate::types::MqttCommandConversionError::MqttV5PublishOptionsOnV3
     ));
 }
 

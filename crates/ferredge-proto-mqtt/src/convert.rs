@@ -16,13 +16,15 @@ use alloc::{
 
 use ferredge_bridge::{
     BridgeHeaders, BridgeMessage, BridgeOp, BridgeOutbound, BridgePayload, BridgeTransportMeta,
-    MessagingAction, ProtocolEncoder,
+    MessagingAction, NativeOutbound, ProtocolEncoder,
 };
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use serde_json::to_vec;
 
-use crate::types::{MqttCommandConversionError, MqttCommandRef, MqttPacketRequest, MqttWirePacket};
+use crate::types::{
+    MqttCommandConversionError, MqttCommandRef, MqttNativePlan, MqttPacketRequest, MqttWirePacket,
+};
 
 /// Bridge codec that turns a planned bridge message into a version-specific MQTT packet request.
 pub struct MqttBridgeCodec<'a> {
@@ -46,18 +48,19 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, MqttPacketRequest>
     fn encode(&self, message: BridgeMessage<'static>) -> Result<MqttPacketRequest, Self::Error> {
         let config = self.value.endpoint_config()?;
         let version = config.preferred_protocol_version();
-        let BridgeMessage::Command(command) = &message else {
-            return Err(MqttCommandConversionError::InvalidBridgeMessage);
-        };
-        let BridgeOp::Messaging(operation) = &command.operation else {
-            return Err(MqttCommandConversionError::InvalidBridgeMessage);
-        };
+        build_packet_request(packet_semantics_from_bridge(&message)?, version)
+    }
+}
 
-        match operation.action {
-            MessagingAction::Publish => build_publish_packet(&message, version),
-            MessagingAction::Subscribe => build_subscribe_packet(&message, version),
-            MessagingAction::Unsubscribe => build_unsubscribe_packet(&message, version),
-        }
+impl ProtocolEncoder<NativeOutbound, MqttNativePlan<'static>, MqttPacketRequest>
+    for MqttBridgeCodec<'_>
+{
+    type Error = MqttCommandConversionError;
+
+    fn encode(&self, plan: MqttNativePlan<'static>) -> Result<MqttPacketRequest, Self::Error> {
+        let config = self.value.endpoint_config()?;
+        let version = config.preferred_protocol_version();
+        build_packet_request(packet_semantics_from_native_plan(&plan)?, version)
     }
 }
 
@@ -71,7 +74,7 @@ fn mqtt_payload_bytes(payload: &BridgePayload) -> Result<Vec<u8>, MqttCommandCon
     }
 }
 
-struct PublishBridgeView<'a> {
+struct PublishView<'a> {
     command_id: &'a str,
     topic: &'a str,
     payload: Vec<u8>,
@@ -88,7 +91,7 @@ struct PublishBridgeView<'a> {
     projected_headers: ProjectedHeaderRefs<'a>,
 }
 
-struct SubscribeBridgeView<'a> {
+struct SubscribeView<'a> {
     command_id: &'a str,
     topic: &'a str,
     delivery: Option<DeliveryGuarantee>,
@@ -109,9 +112,15 @@ struct ProjectedHeaderRefs<'a> {
     http_status_code: Option<u16>,
 }
 
+enum PacketSemantics<'a> {
+    Publish(PublishView<'a>),
+    Subscribe(SubscribeView<'a>),
+    Unsubscribe(SubscribeView<'a>),
+}
+
 fn publish_view_from_bridge<'a>(
     message: &'a BridgeMessage<'a>,
-) -> Result<PublishBridgeView<'a>, MqttCommandConversionError> {
+) -> Result<PublishView<'a>, MqttCommandConversionError> {
     let BridgeMessage::Command(bridge) = message else {
         return Err(MqttCommandConversionError::InvalidBridgeMessage);
     };
@@ -124,7 +133,7 @@ fn publish_view_from_bridge<'a>(
         Some(BridgeTransportMeta::Http(_)) | None => None,
     };
     let projected = project_publish_metadata(bridge.transport.as_ref(), bridge.headers.as_ref());
-    Ok(PublishBridgeView {
+    Ok(PublishView {
         command_id: bridge.id.as_ref(),
         topic,
         payload: mqtt_payload_bytes(
@@ -162,7 +171,7 @@ fn publish_view_from_bridge<'a>(
 
 fn subscription_view_from_bridge<'a>(
     message: &'a BridgeMessage<'a>,
-) -> Result<SubscribeBridgeView<'a>, MqttCommandConversionError> {
+) -> Result<SubscribeView<'a>, MqttCommandConversionError> {
     let BridgeMessage::Command(bridge) = message else {
         return Err(MqttCommandConversionError::InvalidBridgeMessage);
     };
@@ -176,7 +185,7 @@ fn subscription_view_from_bridge<'a>(
     };
     let projected =
         project_subscription_metadata(bridge.transport.as_ref(), bridge.headers.as_ref());
-    Ok(SubscribeBridgeView {
+    Ok(SubscribeView {
         command_id: bridge.id.as_ref(),
         topic: channel,
         delivery: mqtt.and_then(|mqtt| delivery_from_qos(mqtt.qos)),
@@ -189,6 +198,145 @@ fn subscription_view_from_bridge<'a>(
             .and_then(|mqtt| mqtt.subscription_identifiers.first().copied()),
         projected_user_properties: projected.user_properties,
     })
+}
+
+fn publish_view_from_native_plan<'a>(
+    plan: &'a MqttNativePlan<'a>,
+) -> Result<PublishView<'a>, MqttCommandConversionError> {
+    let MqttNativePlan::Publish {
+        command_id,
+        topic,
+        payload,
+        delivery,
+        retain,
+        payload_format,
+        content_type,
+        message_expiry_interval_secs,
+        topic_alias,
+        headers,
+        user_properties,
+        reply_to,
+        response_topic,
+        correlation_id,
+        correlation_data,
+    } = plan
+    else {
+        unreachable!("publish view requires publish plan")
+    };
+    Ok(PublishView {
+        command_id,
+        topic,
+        payload: mqtt_payload_bytes(payload)?,
+        delivery: *delivery,
+        retain: *retain,
+        payload_format: *payload_format,
+        content_type: content_type.as_deref(),
+        message_expiry_interval_secs: *message_expiry_interval_secs,
+        topic_alias: *topic_alias,
+        reply_to: reply_to.as_ref().and_then(channel_reply_to),
+        response_topic: response_topic.as_deref(),
+        correlation_id: correlation_id.as_deref().map(ToString::to_string),
+        correlation_data: correlation_data.clone(),
+        projected_headers: ProjectedHeaderRefs {
+            user_properties: user_properties
+                .iter()
+                .map(|(key, value)| (key.as_ref(), value.as_ref()))
+                .chain(
+                    headers
+                        .iter()
+                        .map(|(key, value)| (key.as_ref(), value.as_ref())),
+                )
+                .collect(),
+            content_type: None,
+            http_method: None,
+            http_path: None,
+            http_status_code: None,
+        },
+    })
+}
+
+fn subscription_view_from_native_plan<'a>(plan: &'a MqttNativePlan<'a>) -> SubscribeView<'a> {
+    match plan {
+        MqttNativePlan::Subscribe {
+            command_id,
+            topic,
+            delivery,
+            durable_name,
+            shared_group,
+            no_local,
+            retain_as_published,
+            retain_handling,
+            subscription_identifier,
+            user_properties,
+        } => SubscribeView {
+            command_id,
+            topic,
+            delivery: *delivery,
+            durable_name: durable_name.as_deref(),
+            shared_group: shared_group.as_deref(),
+            no_local: *no_local,
+            retain_as_published: *retain_as_published,
+            retain_handling: *retain_handling,
+            subscription_identifier: *subscription_identifier,
+            projected_user_properties: user_properties
+                .iter()
+                .map(|(key, value)| (key.as_ref(), value.as_ref()))
+                .collect(),
+        },
+        MqttNativePlan::Unsubscribe { command_id, topic } => SubscribeView {
+            command_id,
+            topic,
+            delivery: None,
+            durable_name: None,
+            shared_group: None,
+            no_local: false,
+            retain_as_published: false,
+            retain_handling: None,
+            subscription_identifier: None,
+            projected_user_properties: Vec::new(),
+        },
+        MqttNativePlan::Publish { .. } => {
+            unreachable!("subscription view requires non-publish plan")
+        }
+    }
+}
+
+fn packet_semantics_from_bridge<'a>(
+    message: &'a BridgeMessage<'a>,
+) -> Result<PacketSemantics<'a>, MqttCommandConversionError> {
+    let BridgeMessage::Command(command) = message else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
+    let BridgeOp::Messaging(operation) = &command.operation else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
+    match operation.action {
+        MessagingAction::Publish => {
+            Ok(PacketSemantics::Publish(publish_view_from_bridge(message)?))
+        }
+        MessagingAction::Subscribe => Ok(PacketSemantics::Subscribe(
+            subscription_view_from_bridge(message)?,
+        )),
+        MessagingAction::Unsubscribe => Ok(PacketSemantics::Unsubscribe(
+            subscription_view_from_bridge(message)?,
+        )),
+    }
+}
+
+fn packet_semantics_from_native_plan<'a>(
+    plan: &'a MqttNativePlan<'a>,
+) -> Result<PacketSemantics<'a>, MqttCommandConversionError> {
+    match plan {
+        MqttNativePlan::Publish { .. } => Ok(PacketSemantics::Publish(
+            publish_view_from_native_plan(plan)?,
+        )),
+        MqttNativePlan::Subscribe { .. } => Ok(PacketSemantics::Subscribe(
+            subscription_view_from_native_plan(plan),
+        )),
+        MqttNativePlan::Unsubscribe { .. } => Ok(PacketSemantics::Unsubscribe(
+            subscription_view_from_native_plan(plan),
+        )),
+    }
 }
 
 struct ProjectedSubscriptionMetadata<'a> {
@@ -312,11 +460,10 @@ fn channel_reply_to(address: &Address) -> Option<String> {
     }
 }
 
-pub fn build_publish_packet(
-    message: &BridgeMessage<'_>,
+fn build_publish_packet(
+    publish: PublishView<'_>,
     version: MqttProtocolVersion,
 ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-    let publish = publish_view_from_bridge(message)?;
     let qos = qos_from_delivery(publish.delivery);
     let packet_id = packet_id_for_qos(qos);
 
@@ -361,11 +508,10 @@ pub fn build_publish_packet(
     }
 }
 
-pub fn build_subscribe_packet(
-    message: &BridgeMessage<'_>,
+fn build_subscribe_packet(
+    subscription: SubscribeView<'_>,
     version: MqttProtocolVersion,
 ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-    let subscription = subscription_view_from_bridge(message)?;
     let topic = mqtt_topic_from_subscription_parts(subscription.topic, subscription.shared_group);
     let mut sub_opts =
         mqtt::packet::SubOpts::new().set_qos(qos_from_delivery(subscription.delivery));
@@ -405,11 +551,10 @@ pub fn build_subscribe_packet(
     }
 }
 
-pub fn build_unsubscribe_packet(
-    message: &BridgeMessage<'_>,
+fn build_unsubscribe_packet(
+    subscription: SubscribeView<'_>,
     version: MqttProtocolVersion,
 ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-    let subscription = subscription_view_from_bridge(message)?;
     let topic = mqtt_topic_from_subscription_parts(subscription.topic, subscription.shared_group);
 
     match version {
@@ -441,8 +586,21 @@ pub fn build_unsubscribe_packet(
     }
 }
 
+fn build_packet_request(
+    semantics: PacketSemantics<'_>,
+    version: MqttProtocolVersion,
+) -> Result<MqttPacketRequest, MqttCommandConversionError> {
+    match semantics {
+        PacketSemantics::Publish(publish) => build_publish_packet(publish, version),
+        PacketSemantics::Subscribe(subscription) => build_subscribe_packet(subscription, version),
+        PacketSemantics::Unsubscribe(subscription) => {
+            build_unsubscribe_packet(subscription, version)
+        }
+    }
+}
+
 fn build_v5_publish_props(
-    publish: &PublishBridgeView<'_>,
+    publish: &PublishView<'_>,
 ) -> Result<mqtt::packet::Properties, MqttCommandConversionError> {
     let mut props = mqtt::packet::Properties::new();
 
@@ -521,7 +679,7 @@ fn build_v5_publish_props(
 }
 
 fn build_v5_subscribe_props(
-    subscription: &SubscribeBridgeView<'_>,
+    subscription: &SubscribeView<'_>,
 ) -> Result<mqtt::packet::Properties, MqttCommandConversionError> {
     let mut props = mqtt::packet::Properties::new();
 
@@ -540,7 +698,7 @@ fn build_v5_subscribe_props(
 }
 
 fn build_v5_unsubscribe_props(
-    subscription: &SubscribeBridgeView<'_>,
+    subscription: &SubscribeView<'_>,
 ) -> Result<mqtt::packet::Properties, MqttCommandConversionError> {
     let mut props = mqtt::packet::Properties::new();
     props.push(mqtt::packet::Property::UserProperty(
@@ -568,7 +726,7 @@ fn retain_handling_from_core(value: MqttRetainHandling) -> mqtt::packet::RetainH
 }
 
 fn validate_v3_publish_support(
-    publish: &PublishBridgeView<'_>,
+    publish: &PublishView<'_>,
 ) -> Result<(), MqttCommandConversionError> {
     if publish.payload_format.is_some()
         || publish.content_type.is_some()
@@ -589,7 +747,7 @@ fn validate_v3_publish_support(
 }
 
 fn validate_v3_subscribe_support(
-    subscription: &SubscribeBridgeView<'_>,
+    subscription: &SubscribeView<'_>,
 ) -> Result<(), MqttCommandConversionError> {
     if subscription.no_local
         || subscription.retain_as_published

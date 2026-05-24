@@ -367,6 +367,19 @@ fn diagslave_tcp_write_then_read_max_coils() {
 }
 
 #[test]
+fn native_diagslave_tcp_execute_command_roundtrip_holding_register() {
+    let guard = DiagslaveGuard::start("tcp");
+    let driver = make_tcp_driver(guard.port(), ModbusClientOptions::default());
+
+    block_on(driver.execute_command(write_command("holding_u16", PayloadValue::U64(0x4321))))
+        .expect("native holding write should succeed");
+    let response = block_on(driver.execute_command(read_command("holding_u16")))
+        .expect("native holding read should succeed");
+
+    assert_eq!(response.into_payload().unwrap(), PayloadValue::U64(0x4321));
+}
+
+#[test]
 fn diagslave_udp_write_then_read_max_coils() {
     let guard = DiagslaveGuard::start("udp");
     let driver = make_driver(DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {

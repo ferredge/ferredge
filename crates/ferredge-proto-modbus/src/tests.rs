@@ -9,10 +9,11 @@ use rmodbus::{
 };
 
 use crate::{
-    ModbusDriver, ModbusRequest,
+    ModbusDriver, ModbusRequest, ModbusResponse, ModbusResponseDecoderContext,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::{decode_ascii_wire_frame, decode_modbus_response},
 };
+use ferredge_bridge::ProtocolDecoder;
 
 fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
     let mut resources = Map::default();
@@ -359,10 +360,20 @@ where
     }
 }
 
+fn native_response(request: &ModbusRequest, response_proto: ModbusProto) -> ModbusResponse {
+    ModbusResponse {
+        frame: simulate_response(request, response_proto),
+        proto: response_proto,
+        unit_id: request.unit_id,
+        parser_seed: request.parser_seed.clone(),
+        decoder: request.decoder.clone(),
+    }
+}
+
 #[test]
 fn build_read_request_for_holding_register() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(command_read("holding_u16")).unwrap();
+    let request = driver.native_request(command_read("holding_u16")).unwrap();
 
     assert_eq!(request.proto, ModbusProto::TcpUdp);
     assert_eq!(request.decoder, crate::ModbusResponseDecoder::U16);
@@ -373,7 +384,7 @@ fn build_read_request_for_holding_register() {
 #[test]
 fn decode_tcp_holding_register_response() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(command_read("holding_u16")).unwrap();
+    let request = driver.native_request(command_read("holding_u16")).unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, PayloadValue::U64(0x1234));
@@ -382,7 +393,7 @@ fn decode_tcp_holding_register_response() {
 #[test]
 fn decode_rtu_coil_response() {
     let driver = make_driver(rtu_endpoint());
-    let request = driver.bridge_request(command_read("coil_bit")).unwrap();
+    let request = driver.native_request(command_read("coil_bit")).unwrap();
     let response = simulate_response(&request, ModbusProto::Rtu);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, PayloadValue::Bool(true));
@@ -391,7 +402,7 @@ fn decode_rtu_coil_response() {
 #[test]
 fn build_rtu_over_tcp_request_uses_rtu_proto() {
     let driver = make_driver(rtu_over_tcp_endpoint());
-    let request = driver.bridge_request(command_read("holding_u16")).unwrap();
+    let request = driver.native_request(command_read("holding_u16")).unwrap();
 
     assert_eq!(request.proto, ModbusProto::Rtu);
     assert!(!request.is_write);
@@ -400,7 +411,7 @@ fn build_rtu_over_tcp_request_uses_rtu_proto() {
 #[test]
 fn decode_ascii_string_response() {
     let driver = make_driver(ascii_endpoint());
-    let request = driver.bridge_request(command_read("holding_text")).unwrap();
+    let request = driver.native_request(command_read("holding_text")).unwrap();
     let response = simulate_response(&request, ModbusProto::Ascii);
     let decoded = decode_ascii_wire_frame(&response).unwrap();
     let payload = decode_modbus_response(&request, &decoded).unwrap();
@@ -410,7 +421,7 @@ fn decode_ascii_string_response() {
 #[test]
 fn build_response_defers_payload_decode() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(command_read("holding_u16")).unwrap();
+    let request = driver.native_request(command_read("holding_u16")).unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let native = crate::codec::build_modbus_response(&request, response).unwrap();
 
@@ -421,7 +432,7 @@ fn build_response_defers_payload_decode() {
 fn bytes_response_payload_borrows_from_frame() {
     let driver = make_driver(tcp_endpoint());
     let request = driver
-        .bridge_request(command_read("holding_bytes"))
+        .native_request(command_read("holding_bytes"))
         .unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let native = crate::codec::build_modbus_response(&request, response).unwrap();
@@ -438,7 +449,7 @@ fn bytes_response_payload_borrows_from_frame() {
 #[test]
 fn string_response_payload_borrows_from_frame() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(command_read("holding_text")).unwrap();
+    let request = driver.native_request(command_read("holding_text")).unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let native = crate::codec::build_modbus_response(&request, response).unwrap();
 
@@ -454,7 +465,7 @@ fn string_response_payload_borrows_from_frame() {
 #[test]
 fn bits_response_still_decodes_to_same_values() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(command_read("coil_bits")).unwrap();
+    let request = driver.native_request(command_read("coil_bits")).unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
 
@@ -474,7 +485,7 @@ fn bits_response_still_decodes_to_same_values() {
 #[test]
 fn lazy_string_decode_error_surfaces_on_payload_access() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(command_read("holding_text")).unwrap();
+    let request = driver.native_request(command_read("holding_text")).unwrap();
     let response = simulate_response_with_context(&request, ModbusProto::TcpUdp, |ctx| {
         ctx.set_holding(120, 0xFFFF).unwrap();
         ctx.set_holding(121, 0x0000).unwrap();
@@ -494,7 +505,7 @@ fn lazy_string_decode_error_surfaces_on_payload_access() {
 fn build_write_single_holding_request() {
     let driver = make_driver(tcp_endpoint());
     let request = driver
-        .bridge_request(command_write("holding_u16", PayloadValue::U64(0x4321)))
+        .native_request(command_write("holding_u16", PayloadValue::U64(0x4321)))
         .unwrap();
 
     assert!(request.is_write);
@@ -507,7 +518,7 @@ fn build_write_single_holding_request() {
 fn build_write_single_coil_request() {
     let driver = make_driver(tcp_endpoint());
     let request = driver
-        .bridge_request(command_write("coil_bit", PayloadValue::Bool(true)))
+        .native_request(command_write("coil_bit", PayloadValue::Bool(true)))
         .unwrap();
 
     assert!(request.is_write);
@@ -527,7 +538,7 @@ fn build_write_single_coil_request() {
 fn build_write_multiple_coils_request() {
     let driver = make_driver(tcp_endpoint());
     let request = driver
-        .bridge_request(command_write(
+        .native_request(command_write(
             "coil_bits",
             PayloadValue::List(
                 vec![
@@ -557,7 +568,7 @@ fn build_write_multiple_coils_request() {
 fn write_to_input_register_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_write("input_u16", PayloadValue::U64(9)))
+        .native_request(command_write("input_u16", PayloadValue::U64(9)))
         .unwrap_err();
 
     assert_eq!(
@@ -570,7 +581,7 @@ fn write_to_input_register_is_rejected() {
 fn write_to_discrete_input_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_write("discrete_bool", PayloadValue::Bool(true)))
+        .native_request(command_write("discrete_bool", PayloadValue::Bool(true)))
         .unwrap_err();
 
     assert_eq!(
@@ -583,7 +594,7 @@ fn write_to_discrete_input_is_rejected() {
 fn holding_register_with_bit_codec_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_read("holding_invalid_bits"))
+        .native_request(command_read("holding_invalid_bits"))
         .unwrap_err();
 
     assert_eq!(
@@ -598,7 +609,7 @@ fn holding_register_with_bit_codec_is_rejected() {
 fn coil_with_register_codec_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_read("coil_invalid_u16"))
+        .native_request(command_read("coil_invalid_u16"))
         .unwrap_err();
 
     assert_eq!(
@@ -613,7 +624,7 @@ fn coil_with_register_codec_is_rejected() {
 fn zero_quantity_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_read("holding_zero_quantity"))
+        .native_request(command_read("holding_zero_quantity"))
         .unwrap_err();
 
     assert_eq!(
@@ -628,7 +639,7 @@ fn zero_quantity_is_rejected() {
 fn bytes_without_quantity_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_read("holding_bytes_missing_quantity"))
+        .native_request(command_read("holding_bytes_missing_quantity"))
         .unwrap_err();
 
     assert_eq!(
@@ -643,7 +654,7 @@ fn bytes_without_quantity_is_rejected() {
 fn invalid_coil_payload_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_write(
+        .native_request(command_write(
             "coil_bit",
             PayloadValue::String("true".to_string().into()),
         ))
@@ -661,7 +672,7 @@ fn invalid_coil_payload_is_rejected() {
 fn invalid_holding_payload_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_write(
+        .native_request(command_write(
             "holding_u16",
             PayloadValue::List(vec![PayloadValue::U64(1), PayloadValue::U64(2)].into()),
         ))
@@ -679,7 +690,7 @@ fn invalid_holding_payload_is_rejected() {
 fn invalid_string_payload_is_rejected() {
     let driver = make_driver(tcp_endpoint());
     let error = driver
-        .bridge_request(command_write("holding_text", PayloadValue::U64(1)))
+        .native_request(command_write("holding_text", PayloadValue::U64(1)))
         .unwrap_err();
 
     assert_eq!(
@@ -688,4 +699,45 @@ fn invalid_string_payload_is_rejected() {
             "string payload must be utf8 text".to_string()
         )
     );
+}
+
+#[test]
+fn native_and_bridge_modbus_requests_match_for_supported_commands() {
+    let driver = make_driver(tcp_endpoint());
+    for command in [
+        command_read("holding_u16"),
+        command_write("holding_u16", PayloadValue::U64(0x4321)),
+        command_write("coil_bit", PayloadValue::Bool(true)),
+    ] {
+        let native = driver.native_request(command.clone()).unwrap();
+        let bridge = driver.bridge_request(command).unwrap();
+        assert_eq!(native, bridge);
+    }
+}
+
+#[test]
+fn native_modbus_roundtrip_decodes_to_routed_result() {
+    let driver = make_driver(tcp_endpoint());
+    let command = command_read("holding_u16");
+    let request = driver.native_request(command.clone()).unwrap();
+    let response = native_response(&request, ModbusProto::TcpUdp);
+    let decoded = ModbusResponseDecoderContext::new(&driver.dvc, &command)
+        .decode(&response)
+        .expect("response should decode");
+    let routed = RoutedMessage::try_from(decoded).expect("decoded response should route");
+
+    match routed {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.state, DeliveryState::Completed);
+            assert_eq!(result.result.payload, Some(PayloadValue::U64(0x1234)));
+            assert_eq!(
+                result.result.correlation,
+                Some(Correlation {
+                    request_id: "cmd-1".to_string().into(),
+                    reply_to: Some(Address::Resource("holding_u16".to_string().into())),
+                })
+            );
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
 }

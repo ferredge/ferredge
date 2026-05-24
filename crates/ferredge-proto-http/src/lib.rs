@@ -594,6 +594,7 @@ impl RequestResponse for HttpDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferredge_bridge::ProtocolDecoder;
     use ferredge_core::prelude::{
         BrokerAddress, BrokerChannelKind, BrokerMessageOptions, DeviceEndpoint,
         DeviceResourceAccessPermission, DeviceStatus, HttpEndpointConfig, Intent, Map,
@@ -601,6 +602,7 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::mpsc,
         thread,
         time::Duration,
     };
@@ -814,5 +816,226 @@ mod tests {
         let mut driver = make_driver();
         driver.dvc.endpoint = DeviceEndpoint::http(HttpEndpointConfig { url });
         driver
+    }
+
+    fn run_single_request_server(
+        response: &'static [u8],
+    ) -> (String, mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("server should accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("server should set read timeout");
+            let mut request = Vec::new();
+            loop {
+                let mut buf = [0u8; 1024];
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            tx.send(request).expect("request should be sent");
+            stream
+                .write_all(response)
+                .expect("server should write response");
+        });
+        (addr.to_string(), rx, handle)
+    }
+
+    #[test]
+    fn native_read_command_converts_to_http_request() {
+        let driver = make_driver();
+        let command = Command {
+            id: "cmd-native-read".to_string(),
+            source_device_id: None,
+            target_device_id: "device-1".to_string(),
+            intent: Intent::Read {
+                resource: "temp".to_string(),
+                options: RequestOptions::default(),
+            },
+            correlation: None,
+        };
+
+        let request = driver
+            .native_request(command)
+            .expect("read intent should convert");
+
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/api/temp");
+        assert_eq!(request.body, None);
+        assert_eq!(
+            request.headers,
+            vec![("Accept".to_string(), "application/json".to_string())]
+        );
+    }
+
+    #[test]
+    fn native_write_command_converts_to_http_request_with_body() {
+        let driver = make_driver();
+        let command = Command {
+            id: "cmd-native-write".to_string(),
+            source_device_id: None,
+            target_device_id: "device-1".to_string(),
+            intent: Intent::Write {
+                resource: "setpoint".to_string(),
+                payload: PayloadValue::String("42".to_string().into()),
+                options: RequestOptions::default(),
+            },
+            correlation: None,
+        };
+
+        let request = driver
+            .native_request(command)
+            .expect("write intent should convert");
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/setpoint");
+        assert_eq!(request.body, Some(b"42".to_vec()));
+    }
+
+    #[test]
+    fn native_and_bridge_http_requests_match_for_supported_commands() {
+        let driver = make_driver();
+        for command in [
+            Command {
+                id: "cmd-parity-read".to_string(),
+                source_device_id: None,
+                target_device_id: "device-1".to_string(),
+                intent: Intent::Read {
+                    resource: "temp".to_string(),
+                    options: RequestOptions::default(),
+                },
+                correlation: None,
+            },
+            Command {
+                id: "cmd-parity-write".to_string(),
+                source_device_id: None,
+                target_device_id: "device-1".to_string(),
+                intent: Intent::Write {
+                    resource: "setpoint".to_string(),
+                    payload: PayloadValue::String("42".to_string().into()),
+                    options: RequestOptions::default(),
+                },
+                correlation: None,
+            },
+        ] {
+            let native = driver.native_request(command.clone()).unwrap();
+            let bridge = driver.bridge_request(command).unwrap();
+            assert_eq!(native, bridge);
+        }
+    }
+
+    #[test]
+    fn native_http_roundtrip_decodes_completed_routed_result() {
+        let command = Command {
+            id: "cmd-roundtrip".to_string(),
+            source_device_id: None,
+            target_device_id: "device-1".to_string(),
+            intent: Intent::Read {
+                resource: "temp".to_string(),
+                options: RequestOptions::default(),
+            },
+            correlation: None,
+        };
+        let (addr, rx, handle) = run_single_request_server(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Test: ok\r\nContent-Length: 2\r\nConnection: close\r\n\r\n42",
+        );
+        let driver = make_http_driver_for_url(addr);
+        let request = driver.native_request(command.clone()).unwrap();
+        let response = runtime_stack::StackRuntime::default()
+            .block_on(driver.execute(request))
+            .expect("http request should succeed");
+        let raw_request = rx.recv().expect("server should capture request");
+        handle.join().expect("server should join");
+
+        let request_text = String::from_utf8(raw_request).expect("request should be utf8");
+        assert!(request_text.starts_with("GET /api/temp HTTP/1.1\r\n"));
+        assert!(request_text.contains("\r\nAccept: application/json\r\n"));
+
+        let decoded = HttpResponseDecoder::new(&driver.dvc, &command)
+            .decode(&response)
+            .expect("response should decode");
+        let routed = RoutedMessage::try_from(decoded).expect("decoded response should route");
+
+        match routed {
+            RoutedMessage::Result(result) => {
+                assert_eq!(result.result.state, DeliveryState::Completed);
+                assert_eq!(
+                    result.result.payload,
+                    Some(PayloadValue::String("42".to_string().into()))
+                );
+                assert_eq!(
+                    result.result.correlation,
+                    Some(Correlation {
+                        request_id: "cmd-roundtrip".to_string().into(),
+                        reply_to: Some(Address::Resource("temp".to_string().into())),
+                    })
+                );
+                match result.transport {
+                    Some(TransportMeta::Http(meta)) => {
+                        assert_eq!(meta.status_code, Some(200));
+                        assert_eq!(
+                            meta.headers,
+                            vec![
+                                (
+                                    "Content-Type".to_string().into(),
+                                    "text/plain".to_string().into()
+                                ),
+                                ("X-Test".to_string().into(), "ok".to_string().into()),
+                                ("Content-Length".to_string().into(), "2".to_string().into()),
+                                ("Connection".to_string().into(), "close".to_string().into()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected http transport, got {other:?}"),
+                }
+            }
+            other => panic!("expected routed result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_http_roundtrip_decodes_rejected_routed_result() {
+        let command = Command {
+            id: "cmd-roundtrip-reject".to_string(),
+            source_device_id: None,
+            target_device_id: "device-1".to_string(),
+            intent: Intent::Read {
+                resource: "temp".to_string(),
+                options: RequestOptions::default(),
+            },
+            correlation: None,
+        };
+        let (addr, _rx, handle) = run_single_request_server(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
+        );
+        let driver = make_http_driver_for_url(addr);
+        let request = driver.native_request(command.clone()).unwrap();
+        let response = runtime_stack::StackRuntime::default()
+            .block_on(driver.execute(request))
+            .expect("http request should return response");
+        handle.join().expect("server should join");
+
+        let decoded = HttpResponseDecoder::new(&driver.dvc, &command)
+            .decode(&response)
+            .expect("response should decode");
+        let routed = RoutedMessage::try_from(decoded).expect("decoded response should route");
+
+        match routed {
+            RoutedMessage::Result(result) => {
+                assert_eq!(result.result.state, DeliveryState::Rejected);
+                assert_eq!(result.result.error.as_deref(), Some("http status 503"));
+            }
+            other => panic!("expected routed result, got {other:?}"),
+        }
     }
 }

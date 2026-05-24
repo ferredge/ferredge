@@ -118,6 +118,88 @@ pub enum MqttNativePlan<'a> {
     },
 }
 
+impl MqttNativePlan<'_> {
+    pub fn into_owned(self) -> MqttNativePlan<'static> {
+        match self {
+            MqttNativePlan::Publish {
+                command_id,
+                topic,
+                payload,
+                delivery,
+                retain,
+                payload_format,
+                content_type,
+                message_expiry_interval_secs,
+                topic_alias,
+                headers,
+                user_properties,
+                reply_to,
+                response_topic,
+                correlation_id,
+                correlation_data,
+            } => MqttNativePlan::Publish {
+                command_id: Cow::Owned(command_id.into_owned()),
+                topic: Cow::Owned(topic.into_owned()),
+                payload: payload.into_owned(),
+                delivery,
+                retain,
+                payload_format,
+                content_type: content_type.map(|value| Cow::Owned(value.into_owned())),
+                message_expiry_interval_secs,
+                topic_alias,
+                headers: headers
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
+                    })
+                    .collect(),
+                user_properties: user_properties
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
+                    })
+                    .collect(),
+                reply_to: reply_to.map(Address::into_owned),
+                response_topic: response_topic.map(|value| Cow::Owned(value.into_owned())),
+                correlation_id: correlation_id.map(|value| Cow::Owned(value.into_owned())),
+                correlation_data,
+            },
+            MqttNativePlan::Subscribe {
+                command_id,
+                topic,
+                delivery,
+                durable_name,
+                shared_group,
+                no_local,
+                retain_as_published,
+                retain_handling,
+                subscription_identifier,
+                user_properties,
+            } => MqttNativePlan::Subscribe {
+                command_id: Cow::Owned(command_id.into_owned()),
+                topic: Cow::Owned(topic.into_owned()),
+                delivery,
+                durable_name: durable_name.map(|value| Cow::Owned(value.into_owned())),
+                shared_group: shared_group.map(|value| Cow::Owned(value.into_owned())),
+                no_local,
+                retain_as_published,
+                retain_handling,
+                subscription_identifier,
+                user_properties: user_properties
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
+                    })
+                    .collect(),
+            },
+            MqttNativePlan::Unsubscribe { command_id, topic } => MqttNativePlan::Unsubscribe {
+                command_id: Cow::Owned(command_id.into_owned()),
+                topic: Cow::Owned(topic.into_owned()),
+            },
+        }
+    }
+}
+
 /// Version-aware MQTT native request produced from routed commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttWirePacket {
