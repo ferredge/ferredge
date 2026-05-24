@@ -1,5 +1,7 @@
 extern crate alloc;
 
+use alloc::borrow::Cow;
+
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
@@ -75,6 +77,45 @@ pub struct MqttSubscriptionRequest {
     pub subscription_identifier: Option<u32>,
     /// Optional MQTT v5 user properties.
     pub user_properties: Vec<(String, String)>,
+}
+
+/// Borrowed native MQTT semantic plan shared by direct and bridge-driven outbound mapping.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum MqttNativePlan<'a> {
+    Publish {
+        command_id: Cow<'a, str>,
+        topic: Cow<'a, str>,
+        payload: ferredge_bridge::BridgePayload<'a>,
+        delivery: Option<DeliveryGuarantee>,
+        retain: bool,
+        payload_format: Option<MqttPayloadFormat>,
+        content_type: Option<Cow<'a, str>>,
+        message_expiry_interval_secs: Option<u32>,
+        topic_alias: Option<u16>,
+        headers: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+        user_properties: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+        reply_to: Option<Address<'a>>,
+        response_topic: Option<Cow<'a, str>>,
+        correlation_id: Option<Cow<'a, str>>,
+        correlation_data: Option<Vec<u8>>,
+    },
+    Subscribe {
+        command_id: Cow<'a, str>,
+        topic: Cow<'a, str>,
+        delivery: Option<DeliveryGuarantee>,
+        durable_name: Option<Cow<'a, str>>,
+        shared_group: Option<Cow<'a, str>>,
+        no_local: bool,
+        retain_as_published: bool,
+        retain_handling: Option<MqttRetainHandling>,
+        subscription_identifier: Option<u32>,
+        user_properties: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+    },
+    Unsubscribe {
+        command_id: Cow<'a, str>,
+        topic: Cow<'a, str>,
+    },
 }
 
 /// Version-aware MQTT native request produced from routed commands.

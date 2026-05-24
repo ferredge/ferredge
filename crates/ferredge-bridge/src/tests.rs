@@ -12,13 +12,19 @@ use crate::{
 
 #[test]
 fn payload_roundtrip_preserves_binary_and_structure() {
-    let payload = PayloadValue::Map(vec![
-        (
-            "text".to_string(),
-            PayloadValue::String("hello".to_string()),
-        ),
-        ("bytes".to_string(), PayloadValue::Bytes(vec![1, 2, 3])),
-    ]);
+    let payload = PayloadValue::Map(
+        vec![
+            (
+                "text".to_string().into(),
+                PayloadValue::String("hello".to_string().into()),
+            ),
+            (
+                "bytes".to_string().into(),
+                PayloadValue::Bytes(vec![1, 2, 3].into()),
+            ),
+        ]
+        .into(),
+    );
 
     let bridge = BridgePayload::from(payload.clone());
     let roundtrip = PayloadValue::from(bridge);
@@ -34,12 +40,12 @@ fn request_response_planner_preserves_correlation_and_resource() {
         target_device_id: "dst".to_string(),
         intent: Intent::Write {
             resource: "setpoint".to_string(),
-            payload: PayloadValue::Bytes(vec![9, 1]),
+            payload: PayloadValue::Bytes(vec![9, 1].into()),
             options: RequestOptions::default(),
         },
         correlation: Some(Correlation {
-            request_id: "root".to_string(),
-            reply_to: Some(Address::Resource("/reply".to_string())),
+            request_id: "root".to_string().into(),
+            reply_to: Some(Address::Resource("/reply".to_string().into())),
         }),
     };
 
@@ -59,7 +65,10 @@ fn request_response_planner_preserves_correlation_and_resource() {
             .map(|value| value.request_id.as_ref()),
         Some("root")
     );
-    assert_eq!(message.payload, Some(BridgePayload::Binary(vec![9, 1])));
+    assert_eq!(
+        message.payload,
+        Some(BridgePayload::Binary(vec![9, 1].into()))
+    );
 }
 
 #[test]
@@ -73,7 +82,7 @@ fn messaging_planner_preserves_topic_and_correlation_id() {
                 name: "topic/a".to_string(),
                 kind: None,
             },
-            payload: PayloadValue::String("hello".to_string()),
+            payload: PayloadValue::String("hello".to_string().into()),
             options: ferredge_core::prelude::BrokerMessageOptions {
                 delivery: Some(DeliveryGuarantee::AtLeastOnce),
                 headers: Vec::new(),
@@ -152,33 +161,14 @@ fn planners_reject_unsupported_intents() {
 }
 
 #[test]
-fn inbound_register_result_maps_back_to_routed_result() {
-    let source = EndpointRef {
-        device_id: "modbus-1".to_string(),
-        protocol: DeviceProtocol::Modbus,
-    };
-
-    let result = planner::inbound_register_result(
-        source.clone(),
-        "cmd-9".to_string(),
-        Some(BridgePayload::Scalar(BridgeScalar::U64(42))),
-        None,
-    );
-
-    assert_eq!(result.source, source);
-    assert_eq!(result.result.command_id, "cmd-9");
-    assert_eq!(result.result.payload, Some(PayloadValue::U64(42)));
-}
-
-#[test]
 fn routed_result_to_bridge_preserves_progress_success_and_failure() {
     let source = EndpointRef {
         device_id: "mqtt-1".to_string(),
         protocol: DeviceProtocol::MQTT,
     };
     let correlation = Some(Correlation {
-        request_id: "corr-1".to_string(),
-        reply_to: Some(Address::Channel("reply/topic".to_string())),
+        request_id: "corr-1".to_string().into(),
+        reply_to: Some(Address::Channel("reply/topic".to_string().into())),
     });
 
     let progress = RoutedResult {
@@ -199,7 +189,7 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
             command_id: "cmd-success".to_string(),
             device_id: "mqtt-1".to_string(),
             state: ferredge_core::prelude::DeliveryState::Completed,
-            payload: Some(PayloadValue::Bytes(vec![4, 2])),
+            payload: Some(PayloadValue::Bytes(vec![4, 2].into())),
             error: None,
             correlation: correlation.clone(),
         },
@@ -211,8 +201,8 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
             command_id: "cmd-rejected".to_string(),
             device_id: "mqtt-1".to_string(),
             state: ferredge_core::prelude::DeliveryState::Rejected,
-            payload: Some(PayloadValue::String("partial".to_string())),
-            error: Some("denied".to_string()),
+            payload: Some(PayloadValue::String("partial".to_string().into())),
+            error: Some("denied".to_string().into()),
             correlation: correlation.clone(),
         },
         transport: None,
@@ -224,7 +214,7 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
             device_id: "mqtt-1".to_string(),
             state: ferredge_core::prelude::DeliveryState::TimedOut,
             payload: None,
-            error: Some("timed out".to_string()),
+            error: Some("timed out".to_string().into()),
             correlation,
         },
         transport: None,

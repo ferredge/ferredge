@@ -108,11 +108,11 @@ fn make_named_driver(broker: String, device_id: &str, client_id: &str) -> MqttDr
 }
 
 struct RecordingSink {
-    events: Arc<Mutex<Vec<RoutedEvent>>>,
+    events: Arc<Mutex<Vec<RoutedEvent<'static>>>>,
 }
 
 impl EventSink for RecordingSink {
-    type Event = RoutedEvent;
+    type Event = RoutedEvent<'static>;
     type Error = ();
 
     fn handle(&mut self, event: Self::Event) -> Result<(), Self::Error> {
@@ -173,7 +173,7 @@ fn publish_packet(
                     name: topic.to_string(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
-                payload: payload.into(),
+                payload: PayloadValue::from(payload).into_owned(),
                 options,
             },
             correlation: None,
@@ -181,7 +181,10 @@ fn publish_packet(
         .expect("publish packet should build")
 }
 
-fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8]) -> RoutedEvent {
+fn wait_for_event_payload(
+    events: &Arc<Mutex<Vec<RoutedEvent<'static>>>>,
+    payload: &[u8],
+) -> RoutedEvent<'static> {
     let deadline = Instant::now() + Duration::from_secs(MOSQUITTO_EVENT_WAIT_TIMEOUT_SECS);
     loop {
         if let Some(event) = events
@@ -198,11 +201,14 @@ fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8])
     }
 }
 
-fn payload_matches(actual: &PayloadValue, expected: &[u8]) -> bool {
-    *actual == PayloadValue::from(expected)
-        || std::str::from_utf8(expected)
-            .map(|value| *actual == PayloadValue::String(value.to_string()))
-            .unwrap_or(false)
+fn payload_matches(actual: &PayloadValue<'_>, expected: &[u8]) -> bool {
+    match actual {
+        PayloadValue::Bytes(bytes) => bytes.as_ref() == expected,
+        PayloadValue::String(value) => std::str::from_utf8(expected)
+            .map(|expected| value.as_ref() == expected)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn wait_for_driver_start(driver: &MqttDriver) {
@@ -233,7 +239,7 @@ fn assert_qos_roundtrip(broker: &MosquittoGuard, delivery: DeliveryGuarantee, su
         &format!("mqtt-publisher-{suffix}"),
         &format!("ferredge-publisher-{suffix}"),
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
     let payload = format!("payload-{suffix}");
 
     block_on(subscriber.start()).expect("subscriber should connect");
@@ -263,7 +269,7 @@ fn assert_qos_roundtrip(broker: &MosquittoGuard, delivery: DeliveryGuarantee, su
     .expect("publisher should publish");
 
     let event = wait_for_event_payload(&events, payload.as_bytes());
-    assert_eq!(event.address, Address::Channel(topic));
+    assert_eq!(event.address, Address::Channel(topic.into()));
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
     block_on(subscriber.stop()).expect("subscriber should stop cleanly");
@@ -283,7 +289,7 @@ fn mosquitto_extended_client_flow() {
         "mqtt-mosquitto-publisher",
         "ferredge-mosquitto-publisher",
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
 
     block_on(subscriber.start()).expect("subscriber should connect");
     block_on(subscriber.subscribe(
@@ -409,7 +415,7 @@ fn mosquitto_keepalive_client_flow_five_seconds() {
 
     wait_for_driver_start(&driver);
     block_on(driver.start_listening(RecordingSink {
-        events: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new())),
     }))
     .expect("listener should start");
 
@@ -438,7 +444,7 @@ fn mosquitto_v5_complex_property_roundtrip() {
         "mqtt-v5-subscriber",
         "ferredge-mosquitto-subscriber",
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
 
     block_on(subscriber.start()).expect("subscriber should connect");
     block_on(subscriber.subscribe(
@@ -479,29 +485,29 @@ fn mosquitto_v5_complex_property_roundtrip() {
     let event = wait_for_event_payload(&events, br#"{"ok":true}"#);
     assert_eq!(
         event.address,
-        Address::Channel("ferredge/it/v5".to_string())
+        Address::Channel("ferredge/it/v5".to_string().into())
     );
     assert_eq!(event.payload, br#"{"ok":true}"#.as_slice().into());
     assert_eq!(
         event.correlation,
         Some(Correlation {
-            request_id: "corr-v5-123".to_string(),
-            reply_to: Some(Address::Channel("ferredge/it/reply".to_string())),
+            request_id: "corr-v5-123".to_string().into(),
+            reply_to: Some(Address::Channel("ferredge/it/reply".to_string().into())),
         })
     );
 
     match event.transport {
         Some(TransportMeta::Mqtt(meta)) => {
-            assert_eq!(meta.content_type, Some("application/json".to_string()));
-            assert_eq!(meta.response_topic, Some("ferredge/it/reply".to_string()));
-            assert_eq!(meta.correlation_data, Some("corr-v5-123".to_string()));
+            assert_eq!(meta.content_type.as_deref(), Some("application/json"));
+            assert_eq!(meta.response_topic.as_deref(), Some("ferredge/it/reply"));
+            assert_eq!(meta.correlation_data.as_deref(), Some("corr-v5-123"));
             assert!(
                 meta.user_properties
-                    .contains(&("x-trace".to_string(), "trace-123".to_string()))
+                    .contains(&("x-trace".to_string().into(), "trace-123".to_string().into()))
             );
             assert!(
                 meta.user_properties
-                    .contains(&("x-origin".to_string(), "ferredge".to_string()))
+                    .contains(&("x-origin".to_string().into(), "ferredge".to_string().into()))
             );
         }
         other => panic!("expected MQTT transport metadata, got {other:?}"),
@@ -673,7 +679,7 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
         "mqtt-retain-subscriber",
         "ferredge-mosquitto-retain-subscriber",
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
     let topic = "ferredge/it/retain";
     let payload = br#"{"retained":true}"#;
 
@@ -712,12 +718,12 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
     .expect("subscriber listener should start");
 
     let event = wait_for_event_payload(&events, payload);
-    assert_eq!(event.address, Address::Channel(topic.to_string()));
+    assert_eq!(event.address, Address::Channel(topic.to_string().into()));
     match event.transport {
         Some(TransportMeta::Mqtt(meta)) => {
             assert!(meta.retain, "retained publish should stay marked retained");
-            assert_eq!(meta.content_type, Some("application/json".to_string()));
-            assert_eq!(meta.payload_format, Some("1".to_string()));
+            assert_eq!(meta.content_type.as_deref(), Some("application/json"));
+            assert_eq!(meta.payload_format.as_deref(), Some("1"));
             assert_eq!(meta.message_expiry_interval_secs, Some(30));
         }
         other => panic!("expected MQTT transport metadata, got {other:?}"),
@@ -752,7 +758,7 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
         "mqtt-subopts-device",
         "ferredge-mosquitto-subopts",
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
     let topic = "ferredge/it/subopts";
 
     block_on(driver.start()).expect("driver should connect");
@@ -854,8 +860,8 @@ fn mosquitto_shared_subscriptions_load_balance() {
         "mqtt-shared-publisher",
         "ferredge-mosquitto-shared-publisher",
     );
-    let events_a = Arc::new(Mutex::new(Vec::new()));
-    let events_b = Arc::new(Mutex::new(Vec::new()));
+    let events_a = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
+    let events_b = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
     let topic = "ferredge/it/shared";
 
     for (driver, events, sub_id) in [
@@ -942,7 +948,7 @@ fn mosquitto_keepalive_client_flow_thirty_five_seconds() {
 
     block_on(driver.start()).expect("driver should connect");
     block_on(driver.start_listening(RecordingSink {
-        events: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new())),
     }))
     .expect("listener should start");
 
@@ -984,7 +990,7 @@ fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
 
     block_on(driver.start()).expect("driver should connect");
     block_on(driver.start_listening(RecordingSink {
-        events: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new())),
     }))
     .expect("listener should start");
 
@@ -1066,7 +1072,7 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
 
     block_on(driver.start()).expect("driver should connect");
     block_on(driver.start_listening(RecordingSink {
-        events: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new())),
     }))
     .expect("listener should start");
 
@@ -1127,7 +1133,7 @@ fn mosquitto_replays_subscriptions_after_restart() {
         true,
         None,
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
 
     block_on(subscriber.start()).expect("subscriber should connect");
     block_on(subscriber.subscribe(
@@ -1168,7 +1174,7 @@ fn mosquitto_replays_subscriptions_after_restart() {
     let event = wait_for_event_payload(&events, b"resub-ok");
     assert_eq!(
         event.address,
-        Address::Channel("ferredge/it/recovery".to_string())
+        Address::Channel("ferredge/it/recovery".to_string().into())
     );
     assert_eq!(
         subscriber
@@ -1201,7 +1207,7 @@ fn mosquitto_replays_queued_publish_after_restart() {
         true,
         None,
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::<RoutedEvent<'static>>::new()));
 
     block_on(driver.start()).expect("driver should connect");
     block_on(driver.subscribe(
@@ -1236,7 +1242,7 @@ fn mosquitto_replays_queued_publish_after_restart() {
     let event = wait_for_event_payload(&events, b"queued-recovery-ok");
     assert_eq!(
         event.address,
-        Address::Channel("ferredge/it/recovery/out".to_string())
+        Address::Channel("ferredge/it/recovery/out".to_string().into())
     );
     assert_eq!(
         driver

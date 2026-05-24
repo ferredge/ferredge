@@ -46,6 +46,7 @@ pub(crate) use runtime_stack::{
 
 pub use convert::ModbusBridgeCodec;
 pub use types::{
-    ModbusBridgeAdapter, ModbusCommandConversionError, ModbusDriver, ModbusParserSeed,
-    ModbusRequest, ModbusResponse, ModbusResponseDecoder,
+    ModbusCommandConversionError, ModbusCommandPlanner, ModbusDecodedResponse, ModbusDriver,
+    ModbusNativePlan, ModbusParserSeed, ModbusRequest, ModbusResponse, ModbusResponseDecoder,
+    ModbusResponseDecoderContext,
 };

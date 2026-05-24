@@ -194,7 +194,7 @@ fn make_rtu_driver(path: String, options: ModbusClientOptions) -> ModbusDriver {
     }))
 }
 
-fn write_command(resource: &str, payload: PayloadValue) -> Command {
+fn write_command(resource: &str, payload: PayloadValue<'static>) -> Command {
     Command {
         id: format!("write-{resource}"),
         source_device_id: None,
@@ -202,6 +202,7 @@ fn write_command(resource: &str, payload: PayloadValue) -> Command {
         intent: Intent::Write {
             resource: resource.to_string(),
             payload,
+            options: RequestOptions::default(),
         },
         correlation: None,
     }
@@ -214,6 +215,7 @@ fn read_command(resource: &str) -> Command {
         target_device_id: "diag-1".to_string(),
         intent: Intent::Read {
             resource: resource.to_string(),
+            options: RequestOptions::default(),
         },
         correlation: None,
     }
@@ -229,8 +231,15 @@ fn expected_coil_read_payload(write_count: usize, read_count: u16) -> Vec<bool> 
     payload
 }
 
-fn payload_value_from_coils(coils: &[bool]) -> PayloadValue {
-    PayloadValue::List(coils.iter().copied().map(PayloadValue::Bool).collect())
+fn payload_value_from_coils(coils: &[bool]) -> PayloadValue<'static> {
+    PayloadValue::List(
+        coils
+            .iter()
+            .copied()
+            .map(PayloadValue::Bool)
+            .collect::<Vec<_>>()
+            .into(),
+    )
 }
 
 async fn assert_driver_coil_round_trip(
@@ -252,7 +261,10 @@ async fn assert_driver_coil_round_trip(
         .execute_command(read_command(read_resource))
         .await
         .expect("coil read should succeed");
-    assert_eq!(response.payload, payload_value_from_coils(&expected));
+    assert_eq!(
+        response.payload().unwrap().into_owned(),
+        payload_value_from_coils(&expected)
+    );
     expected
 }
 

@@ -1,9 +1,12 @@
-use alloc::{borrow::Cow, string::String};
+use alloc::{
+    borrow::Cow,
+    string::{String, ToString},
+};
 
 use ferredge_core::prelude::{
     Address, BrokerMessageProtocolOptions, BrokerSubscriptionProtocolOptions, Command,
     CommandResult, Correlation, DeliveryGuarantee, DeliveryState, EndpointRef, Intent,
-    MqttPayloadFormat, PayloadValue, RoutedEvent, RoutedResult, TransportMeta,
+    MqttPayloadFormat, RoutedEvent, RoutedResult, TransportMeta,
 };
 
 use crate::BridgeResult::{Failure, Progress, Success};
@@ -28,18 +31,15 @@ pub fn command_to_request_response(
         correlation,
     } = command;
     let (route, operation, payload, transport, headers) = match intent {
-        Intent::Read { resource, options } => request_response_parts(
-            Cow::Owned(resource),
-            options,
-            RequestResponseAction::Read,
-            None,
-        ),
+        Intent::Read { resource, options } => {
+            request_response_parts(resource, options, RequestResponseAction::Read, None)
+        }
         Intent::Write {
             resource,
             payload,
             options,
         } => request_response_parts(
-            Cow::Owned(resource),
+            resource,
             options,
             RequestResponseAction::Write,
             Some(BridgePayload::from(payload)),
@@ -49,7 +49,7 @@ pub fn command_to_request_response(
             args,
             options,
         } => request_response_parts(
-            Cow::Owned(operation),
+            operation,
             options,
             RequestResponseAction::Invoke,
             args.map(BridgePayload::from),
@@ -58,7 +58,7 @@ pub fn command_to_request_response(
     };
 
     Ok(BridgeMessage::Command(BridgeCommand {
-        id,
+        id: Cow::Owned(id),
         source_device_id,
         target_device_id,
         capability: BridgeCapability::RequestResponse(RequestResponseCapability {
@@ -69,7 +69,7 @@ pub fn command_to_request_response(
         route,
         transport: Some(BridgeTransportMeta::Http(transport)),
         headers,
-        correlation: bridge_correlation(correlation),
+        correlation: correlation.map(into_bridge_correlation),
     }))
 }
 
@@ -90,17 +90,22 @@ pub fn command_to_messaging(
             payload,
             options,
         } => {
-            let mqtt = match options.protocol {
+            let ferredge_core::prelude::BrokerMessageOptions {
+                delivery,
+                mut headers,
+                reply_to,
+                correlation_id,
+                protocol,
+            } = options;
+            let mqtt = match protocol {
                 Some(BrokerMessageProtocolOptions::Mqtt(mqtt)) => Some(mqtt),
                 None => None,
             };
-            let mut headers = options.headers;
             if let Some(mqtt) = mqtt.as_ref() {
-                let user_properties = mqtt.user_properties.clone();
-                headers.extend(user_properties);
+                headers.extend(mqtt.user_properties.clone());
             }
             Ok(BridgeMessage::Command(BridgeCommand {
-                id,
+                id: Cow::Owned(id),
                 source_device_id,
                 target_device_id,
                 capability: BridgeCapability::Messaging(MessagingCapability {
@@ -114,7 +119,7 @@ pub fn command_to_messaging(
                     topic: Cow::Owned(channel.name),
                 },
                 transport: Some(BridgeTransportMeta::Mqtt(MqttBridgeMeta {
-                    qos: options.delivery.map(qos_from_delivery),
+                    qos: delivery.map(qos_from_delivery),
                     retain: mqtt.as_ref().is_some_and(|mqtt| mqtt.retain),
                     duplicate: false,
                     packet_id: None,
@@ -132,9 +137,9 @@ pub fn command_to_messaging(
                     response_topic: mqtt
                         .as_ref()
                         .and_then(|mqtt| mqtt.response_topic.clone())
-                        .or(options.reply_to.clone())
+                        .or(reply_to)
                         .map(Cow::Owned),
-                    correlation_data: options.correlation_id.clone().map(Cow::Owned),
+                    correlation_data: correlation_id.map(Cow::Owned),
                     correlation_data_bytes: mqtt
                         .as_ref()
                         .and_then(|mqtt| mqtt.correlation_data.clone()),
@@ -149,16 +154,22 @@ pub fn command_to_messaging(
                     retain_handling: None,
                 })),
                 headers: (!headers.is_empty()).then(|| BridgeHeaders::mqtt(headers)),
-                correlation: bridge_correlation(correlation),
+                correlation: correlation.map(into_bridge_correlation),
             }))
         }
         Intent::Subscribe { channel, options } => {
-            let mqtt = match options.protocol {
+            let ferredge_core::prelude::BrokerSubscriptionOptions {
+                delivery,
+                durable_name,
+                shared_group,
+                protocol,
+            } = options;
+            let mqtt = match protocol {
                 Some(BrokerSubscriptionProtocolOptions::Mqtt(mqtt)) => Some(mqtt),
                 None => None,
             };
             Ok(BridgeMessage::Command(BridgeCommand {
-                id,
+                id: Cow::Owned(id),
                 source_device_id,
                 target_device_id,
                 capability: BridgeCapability::Messaging(MessagingCapability {
@@ -172,7 +183,7 @@ pub fn command_to_messaging(
                     topic: Cow::Owned(channel.name),
                 },
                 transport: Some(BridgeTransportMeta::Mqtt(MqttBridgeMeta {
-                    qos: options.delivery.map(qos_from_delivery),
+                    qos: delivery.map(qos_from_delivery),
                     retain: false,
                     duplicate: false,
                     packet_id: None,
@@ -190,8 +201,8 @@ pub fn command_to_messaging(
                         .collect(),
                     reason_codes: alloc::vec::Vec::new(),
                     reason_string: None,
-                    durable_name: options.durable_name.map(Cow::Owned),
-                    shared_group: options.shared_group.map(Cow::Owned),
+                    durable_name: durable_name.map(Cow::Owned),
+                    shared_group: shared_group.map(Cow::Owned),
                     no_local: mqtt.as_ref().is_some_and(|mqtt| mqtt.no_local),
                     retain_as_published: mqtt.as_ref().is_some_and(|mqtt| mqtt.retain_as_published),
                     retain_handling: mqtt.as_ref().and_then(|mqtt| mqtt.retain_handling),
@@ -200,11 +211,11 @@ pub fn command_to_messaging(
                     .as_ref()
                     .filter(|mqtt| !mqtt.user_properties.is_empty())
                     .map(|mqtt| BridgeHeaders::mqtt(mqtt.user_properties.clone())),
-                correlation: bridge_correlation(correlation),
+                correlation: correlation.map(into_bridge_correlation),
             }))
         }
         Intent::Unsubscribe { channel } => Ok(BridgeMessage::Command(BridgeCommand {
-            id,
+            id: Cow::Owned(id),
             source_device_id,
             target_device_id,
             capability: BridgeCapability::Messaging(MessagingCapability {
@@ -219,7 +230,7 @@ pub fn command_to_messaging(
             },
             transport: Some(BridgeTransportMeta::Mqtt(MqttBridgeMeta::default())),
             headers: None,
-            correlation: bridge_correlation(correlation),
+            correlation: correlation.map(into_bridge_correlation),
         })),
         _ => Err(BridgePlannerError::UnsupportedIntent),
     }
@@ -240,7 +251,7 @@ pub fn command_to_register_access(
     } = command;
     match intent {
         Intent::Read { resource, .. } => Ok(bridge_register_command(
-            id,
+            Cow::Owned(id),
             source_device_id,
             target_device_id,
             Cow::Owned(resource),
@@ -253,7 +264,7 @@ pub fn command_to_register_access(
         Intent::Write {
             resource, payload, ..
         } => Ok(bridge_register_command(
-            id,
+            Cow::Owned(id),
             source_device_id,
             target_device_id,
             Cow::Owned(resource),
@@ -268,13 +279,13 @@ pub fn command_to_register_access(
 }
 
 /// Maps inbound messaging semantics back into a routed core event.
-pub fn inbound_messaging_event(
+pub fn inbound_messaging_event<'a>(
     source: EndpointRef,
-    topic: String,
-    payload: BridgePayload,
-    correlation: Option<Correlation>,
-    _content_type: Option<String>,
-) -> RoutedEvent {
+    topic: Cow<'a, str>,
+    payload: BridgePayload<'a>,
+    correlation: Option<Correlation<'a>>,
+    _content_type: Option<Cow<'a, str>>,
+) -> RoutedEvent<'a> {
     RoutedEvent {
         source,
         address: Address::Channel(topic),
@@ -284,29 +295,8 @@ pub fn inbound_messaging_event(
     }
 }
 
-/// Maps inbound register semantics back into a routed core result.
-pub fn inbound_register_result(
-    source: EndpointRef,
-    command_id: String,
-    payload: Option<BridgePayload>,
-    correlation: Option<Correlation>,
-) -> RoutedResult {
-    RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id,
-            device_id: source.device_id,
-            state: DeliveryState::Completed,
-            payload: payload.map(PayloadValue::from),
-            error: None,
-            correlation,
-        },
-        transport: None,
-    }
-}
-
 /// Wraps a routed core result in the bridge result envelope.
-pub fn routed_result_to_bridge(result: RoutedResult) -> BridgeMessage<'static> {
+pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a> {
     let RoutedResult {
         source,
         result,
@@ -320,7 +310,7 @@ pub fn routed_result_to_bridge(result: RoutedResult) -> BridgeMessage<'static> {
         error,
         correlation,
     } = result;
-    let (transport, headers, route) = owned_bridge_transport_parts(transport, None, None);
+    let (transport, headers, route) = bridge_transport_parts(transport, None, None);
     let payload = payload.map(BridgePayload::from);
     let capability = None;
     let operation = None;
@@ -329,42 +319,42 @@ pub fn routed_result_to_bridge(result: RoutedResult) -> BridgeMessage<'static> {
     let bridge_result = match state {
         DeliveryState::Accepted => Progress {
             source,
-            command_id,
+            command_id: Cow::Owned(command_id),
             state: DeliveryState::Accepted,
             capability,
             operation,
             route,
             transport,
             headers,
-            correlation: bridge_correlation(correlation),
+            correlation: correlation.map(into_bridge_correlation),
         },
         DeliveryState::Dispatched => Progress {
             source,
-            command_id,
+            command_id: Cow::Owned(command_id),
             state: DeliveryState::Dispatched,
             capability,
             operation,
             route,
             transport,
             headers,
-            correlation: bridge_correlation(correlation),
+            correlation: correlation.map(into_bridge_correlation),
         },
         DeliveryState::Completed => Success {
             source,
-            command_id,
+            command_id: Cow::Owned(command_id),
             capability,
             operation,
             payload,
             route,
             transport,
             headers,
-            correlation: bridge_correlation(correlation),
+            correlation: correlation.map(into_bridge_correlation),
         },
         DeliveryState::Rejected => {
-            let fault_detail = error.clone();
+            let fault_detail = error.as_ref().map(|value| value.to_string());
             Failure {
                 source,
-                command_id,
+                command_id: Cow::Owned(command_id),
                 state: DeliveryState::Rejected,
                 capability,
                 operation,
@@ -373,7 +363,7 @@ pub fn routed_result_to_bridge(result: RoutedResult) -> BridgeMessage<'static> {
                 route,
                 transport,
                 headers,
-                correlation: bridge_correlation(correlation),
+                correlation: correlation.map(into_bridge_correlation),
                 fault: BridgeFault {
                     category: BridgeFaultCategory::Rejected,
                     protocol_code: None,
@@ -387,10 +377,10 @@ pub fn routed_result_to_bridge(result: RoutedResult) -> BridgeMessage<'static> {
             }
         }
         DeliveryState::TimedOut => {
-            let fault_detail = error.clone();
+            let fault_detail = error.as_ref().map(|value| value.to_string());
             Failure {
                 source,
-                command_id,
+                command_id: Cow::Owned(command_id),
                 state: DeliveryState::TimedOut,
                 capability,
                 operation,
@@ -399,7 +389,7 @@ pub fn routed_result_to_bridge(result: RoutedResult) -> BridgeMessage<'static> {
                 route,
                 transport,
                 headers,
-                correlation: bridge_correlation(correlation),
+                correlation: correlation.map(into_bridge_correlation),
                 fault: BridgeFault {
                     category: BridgeFaultCategory::Timeout,
                     protocol_code: None,
@@ -418,7 +408,7 @@ pub fn routed_result_to_bridge(result: RoutedResult) -> BridgeMessage<'static> {
 }
 
 /// Wraps a routed core event in a bridge event envelope.
-pub fn routed_event_to_bridge(event: RoutedEvent) -> BridgeMessage<'static> {
+pub fn routed_event_to_bridge<'a>(event: RoutedEvent<'a>) -> BridgeMessage<'a> {
     let RoutedEvent {
         source,
         address,
@@ -426,9 +416,8 @@ pub fn routed_event_to_bridge(event: RoutedEvent) -> BridgeMessage<'static> {
         correlation,
         transport: event_transport,
     } = event;
-    let route = owned_bridge_route_from_address(&address, event_transport.as_ref());
-    let (transport, headers, _) =
-        owned_bridge_transport_parts(event_transport, None, Some(&address));
+    let route = bridge_route_from_address(&address, event_transport.as_ref());
+    let (transport, headers, _) = bridge_transport_parts(event_transport, None, Some(&address));
 
     BridgeMessage::Event(BridgeEvent {
         source,
@@ -444,21 +433,21 @@ pub fn routed_event_to_bridge(event: RoutedEvent) -> BridgeMessage<'static> {
         }),
         transport,
         headers,
-        correlation: bridge_correlation(correlation),
+        correlation: correlation.map(into_bridge_correlation),
     })
 }
 
-fn bridge_register_command(
-    id: String,
+fn bridge_register_command<'a>(
+    id: Cow<'a, str>,
     source_device_id: Option<String>,
     target_device_id: String,
-    resource: Cow<'static, str>,
+    resource: Cow<'a, str>,
     register: AddressedAccessMeta,
     unit_id: u8,
     action: RegisterAccessAction,
-    payload: Option<BridgePayload>,
-    correlation: Option<Correlation>,
-) -> BridgeMessage<'static> {
+    payload: Option<BridgePayload<'a>>,
+    correlation: Option<Correlation<'a>>,
+) -> BridgeMessage<'a> {
     BridgeMessage::Command(BridgeCommand {
         id,
         source_device_id,
@@ -475,129 +464,141 @@ fn bridge_register_command(
         },
         transport: None,
         headers: None,
-        correlation: bridge_correlation(correlation),
+        correlation: correlation.map(into_bridge_correlation),
     })
 }
 
 fn request_response_parts(
-    resource: Cow<'static, str>,
+    resource: String,
     options: ferredge_core::prelude::RequestOptions,
     action: RequestResponseAction,
-    payload: Option<BridgePayload>,
+    payload: Option<BridgePayload<'static>>,
 ) -> (
     BridgeRoute<'static>,
     RequestResponseAction,
-    Option<BridgePayload>,
+    Option<BridgePayload<'static>>,
     HttpBridgeMeta<'static>,
     Option<BridgeHeaders<'static>>,
 ) {
-    let headers = (!options.headers.is_empty()).then(|| BridgeHeaders::http(options.headers));
+    let ferredge_core::prelude::RequestOptions {
+        headers,
+        content_type,
+        method,
+        path,
+    } = options;
+    let headers = (!headers.is_empty()).then(|| BridgeHeaders::http(headers));
     (
         BridgeRoute::RequestResponse {
-            resource,
-            path: options.path.clone().map(Cow::Owned),
+            resource: Cow::Owned(resource),
+            path: path.clone().map(Cow::Owned),
         },
         action,
         payload,
         HttpBridgeMeta {
-            method: options.method.map(Cow::Owned),
-            path: options.path.map(Cow::Owned),
+            method: method.map(Cow::Owned),
+            path: path.map(Cow::Owned),
             status_code: None,
-            content_type: options.content_type.map(Cow::Owned),
+            content_type: content_type.map(Cow::Owned),
         },
         headers,
     )
 }
 
-fn bridge_correlation(correlation: Option<Correlation>) -> Option<BridgeCorrelation<'static>> {
-    correlation.map(|correlation| BridgeCorrelation {
-        request_id: Cow::Owned(correlation.request_id),
-        reply_to: correlation.reply_to,
-    })
-}
-
-fn owned_bridge_route_from_address(
-    address: &Address,
-    transport: Option<&TransportMeta>,
-) -> Option<BridgeRoute<'static>> {
+fn bridge_route_from_address<'a>(
+    address: &Address<'a>,
+    transport: Option<&TransportMeta<'a>>,
+) -> Option<BridgeRoute<'a>> {
     match address {
         Address::Channel(topic) => Some(BridgeRoute::Messaging {
-            topic: Cow::Owned(topic.clone()),
+            topic: topic.clone(),
         }),
         Address::Resource(resource) => Some(BridgeRoute::RequestResponse {
-            resource: Cow::Owned(resource.clone()),
+            resource: resource.clone(),
             path: match transport {
-                Some(TransportMeta::Http(meta)) => meta.path.clone().map(Cow::Owned),
+                Some(TransportMeta::Http(meta)) => meta.path.clone(),
                 _ => None,
             },
         }),
     }
 }
 
-fn owned_bridge_transport_parts(
-    transport: Option<TransportMeta>,
-    fallback_route: Option<BridgeRoute<'static>>,
-    address: Option<&Address>,
+fn bridge_transport_parts<'a>(
+    transport: Option<TransportMeta<'a>>,
+    fallback_route: Option<BridgeRoute<'a>>,
+    address: Option<&Address<'a>>,
 ) -> (
-    Option<BridgeTransportMeta<'static>>,
-    Option<BridgeHeaders<'static>>,
-    Option<BridgeRoute<'static>>,
+    Option<BridgeTransportMeta<'a>>,
+    Option<BridgeHeaders<'a>>,
+    Option<BridgeRoute<'a>>,
 ) {
     match transport {
         Some(TransportMeta::Http(meta)) => {
-            let content_type = header_value(&meta.headers, "content-type")
-                .map(|value| Cow::Owned(value.to_string()));
+            let content_type = header_value_cow(&meta.headers, "content-type");
             let route = address.and_then(|address| {
-                owned_bridge_route_from_address(address, Some(&TransportMeta::Http(meta.clone())))
+                bridge_route_from_address(address, Some(&TransportMeta::Http(meta.clone())))
             });
+            let headers = if meta.headers.is_empty() {
+                None
+            } else {
+                Some(BridgeHeaders::http_cow(meta.headers.to_vec()))
+            };
             (
                 Some(BridgeTransportMeta::Http(HttpBridgeMeta {
-                    method: meta.method.map(Cow::Owned),
-                    path: meta.path.map(Cow::Owned),
+                    method: meta.method,
+                    path: meta.path,
                     status_code: meta.status_code,
                     content_type,
                 })),
-                (!meta.headers.is_empty()).then(|| BridgeHeaders::http(meta.headers)),
+                headers,
                 route.or(fallback_route),
             )
         }
         Some(TransportMeta::Mqtt(meta)) => {
             let topic = meta.topic.clone();
+            let headers = if meta.user_properties.is_empty() {
+                None
+            } else {
+                Some(BridgeHeaders::mqtt_cow(meta.user_properties.to_vec()))
+            };
             (
                 Some(BridgeTransportMeta::Mqtt(MqttBridgeMeta {
                     qos: Some(meta.qos),
                     retain: meta.retain,
                     duplicate: meta.duplicate,
                     packet_id: meta.packet_id,
-                    content_type: meta.content_type.map(Cow::Owned),
-                    payload_format: meta.payload_format.map(Cow::Owned),
+                    content_type: meta.content_type,
+                    payload_format: meta.payload_format,
                     message_expiry_interval_secs: meta.message_expiry_interval_secs,
-                    response_topic: meta.response_topic.map(Cow::Owned),
-                    correlation_data: meta.correlation_data.map(Cow::Owned),
-                    correlation_data_bytes: meta.correlation_data_bytes,
+                    response_topic: meta.response_topic,
+                    correlation_data: meta.correlation_data,
+                    correlation_data_bytes: meta
+                        .correlation_data_bytes
+                        .map(|value| value.into_owned()),
                     topic_alias: meta.topic_alias,
-                    subscription_identifiers: meta.subscription_identifiers,
-                    reason_codes: meta.reason_codes.into_iter().map(Cow::Owned).collect(),
-                    reason_string: meta.reason_string.map(Cow::Owned),
+                    subscription_identifiers: meta.subscription_identifiers.to_vec(),
+                    reason_codes: meta.reason_codes.to_vec(),
+                    reason_string: meta.reason_string,
                     durable_name: None,
                     shared_group: None,
                     no_local: false,
                     retain_as_published: false,
                     retain_handling: None,
                 })),
-                (!meta.user_properties.is_empty())
-                    .then(|| BridgeHeaders::mqtt(meta.user_properties)),
+                headers,
                 address
-                    .and_then(|address| owned_bridge_route_from_address(address, None))
-                    .or_else(|| {
-                        Some(BridgeRoute::Messaging {
-                            topic: Cow::Owned(topic),
-                        })
-                    })
+                    .and_then(|address| bridge_route_from_address(address, None))
+                    .or_else(|| Some(BridgeRoute::Messaging { topic }))
                     .or(fallback_route),
             )
         }
         None => (None, None, fallback_route),
+    }
+}
+
+fn into_bridge_correlation<'a>(correlation: Correlation<'a>) -> BridgeCorrelation<'a> {
+    BridgeCorrelation {
+        request_id: correlation.request_id,
+        reply_to: correlation.reply_to,
     }
 }
 
@@ -616,10 +617,13 @@ fn mqtt_payload_format_name(value: &MqttPayloadFormat) -> Cow<'static, str> {
     }
 }
 
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+fn header_value_cow<'a>(
+    headers: &[(Cow<'a, str>, Cow<'a, str>)],
+    name: &str,
+) -> Option<Cow<'a, str>> {
     headers.iter().find_map(|(key, value)| {
         if key.eq_ignore_ascii_case(name) {
-            Some(value.as_str())
+            Some(value.clone())
         } else {
             None
         }

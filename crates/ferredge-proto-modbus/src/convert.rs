@@ -1,8 +1,8 @@
 extern crate alloc;
 
-use alloc::{string::ToString, vec::Vec};
+use alloc::{borrow::Cow, string::ToString, vec::Vec};
 
-use ferredge_bridge::{BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, RegisterAccessAction};
+use ferredge_bridge::{NativeOutbound, ProtocolEncoder, RegisterAccessAction};
 use ferredge_core::prelude::*;
 use rmodbus::{ErrorKind as RmodbusError, ModbusProto, client::ModbusRequest as RmodbusRequest};
 
@@ -10,8 +10,8 @@ use crate::{
     ModbusCommandConversionError, ModbusParserSeed, ModbusRequest, ModbusResponseDecoder,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::encode_wire_frame,
-    types::ModbusCommandRef,
     types::ModbusValue,
+    types::{ModbusCommandRef, ModbusNativePlan},
 };
 
 /// Bridge codec that turns a planned bridge message into a native Modbus request.
@@ -26,12 +26,17 @@ impl<'a> ModbusBridgeCodec<'a> {
             value: ModbusCommandRef { device },
         }
     }
-}
 
-impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
-    type Error = ModbusCommandConversionError;
-
-    fn encode(&self, message: &BridgeMessage<'_>) -> Result<ModbusRequest, Self::Error> {
+    pub fn encode_ref(
+        &self,
+        planned: ModbusNativePlan<'_>,
+    ) -> Result<ModbusRequest, ModbusCommandConversionError> {
+        let ModbusNativePlan {
+            resource,
+            action,
+            payload,
+            ..
+        } = planned;
         let proto = proto_from_endpoint(&self.value.device.endpoint).ok_or_else(|| {
             ModbusCommandConversionError::InvalidResource(
                 "device endpoint is not Modbus".to_string(),
@@ -42,45 +47,34 @@ impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
                 "missing Modbus endpoint options".to_string(),
             )
         })?;
-        let BridgeMessage::Command(command) = message else {
-            return Err(ModbusCommandConversionError::InvalidBridgeMessage);
-        };
-        let BridgeOp::RegisterAccess(operation) = &command.operation else {
-            return Err(ModbusCommandConversionError::InvalidBridgeMessage);
-        };
-        let ferredge_bridge::BridgeRoute::AddressedAccess { resource, .. } = &command.route else {
-            return Err(ModbusCommandConversionError::InvalidBridgeMessage);
-        };
-        let resource = resource.as_ref();
         let attributes = &self
             .value
             .device
             .resources
-            .get(resource)
+            .get(resource.as_ref())
             .ok_or_else(|| ModbusCommandConversionError::UnknownResource(resource.to_string()))?
             .resource_attributes;
 
-        match operation.action {
-            RegisterAccessAction::Read => build_read_request(resource, attributes, proto, options),
+        match action {
+            RegisterAccessAction::Read => {
+                build_read_request(resource.as_ref(), attributes, proto, options)
+            }
             RegisterAccessAction::Write => {
-                let payload = bridge_payload_to_payload_value(
-                    command
-                        .payload
-                        .as_ref()
-                        .ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?,
-                );
-                build_write_request(resource, attributes, &payload, proto, options)
+                let payload = payload.ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?;
+                build_write_request(resource.as_ref(), attributes, payload, proto, options)
             }
         }
     }
-
-    fn decode(&self, _native: ModbusRequest) -> Result<BridgeMessage<'static>, Self::Error> {
-        Err(ModbusCommandConversionError::InvalidBridgeMessage)
-    }
 }
 
-fn bridge_payload_to_payload_value(payload: &BridgePayload) -> PayloadValue {
-    PayloadValue::from(payload.clone())
+impl ProtocolEncoder<NativeOutbound, ModbusNativePlan<'static>, ModbusRequest>
+    for ModbusBridgeCodec<'_>
+{
+    type Error = ModbusCommandConversionError;
+
+    fn encode(&self, planned: ModbusNativePlan<'static>) -> Result<ModbusRequest, Self::Error> {
+        self.encode_ref(planned)
+    }
 }
 
 fn build_read_request(
@@ -146,14 +140,14 @@ fn build_read_request(
     })
 }
 
-fn build_write_request(
+fn build_write_request<'a>(
     resource: &str,
     attributes: &ModbusResourceAttributes,
-    payload: &PayloadValue,
+    payload: PayloadValue<'a>,
     proto: ModbusProto,
     options: &ModbusClientOptions,
 ) -> Result<ModbusRequest, ModbusCommandConversionError> {
-    let payload = modbus_value_from_payload(attributes, payload)?;
+    let payload = modbus_value_from_payload(attributes, &payload)?;
     let mut builder = RmodbusRequest::new(options.unit_id, proto);
     let mut binary_frame = Vec::new();
     let parser_seed = match attributes.register_kind {
@@ -193,7 +187,7 @@ fn build_write_request(
 fn build_coil_write_request(
     resource: &str,
     attributes: &ModbusResourceAttributes,
-    payload: &ModbusValue,
+    payload: &ModbusValue<'_>,
     builder: &mut RmodbusRequest,
     binary_frame: &mut Vec<u8>,
 ) -> Result<ModbusParserSeed, ModbusCommandConversionError> {
@@ -227,7 +221,7 @@ fn build_coil_write_request(
 fn build_holding_write_request(
     resource: &str,
     attributes: &ModbusResourceAttributes,
-    payload: &ModbusValue,
+    payload: &ModbusValue<'_>,
     builder: &mut RmodbusRequest,
     binary_frame: &mut Vec<u8>,
 ) -> Result<ModbusParserSeed, ModbusCommandConversionError> {
@@ -260,21 +254,21 @@ fn build_holding_write_request(
         ModbusValueCodec::Bytes => {
             let values = decode_bytes(payload)?;
             builder
-                .generate_set_holdings_bulk_from_slice(attributes.address, &values, binary_frame)
+                .generate_set_holdings_bulk_from_slice(attributes.address, values, binary_frame)
                 .map_err(map_rmodbus_build_error)?;
             Ok(ModbusParserSeed::WriteMultipleHoldingsBytes {
                 address: attributes.address,
-                values,
+                values: values.to_vec(),
             })
         }
         ModbusValueCodec::Utf8String => {
             let value = decode_string(payload)?;
             builder
-                .generate_set_holdings_string(attributes.address, &value, binary_frame)
+                .generate_set_holdings_string(attributes.address, value, binary_frame)
                 .map_err(map_rmodbus_build_error)?;
             Ok(ModbusParserSeed::WriteString {
                 address: attributes.address,
-                value,
+                value: value.to_string(),
             })
         }
         ModbusValueCodec::Bool | ModbusValueCodec::Bits => Err(
@@ -393,10 +387,10 @@ fn map_rmodbus_build_error(error: RmodbusError) -> ModbusCommandConversionError 
     )
 }
 
-fn modbus_value_from_payload(
+fn modbus_value_from_payload<'a>(
     attributes: &ModbusResourceAttributes,
-    payload: &PayloadValue,
-) -> Result<ModbusValue, ModbusCommandConversionError> {
+    payload: &PayloadValue<'a>,
+) -> Result<ModbusValue<'a>, ModbusCommandConversionError> {
     match attributes.codec {
         ModbusValueCodec::Bool => Ok(ModbusValue::Bool(decode_payload_bool(payload)?)),
         ModbusValueCodec::Bits => Ok(ModbusValue::Bits(decode_payload_bits(payload)?)),
@@ -420,7 +414,7 @@ fn modbus_value_from_payload(
     }
 }
 
-fn decode_bool(payload: &ModbusValue) -> Result<bool, ModbusCommandConversionError> {
+fn decode_bool(payload: &ModbusValue<'_>) -> Result<bool, ModbusCommandConversionError> {
     match payload {
         ModbusValue::Bool(value) => Ok(*value),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
@@ -429,7 +423,7 @@ fn decode_bool(payload: &ModbusValue) -> Result<bool, ModbusCommandConversionErr
     }
 }
 
-fn decode_bits(payload: &ModbusValue) -> Result<Vec<u8>, ModbusCommandConversionError> {
+fn decode_bits(payload: &ModbusValue<'_>) -> Result<Vec<u8>, ModbusCommandConversionError> {
     match payload {
         ModbusValue::Bits(values) => Ok(values.iter().map(|value| u8::from(*value)).collect()),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
@@ -438,7 +432,7 @@ fn decode_bits(payload: &ModbusValue) -> Result<Vec<u8>, ModbusCommandConversion
     }
 }
 
-fn decode_u16(payload: &ModbusValue) -> Result<u16, ModbusCommandConversionError> {
+fn decode_u16(payload: &ModbusValue<'_>) -> Result<u16, ModbusCommandConversionError> {
     match payload {
         ModbusValue::U16(values) if values.len() == 1 => Ok(values[0]),
         ModbusValue::I16(values) if values.len() == 1 => u16::try_from(values[0]).map_err(|_| {
@@ -454,7 +448,7 @@ fn decode_u16(payload: &ModbusValue) -> Result<u16, ModbusCommandConversionError
 
 fn words_from_payload(
     attributes: &ModbusResourceAttributes,
-    payload: &ModbusValue,
+    payload: &ModbusValue<'_>,
 ) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match attributes.codec {
         ModbusValueCodec::U32Be => words_from_u32_be(payload),
@@ -469,7 +463,7 @@ fn words_from_payload(
     }
 }
 
-fn words_from_u32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+fn words_from_u32_be(payload: &ModbusValue<'_>) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match payload {
         ModbusValue::U32(values) => Ok(values
             .iter()
@@ -487,7 +481,7 @@ fn words_from_u32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandCon
     }
 }
 
-fn words_from_i32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+fn words_from_i32_be(payload: &ModbusValue<'_>) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match payload {
         ModbusValue::I32(values) => Ok(values
             .iter()
@@ -505,7 +499,7 @@ fn words_from_i32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandCon
     }
 }
 
-fn words_from_f32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+fn words_from_f32_be(payload: &ModbusValue<'_>) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match payload {
         ModbusValue::F32(values) => Ok(values
             .iter()
@@ -523,7 +517,7 @@ fn words_from_f32_be(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandCon
     }
 }
 
-fn words_from_u32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+fn words_from_u32_le(payload: &ModbusValue<'_>) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match payload {
         ModbusValue::U32(values) => Ok(values
             .iter()
@@ -541,7 +535,7 @@ fn words_from_u32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandCon
     }
 }
 
-fn words_from_i32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+fn words_from_i32_le(payload: &ModbusValue<'_>) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match payload {
         ModbusValue::I32(values) => Ok(values
             .iter()
@@ -559,7 +553,7 @@ fn words_from_i32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandCon
     }
 }
 
-fn words_from_f32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandConversionError> {
+fn words_from_f32_le(payload: &ModbusValue<'_>) -> Result<Vec<u16>, ModbusCommandConversionError> {
     match payload {
         ModbusValue::F32(values) => Ok(values
             .iter()
@@ -577,25 +571,29 @@ fn words_from_f32_le(payload: &ModbusValue) -> Result<Vec<u16>, ModbusCommandCon
     }
 }
 
-fn decode_bytes(payload: &ModbusValue) -> Result<Vec<u8>, ModbusCommandConversionError> {
+fn decode_bytes<'a>(
+    payload: &'a ModbusValue<'_>,
+) -> Result<&'a [u8], ModbusCommandConversionError> {
     match payload {
-        ModbusValue::Bytes(bytes) => Ok(bytes.clone()),
+        ModbusValue::Bytes(bytes) => Ok(bytes.as_ref()),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
             "bytes payload must be binary data".to_string(),
         )),
     }
 }
 
-fn decode_string(payload: &ModbusValue) -> Result<String, ModbusCommandConversionError> {
+fn decode_string<'a>(
+    payload: &'a ModbusValue<'_>,
+) -> Result<&'a str, ModbusCommandConversionError> {
     match payload {
-        ModbusValue::Utf8String(value) => Ok(value.clone()),
+        ModbusValue::Utf8String(value) => Ok(value.as_ref()),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
             "string payload must be utf8 text".to_string(),
         )),
     }
 }
 
-fn decode_payload_bool(payload: &PayloadValue) -> Result<bool, ModbusCommandConversionError> {
+fn decode_payload_bool(payload: &PayloadValue<'_>) -> Result<bool, ModbusCommandConversionError> {
     match payload {
         PayloadValue::Bool(value) => Ok(*value),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
@@ -604,21 +602,27 @@ fn decode_payload_bool(payload: &PayloadValue) -> Result<bool, ModbusCommandConv
     }
 }
 
-fn decode_payload_bits(payload: &PayloadValue) -> Result<Vec<bool>, ModbusCommandConversionError> {
-    let values = payload_list(payload)?;
-    values
-        .iter()
-        .map(|value| match value {
-            PayloadValue::Bool(flag) => Ok(*flag),
-            _ => Err(ModbusCommandConversionError::InvalidPayload(
-                "bits payload entries must be booleans".to_string(),
-            )),
-        })
-        .collect()
+fn decode_payload_bits<'a>(
+    payload: &PayloadValue<'a>,
+) -> Result<Vec<bool>, ModbusCommandConversionError> {
+    match payload {
+        PayloadValue::List(values) => values
+            .iter()
+            .map(|value| match value {
+                PayloadValue::Bool(flag) => Ok(*flag),
+                _ => Err(ModbusCommandConversionError::InvalidPayload(
+                    "bits payload entries must be booleans".to_string(),
+                )),
+            })
+            .collect(),
+        _ => Err(ModbusCommandConversionError::InvalidPayload(
+            "payload must be a list".to_string(),
+        )),
+    }
 }
 
 fn decode_payload_u16_list(
-    payload: &PayloadValue,
+    payload: &PayloadValue<'_>,
 ) -> Result<Vec<u16>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "u16 payload must be unsigned integer", |value| {
         u16::try_from(value).map_err(|_| {
@@ -628,7 +632,7 @@ fn decode_payload_u16_list(
 }
 
 fn decode_payload_i16_list(
-    payload: &PayloadValue,
+    payload: &PayloadValue<'_>,
 ) -> Result<Vec<i16>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "i16 payload must be integer", |value| {
         i16::try_from(value).map_err(|_| {
@@ -638,7 +642,7 @@ fn decode_payload_i16_list(
 }
 
 fn decode_payload_u32_list(
-    payload: &PayloadValue,
+    payload: &PayloadValue<'_>,
 ) -> Result<Vec<u32>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "u32 payload must be unsigned integer", |value| {
         u32::try_from(value).map_err(|_| {
@@ -648,7 +652,7 @@ fn decode_payload_u32_list(
 }
 
 fn decode_payload_i32_list(
-    payload: &PayloadValue,
+    payload: &PayloadValue<'_>,
 ) -> Result<Vec<i32>, ModbusCommandConversionError> {
     decode_numeric_list(payload, "i32 payload must be integer", |value| {
         i32::try_from(value).map_err(|_| {
@@ -658,7 +662,7 @@ fn decode_payload_i32_list(
 }
 
 fn decode_payload_f32_list(
-    payload: &PayloadValue,
+    payload: &PayloadValue<'_>,
 ) -> Result<Vec<f32>, ModbusCommandConversionError> {
     match payload {
         PayloadValue::F64(value) => Ok(vec![*value as f32]),
@@ -681,9 +685,9 @@ fn decode_payload_f32_list(
     }
 }
 
-fn decode_bytes_from_payload_value(
-    payload: &PayloadValue,
-) -> Result<Vec<u8>, ModbusCommandConversionError> {
+fn decode_bytes_from_payload_value<'a>(
+    payload: &PayloadValue<'a>,
+) -> Result<Cow<'a, [u8]>, ModbusCommandConversionError> {
     match payload {
         PayloadValue::Bytes(bytes) => Ok(bytes.clone()),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
@@ -692,7 +696,9 @@ fn decode_bytes_from_payload_value(
     }
 }
 
-fn decode_payload_string(payload: &PayloadValue) -> Result<String, ModbusCommandConversionError> {
+fn decode_payload_string<'a>(
+    payload: &PayloadValue<'a>,
+) -> Result<Cow<'a, str>, ModbusCommandConversionError> {
     match payload {
         PayloadValue::String(value) => Ok(value.clone()),
         _ => Err(ModbusCommandConversionError::InvalidPayload(
@@ -701,17 +707,8 @@ fn decode_payload_string(payload: &PayloadValue) -> Result<String, ModbusCommand
     }
 }
 
-fn payload_list(payload: &PayloadValue) -> Result<&[PayloadValue], ModbusCommandConversionError> {
-    match payload {
-        PayloadValue::List(values) => Ok(values),
-        _ => Err(ModbusCommandConversionError::InvalidPayload(
-            "payload must be a list".to_string(),
-        )),
-    }
-}
-
 fn decode_numeric_list<T, F>(
-    payload: &PayloadValue,
+    payload: &PayloadValue<'_>,
     scalar_error: &'static str,
     map: F,
 ) -> Result<Vec<T>, ModbusCommandConversionError>

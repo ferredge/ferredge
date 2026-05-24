@@ -15,8 +15,8 @@ use alloc::{
 };
 
 use ferredge_bridge::{
-    BridgeCodec, BridgeHeaders, BridgeMessage, BridgeOp, BridgePayload, BridgeTransportMeta,
-    MessagingAction,
+    BridgeHeaders, BridgeMessage, BridgeOp, BridgeOutbound, BridgePayload, BridgeTransportMeta,
+    MessagingAction, ProtocolEncoder,
 };
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
@@ -38,13 +38,15 @@ impl<'a> MqttBridgeCodec<'a> {
     }
 }
 
-impl BridgeCodec<MqttPacketRequest> for MqttBridgeCodec<'_> {
+impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, MqttPacketRequest>
+    for MqttBridgeCodec<'_>
+{
     type Error = MqttCommandConversionError;
 
-    fn encode(&self, message: &BridgeMessage<'_>) -> Result<MqttPacketRequest, Self::Error> {
+    fn encode(&self, message: BridgeMessage<'static>) -> Result<MqttPacketRequest, Self::Error> {
         let config = self.value.endpoint_config()?;
         let version = config.preferred_protocol_version();
-        let BridgeMessage::Command(command) = message else {
+        let BridgeMessage::Command(command) = &message else {
             return Err(MqttCommandConversionError::InvalidBridgeMessage);
         };
         let BridgeOp::Messaging(operation) = &command.operation else {
@@ -52,21 +54,17 @@ impl BridgeCodec<MqttPacketRequest> for MqttBridgeCodec<'_> {
         };
 
         match operation.action {
-            MessagingAction::Publish => build_publish_packet(message, version),
-            MessagingAction::Subscribe => build_subscribe_packet(message, version),
-            MessagingAction::Unsubscribe => build_unsubscribe_packet(message, version),
+            MessagingAction::Publish => build_publish_packet(&message, version),
+            MessagingAction::Subscribe => build_subscribe_packet(&message, version),
+            MessagingAction::Unsubscribe => build_unsubscribe_packet(&message, version),
         }
-    }
-
-    fn decode(&self, _native: MqttPacketRequest) -> Result<BridgeMessage<'static>, Self::Error> {
-        Err(MqttCommandConversionError::InvalidBridgeMessage)
     }
 }
 
 fn mqtt_payload_bytes(payload: &BridgePayload) -> Result<Vec<u8>, MqttCommandConversionError> {
     match payload {
-        BridgePayload::Binary(bytes) => Ok(bytes.clone()),
-        BridgePayload::Text(value) => Ok(value.clone().into_bytes()),
+        BridgePayload::Binary(bytes) => Ok(bytes.to_vec()),
+        BridgePayload::Text(value) => Ok(value.as_bytes().to_vec()),
         BridgePayload::Empty => Ok(Vec::new()),
         other => to_vec(&PayloadValue::from(other.clone()))
             .map_err(MqttCommandConversionError::InvalidPayload),
@@ -127,7 +125,7 @@ fn publish_view_from_bridge<'a>(
     };
     let projected = project_publish_metadata(bridge.transport.as_ref(), bridge.headers.as_ref());
     Ok(PublishBridgeView {
-        command_id: bridge.id.as_str(),
+        command_id: bridge.id.as_ref(),
         topic,
         payload: mqtt_payload_bytes(
             bridge
@@ -179,7 +177,7 @@ fn subscription_view_from_bridge<'a>(
     let projected =
         project_subscription_metadata(bridge.transport.as_ref(), bridge.headers.as_ref());
     Ok(SubscribeBridgeView {
-        command_id: bridge.id.as_str(),
+        command_id: bridge.id.as_ref(),
         topic: channel,
         delivery: mqtt.and_then(|mqtt| delivery_from_qos(mqtt.qos)),
         durable_name: mqtt.and_then(|mqtt| mqtt.durable_name.as_deref()),
@@ -309,7 +307,7 @@ fn mqtt_payload_format_from_bridge(payload_format: Option<&str>) -> Option<MqttP
 
 fn channel_reply_to(address: &Address) -> Option<String> {
     match address {
-        Address::Channel(value) => Some(value.clone()),
+        Address::Channel(value) => Some(value.to_string()),
         Address::Resource(_) => None,
     }
 }

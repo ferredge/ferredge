@@ -3,13 +3,15 @@
 extern crate alloc;
 
 use alloc::{
+    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
 
 use ferredge_bridge::{
-    BridgeAdapter, BridgeCodec, BridgeHeaders, BridgeMessage, BridgeOp, BridgePayload,
-    BridgePlannerError, BridgeRoute, BridgeTransportMeta, RequestResponseAction, planner,
+    BridgeMessage, BridgeOp, BridgeOutbound, BridgePayload, BridgePlannerError, BridgeRoute,
+    BridgeTransportMeta, NativeOutbound, ProtocolDecoder, ProtocolEncoder, ProtocolPlanner,
+    RequestResponseAction, planner,
 };
 use ferredge_core::prelude::*;
 
@@ -118,12 +120,57 @@ impl core::fmt::Debug for HttpDriver {
     }
 }
 
-pub struct HttpBridgeCodec<'a> {
+pub struct HttpRequestEncoder<'a> {
     device: &'a Device<attributes::HttpResourceAttributes>,
 }
 
-/// Bridge adapter for HTTP request/response semantics.
-pub struct HttpBridgeAdapter;
+/// Outbound planner for HTTP request/response semantics.
+pub struct HttpCommandPlanner;
+
+/// Borrowed native outbound HTTP plan shared by direct and bridge-driven planning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpNativePlan<'a> {
+    resource: Cow<'a, str>,
+    action: RequestResponseAction,
+    payload: Option<BridgePayload<'a>>,
+    method: Option<Cow<'a, str>>,
+    path: Option<Cow<'a, str>>,
+    content_type: Option<Cow<'a, str>>,
+    headers: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+}
+
+impl HttpNativePlan<'_> {
+    pub fn into_owned(self) -> HttpNativePlan<'static> {
+        HttpNativePlan {
+            resource: Cow::Owned(self.resource.into_owned()),
+            action: self.action,
+            payload: self.payload.map(BridgePayload::into_owned),
+            method: self.method.map(|value| Cow::Owned(value.into_owned())),
+            path: self.path.map(|value| Cow::Owned(value.into_owned())),
+            content_type: self
+                .content_type
+                .map(|value| Cow::Owned(value.into_owned())),
+            headers: self
+                .headers
+                .into_iter()
+                .map(|(key, value)| (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned())))
+                .collect(),
+        }
+    }
+}
+
+/// Inbound HTTP response decoder bound to one originating command.
+pub struct HttpResponseDecoder<'a> {
+    device: &'a Device<attributes::HttpResourceAttributes>,
+    command: &'a Command,
+}
+
+/// Decoded inbound HTTP response plus bound command context.
+pub struct HttpDecodedResponse<'a, 'ctx> {
+    device: &'ctx Device<attributes::HttpResourceAttributes>,
+    command: &'ctx Command,
+    response: &'a HttpResponse,
+}
 
 impl HttpDriver {
     /// Creates a new HTTP driver from device metadata.
@@ -145,72 +192,151 @@ impl HttpDriver {
         }
     }
 
+    pub fn native_request(
+        &self,
+        command: Command,
+    ) -> Result<HttpRequest, HttpCommandConversionError> {
+        let planner = HttpCommandPlanner;
+        let plan = <HttpCommandPlanner as ProtocolPlanner<
+            NativeOutbound,
+            HttpNativePlan<'static>,
+        >>::plan(&planner, command)?;
+        <HttpRequestEncoder<'_> as ProtocolEncoder<
+            NativeOutbound,
+            HttpNativePlan<'static>,
+            HttpRequest,
+        >>::encode(&HttpRequestEncoder { device: &self.dvc }, plan)
+    }
+
     pub fn bridge_request(
         &self,
         command: Command,
     ) -> Result<HttpRequest, HttpCommandConversionError> {
-        let message = planner::command_to_request_response(command)?;
-        HttpBridgeCodec { device: &self.dvc }.encode(&message)
+        let planner = HttpCommandPlanner;
+        let bridge = <HttpCommandPlanner as ProtocolPlanner<
+            BridgeOutbound,
+            BridgeMessage<'static>,
+        >>::plan(&planner, command)?;
+        let native = HttpNativePlan::try_from(&bridge)?;
+        <HttpRequestEncoder<'_> as ProtocolEncoder<
+            NativeOutbound,
+            HttpNativePlan<'static>,
+            HttpRequest,
+        >>::encode(&HttpRequestEncoder { device: &self.dvc }, native)
     }
 }
 
-impl BridgeAdapter for HttpBridgeAdapter {
+impl ProtocolPlanner<BridgeOutbound, BridgeMessage<'static>> for HttpCommandPlanner {
     type Error = BridgePlannerError;
 
-    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
         planner::command_to_request_response(command)
-    }
-
-    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage<'static>, Self::Error> {
-        Ok(planner::routed_event_to_bridge(event))
-    }
-
-    fn result_to_bridge(
-        &self,
-        result: RoutedResult,
-    ) -> Result<BridgeMessage<'static>, Self::Error> {
-        Ok(planner::routed_result_to_bridge(result))
     }
 }
 
-impl<'a> HttpBridgeCodec<'a> {
+impl ProtocolPlanner<NativeOutbound, HttpNativePlan<'static>> for HttpCommandPlanner {
+    type Error = HttpCommandConversionError;
+
+    fn plan(&self, command: Command) -> Result<HttpNativePlan<'static>, Self::Error> {
+        let (resource, action, payload, options) = match &command.intent {
+            Intent::Read { resource, options } => (
+                resource.as_str(),
+                RequestResponseAction::Read,
+                None,
+                options,
+            ),
+            Intent::Write {
+                resource,
+                payload,
+                options,
+            } => (
+                resource.as_str(),
+                RequestResponseAction::Write,
+                Some(BridgePayload::from(payload.as_borrowed())),
+                options,
+            ),
+            Intent::Invoke {
+                operation,
+                args,
+                options,
+            } => (
+                operation.as_str(),
+                RequestResponseAction::Invoke,
+                args.as_ref()
+                    .map(|payload| BridgePayload::from(payload.as_borrowed())),
+                options,
+            ),
+            _ => return Err(HttpCommandConversionError::UnsupportedIntent),
+        };
+
+        Ok(HttpNativePlan {
+            resource: Cow::Borrowed(resource),
+            action,
+            payload,
+            method: options.method.as_deref().map(Cow::Borrowed),
+            path: options.path.as_deref().map(Cow::Borrowed),
+            content_type: options.content_type.as_deref().map(Cow::Borrowed),
+            headers: options
+                .headers
+                .iter()
+                .map(|(key, value)| (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str())))
+                .collect(),
+        }
+        .into_owned())
+    }
+}
+
+impl<'a> HttpResponseDecoder<'a> {
+    pub fn new(
+        device: &'a Device<attributes::HttpResourceAttributes>,
+        command: &'a Command,
+    ) -> Self {
+        Self { device, command }
+    }
+
+    fn decode_response<'b>(&self, response: &'b HttpResponse) -> HttpDecodedResponse<'b, 'a> {
+        HttpDecodedResponse {
+            device: self.device,
+            command: self.command,
+            response,
+        }
+    }
+}
+
+impl<'a> HttpRequestEncoder<'a> {
     pub fn new(device: &'a Device<attributes::HttpResourceAttributes>) -> Self {
         Self { device }
     }
 }
 
-impl BridgeCodec<HttpRequest> for HttpBridgeCodec<'_> {
+impl ProtocolEncoder<NativeOutbound, HttpNativePlan<'static>, HttpRequest>
+    for HttpRequestEncoder<'_>
+{
     type Error = HttpCommandConversionError;
 
-    fn encode(&self, message: &BridgeMessage<'_>) -> Result<HttpRequest, Self::Error> {
-        let BridgeMessage::Command(command) = message else {
-            return Err(HttpCommandConversionError::InvalidBridgeMessage);
-        };
-        let BridgeOp::RequestResponse(operation) = &command.operation else {
-            return Err(HttpCommandConversionError::InvalidBridgeMessage);
-        };
-        let BridgeRoute::RequestResponse { resource, path } = &command.route else {
-            return Err(HttpCommandConversionError::InvalidBridgeMessage);
-        };
+    fn encode(&self, planned: HttpNativePlan<'static>) -> Result<HttpRequest, Self::Error> {
         let resource_def = self
             .device
             .resources
-            .get(resource.as_ref())
-            .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.to_string()))?;
-        let body = match operation.action {
-            RequestResponseAction::Read | RequestResponseAction::Invoke => command
+            .get(planned.resource.as_ref())
+            .ok_or_else(|| {
+                HttpCommandConversionError::UnknownResource(planned.resource.to_string())
+            })?;
+        let body = match planned.action {
+            RequestResponseAction::Read | RequestResponseAction::Invoke => planned
                 .payload
                 .as_ref()
                 .map(http_body_from_bridge_payload)
                 .transpose()?,
-            RequestResponseAction::Write => command
+            RequestResponseAction::Write => planned
                 .payload
                 .as_ref()
                 .map(http_body_from_bridge_payload)
                 .transpose()?,
         };
         let mut method = resource_def.resource_attributes.method.clone();
-        let mut request_path = path
+        let request_path = planned
+            .path
             .as_deref()
             .unwrap_or(resource_def.resource_attributes.slug.as_str())
             .to_string();
@@ -220,23 +346,18 @@ impl BridgeCodec<HttpRequest> for HttpBridgeCodec<'_> {
             .clone()
             .unwrap_or_default();
 
-        if let Some(BridgeTransportMeta::Http(meta)) = &command.transport {
-            if let Some(override_method) = &meta.method {
-                method = override_method.to_string();
-            }
-            if let Some(override_path) = &meta.path {
-                request_path = override_path.to_string();
-            }
-            if let Some(content_type) = &meta.content_type {
-                merge_header(
-                    &mut headers,
-                    "Content-Type".to_string(),
-                    content_type.to_string(),
-                );
-            }
+        if let Some(override_method) = &planned.method {
+            method = override_method.to_string();
         }
-        if let Some(header_set) = &command.headers {
-            merge_headers(&mut headers, header_set);
+        if let Some(content_type) = &planned.content_type {
+            merge_header(
+                &mut headers,
+                "Content-Type".to_string(),
+                content_type.to_string(),
+            );
+        }
+        for (key, value) in &planned.headers {
+            merge_header(&mut headers, key.to_string(), value.to_string());
         }
 
         Ok(HttpRequest {
@@ -246,18 +367,149 @@ impl BridgeCodec<HttpRequest> for HttpBridgeCodec<'_> {
             headers,
         })
     }
+}
 
-    fn decode(&self, _native: HttpRequest) -> Result<BridgeMessage<'static>, Self::Error> {
-        Err(HttpCommandConversionError::InvalidBridgeMessage)
+impl<'ctx> ProtocolDecoder<HttpResponse> for HttpResponseDecoder<'ctx> {
+    type Error = HttpCommandConversionError;
+    type Decoded<'a>
+        = HttpDecodedResponse<'a, 'ctx>
+    where
+        HttpResponse: 'a;
+
+    fn decode<'a>(&self, native: &'a HttpResponse) -> Result<Self::Decoded<'a>, Self::Error> {
+        Ok(self.decode_response(native))
+    }
+}
+
+impl<'a, 'ctx> TryFrom<HttpDecodedResponse<'a, 'ctx>> for RoutedMessage<'a>
+where
+    'ctx: 'a,
+{
+    type Error = HttpCommandConversionError;
+
+    fn try_from(value: HttpDecodedResponse<'a, 'ctx>) -> Result<Self, Self::Error> {
+        let self_ = value;
+        let (resource, options) = match &self_.command.intent {
+            Intent::Read { resource, options }
+            | Intent::Write {
+                resource, options, ..
+            } => (resource.as_str(), options),
+            Intent::Invoke {
+                operation, options, ..
+            } => (operation.as_str(), options),
+            _ => return Err(HttpCommandConversionError::UnsupportedIntent),
+        };
+
+        let content_type = header_value(&self_.response.headers, "content-type");
+        let payload = http_payload_from_response_body(&self_.response.body, content_type);
+        let transport = TransportMeta::Http(HttpMeta {
+            method: options.method.as_deref().map(Cow::Borrowed),
+            path: options.path.as_deref().map(Cow::Borrowed),
+            status_code: Some(self_.response.status_code),
+            headers: self_
+                .response
+                .headers
+                .iter()
+                .map(|(key, value)| (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str())))
+                .collect(),
+        });
+
+        Ok(RoutedMessage::Result(RoutedResult {
+            source: EndpointRef {
+                device_id: self_.device.id.clone(),
+                protocol: DeviceProtocol::HTTP,
+            },
+            result: CommandResult {
+                command_id: self_.command.id.clone(),
+                device_id: self_.device.id.clone(),
+                state: if self_.response.status_code < 400 {
+                    DeliveryState::Completed
+                } else {
+                    DeliveryState::Rejected
+                },
+                payload: Some(payload),
+                error: (self_.response.status_code >= 400)
+                    .then(|| Cow::Owned(format!("http status {}", self_.response.status_code))),
+                correlation: self_
+                    .command
+                    .correlation
+                    .as_ref()
+                    .map(Correlation::as_borrowed)
+                    .or_else(|| {
+                        Some(Correlation {
+                            request_id: Cow::Borrowed(self_.command.id.as_str()),
+                            reply_to: Some(Address::Resource(Cow::Borrowed(resource))),
+                        })
+                    }),
+            },
+            transport: Some(transport),
+        }))
+    }
+}
+
+impl<'a, 'ctx> TryFrom<HttpDecodedResponse<'a, 'ctx>> for BridgeMessage<'a>
+where
+    'ctx: 'a,
+{
+    type Error = HttpCommandConversionError;
+
+    fn try_from(value: HttpDecodedResponse<'a, 'ctx>) -> Result<Self, Self::Error> {
+        let routed = RoutedMessage::try_from(value)?;
+        let RoutedMessage::Result(result) = routed else {
+            unreachable!("http decoded response always projects to result")
+        };
+        Ok(planner::routed_result_to_bridge(result))
+    }
+}
+
+impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
+    type Error = HttpCommandConversionError;
+
+    fn try_from(message: &BridgeMessage<'a>) -> Result<Self, Self::Error> {
+        let BridgeMessage::Command(command) = message else {
+            return Err(HttpCommandConversionError::InvalidBridgeMessage);
+        };
+        let BridgeOp::RequestResponse(operation) = &command.operation else {
+            return Err(HttpCommandConversionError::InvalidBridgeMessage);
+        };
+        let BridgeRoute::RequestResponse { resource, path } = &command.route else {
+            return Err(HttpCommandConversionError::InvalidBridgeMessage);
+        };
+
+        let mut method = None;
+        let mut content_type = None;
+        if let Some(BridgeTransportMeta::Http(meta)) = &command.transport {
+            method = meta.method.clone();
+            content_type = meta.content_type.clone();
+        }
+
+        Ok(HttpNativePlan {
+            resource: resource.clone(),
+            action: operation.action.clone(),
+            payload: command.payload.clone(),
+            method,
+            path: path.clone(),
+            content_type,
+            headers: command
+                .headers
+                .as_ref()
+                .map(|headers| {
+                    headers
+                        .iter_http_headers()
+                        .map(|header| (header.key.clone(), header.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
     }
 }
 
 fn http_body_from_bridge_payload(
-    payload: &BridgePayload,
+    payload: &BridgePayload<'_>,
 ) -> Result<Vec<u8>, HttpCommandConversionError> {
     match payload {
-        BridgePayload::Binary(bytes) => Ok(bytes.clone()),
-        BridgePayload::Text(value) => Ok(value.clone().into_bytes()),
+        BridgePayload::Binary(bytes) => Ok(bytes.to_vec()),
+        BridgePayload::Text(value) => Ok(value.as_bytes().to_vec()),
         BridgePayload::Empty => Ok(Vec::new()),
         _ => Err(HttpCommandConversionError::InvalidPayload(
             "HTTP bodies currently support only string or bytes payloads".to_string(),
@@ -265,10 +517,26 @@ fn http_body_from_bridge_payload(
     }
 }
 
-fn merge_headers(headers: &mut Vec<(String, String)>, bridge_headers: &BridgeHeaders<'_>) {
-    for header in bridge_headers.iter_http_headers() {
-        merge_header(headers, header.key.to_string(), header.value.to_string());
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|(key, value)| {
+        if key.eq_ignore_ascii_case(name) {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn http_payload_from_response_body<'a>(
+    body: &'a [u8],
+    content_type: Option<&str>,
+) -> PayloadValue<'a> {
+    if content_type.is_some_and(|value| value.starts_with("text/"))
+        && let Ok(text) = core::str::from_utf8(body)
+    {
+        return PayloadValue::String(Cow::Borrowed(text));
     }
+    PayloadValue::Bytes(Cow::Borrowed(body))
 }
 
 fn merge_header(headers: &mut Vec<(String, String)>, key: String, value: String) {
@@ -416,7 +684,7 @@ mod tests {
             target_device_id: "device-1".to_string(),
             intent: Intent::Write {
                 resource: "setpoint".to_string(),
-                payload: PayloadValue::String("42".to_string()),
+                payload: PayloadValue::String("42".to_string().into()),
                 options: RequestOptions::default(),
             },
             correlation: None,
@@ -443,7 +711,7 @@ mod tests {
                     name: "sensors.temp".to_string(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
-                payload: PayloadValue::String("42".to_string()),
+                payload: PayloadValue::String("42".to_string().into()),
                 options: BrokerMessageOptions::default(),
             },
             correlation: None,

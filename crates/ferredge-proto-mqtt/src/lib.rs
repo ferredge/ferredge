@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
-use ferredge_bridge::{BridgeAdapter, BridgeCodec, BridgeMessage, planner};
+use ferredge_bridge::{BridgeMessage, BridgeOutbound, ProtocolEncoder, ProtocolPlanner, planner};
 use ferredge_core::prelude::*;
 
 mod convert;
@@ -53,6 +53,7 @@ use runtime::{
 };
 
 pub use convert::MqttBridgeCodec;
+pub use runtime::{MqttDecodedInbound, MqttInboundDecoder};
 pub use types::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
     MqttCommandConversionError, MqttPublishRequest, MqttSubscriptionRequest, MqttWirePacket,
@@ -61,8 +62,8 @@ pub use types::{
 #[cfg(feature = "std")]
 type MqttAuthHandler = Shared<dyn MqttAuthProvider>;
 
-/// Bridge adapter for MQTT messaging semantics.
-pub struct MqttBridgeAdapter;
+/// Outbound planner for MQTT messaging semantics.
+pub struct MqttCommandPlanner;
 
 const MQTT_CONNECT_IO_TIMEOUT_MS: u64 = 1_000;
 const MQTT_ACK_READ_TIMEOUT_MS: u64 = 250;
@@ -152,7 +153,11 @@ impl MqttDriver {
         command: Command,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
         let message = planner_message_for_command(command)?;
-        MqttBridgeCodec::new(&self.dvc).encode(&message)
+        <MqttBridgeCodec<'_> as ProtocolEncoder<
+            BridgeOutbound,
+            BridgeMessage<'static>,
+            MqttPacketRequest,
+        >>::encode(&MqttBridgeCodec::new(&self.dvc), message)
     }
 
     /// Registers enhanced MQTT v5 auth callback used for connect-time and re-auth exchanges.
@@ -215,8 +220,7 @@ impl MqttDriver {
             keepalive_secs: config.keepalive_secs,
             last_activity: self.runtime.now(),
             awaiting_pingresp: false,
-            pending_command_ids: Map::new(),
-            pending_reply_routes: Map::new(),
+            inbound_decoder: MqttInboundDecoder::new(self.dvc.id.clone()),
             authentication_method: config.connect_properties.authentication_method.clone(),
         };
         let events = session.connection.checked_send(connect_packet);
@@ -350,7 +354,7 @@ impl MqttDriver {
     async fn replay_recovery_state_on_session_async(
         &self,
         session: &mut MqttClientSession,
-    ) -> Result<Vec<RoutedEvent>, String> {
+    ) -> Result<Vec<RoutedEvent<'static>>, String> {
         let reconnect = self.reconnect_config()?;
         let result = async {
             let mut recovered_events = Vec::new();
@@ -408,7 +412,7 @@ impl MqttDriver {
                     _ => None,
                 }));
             }
-            Ok::<Vec<RoutedEvent>, String>(recovered_events)
+            Ok::<Vec<RoutedEvent<'static>>, String>(recovered_events)
         }
         .await;
 
@@ -636,7 +640,7 @@ impl SessionCommand {
 #[derive(Debug, Clone)]
 enum SessionCommandResult {
     Done,
-    Events(Vec<RoutedEvent>),
+    Events(Vec<RoutedEvent<'static>>),
 }
 
 async fn broadcast_listener_status_to_subscribers(
@@ -832,7 +836,7 @@ impl PubSub for MqttDriver {
         sink: S,
     ) -> Result<(), Self::Error>
     where
-        S: EventSink<Event = RoutedEvent> + Send,
+        S: EventSink<Event = RoutedEvent<'static>> + Send,
     {
         {
             self.track_subscription_intent(&subscription)?;
@@ -973,7 +977,7 @@ impl PubSub for MqttDriver {
 }
 
 impl EventSource for MqttDriver {
-    type Event = RoutedEvent;
+    type Event = RoutedEvent<'static>;
     type Error = String;
 
     async fn start_listening<S>(&self, sink: S) -> Result<(), Self::Error>
@@ -1336,7 +1340,7 @@ impl EventSource for MqttDriver {
 fn planner_message_for_command(
     command: Command,
 ) -> Result<ferredge_bridge::BridgeMessage<'static>, MqttCommandConversionError> {
-    match command.intent {
+    match &command.intent {
         Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
             planner::command_to_messaging(command).map_err(Into::into)
         }
@@ -1344,21 +1348,12 @@ fn planner_message_for_command(
     }
 }
 
-impl BridgeAdapter for MqttBridgeAdapter {
+impl ProtocolPlanner<ferredge_bridge::BridgeOutbound, BridgeMessage<'static>>
+    for MqttCommandPlanner
+{
     type Error = MqttCommandConversionError;
 
-    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
         planner_message_for_command(command)
-    }
-
-    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage<'static>, Self::Error> {
-        Ok(planner::routed_event_to_bridge(event))
-    }
-
-    fn result_to_bridge(
-        &self,
-        result: RoutedResult,
-    ) -> Result<BridgeMessage<'static>, Self::Error> {
-        Ok(planner::routed_result_to_bridge(result))
     }
 }
