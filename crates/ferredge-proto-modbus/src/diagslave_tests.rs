@@ -449,9 +449,11 @@ fn diagslave_rtu_over_pty_write_then_read_max_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
     let master_path = pty.master_path();
+    // The socat-backed PTY master can briefly report Closed between non-persistent RTU requests.
+    // Allow a few bounded reopen retries so the follow-up read remains stable on CI.
     let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
         serial: serial_port_config(master_path.clone()),
-        options: ModbusClientOptions::default(),
+        options: modbus_options(false, 3),
     }));
     let modpoll = ModpollEndpoint::Serial {
         mode: "rtu",
@@ -612,9 +614,11 @@ fn diagslave_rtu_over_pty_write_then_read_offset_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("rtu", &pty.slave_path());
     let master_path = pty.master_path();
+    // The socat-backed PTY master can briefly report Closed between non-persistent RTU requests.
+    // Allow a few bounded reopen retries so the follow-up read remains stable on CI.
     let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
         serial: serial_port_config(master_path.clone()),
-        options: ModbusClientOptions::default(),
+        options: modbus_options(false, 3),
     }));
     let modpoll = ModpollEndpoint::Serial {
         mode: "rtu",
