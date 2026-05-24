@@ -8,20 +8,11 @@ pub trait BridgeAdapter {
     type Error;
 
     /// Converts an outbound core command into a bridge message.
-    fn command_to_bridge(&self, command: &Command) -> Result<BridgeMessage, Self::Error>;
+    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage, Self::Error>;
     /// Converts an inbound routed event into a bridge message.
-    fn event_to_bridge(&self, event: &RoutedEvent) -> Result<BridgeMessage, Self::Error>;
+    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage, Self::Error>;
     /// Converts an inbound routed result into a bridge message.
-    fn result_to_bridge(&self, result: &RoutedResult) -> Result<BridgeMessage, Self::Error>;
-}
-
-/// Sink for bridge messages produced by planners or adapters.
-pub trait BridgeEmitter {
-    /// Sink-specific error type.
-    type Error;
-
-    /// Emits one bridge message.
-    fn emit(&mut self, message: BridgeMessage) -> Result<(), Self::Error>;
+    fn result_to_bridge(&self, result: RoutedResult) -> Result<BridgeMessage, Self::Error>;
 }
 
 /// Encode/decode boundary between bridge messages and one native protocol type.

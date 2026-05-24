@@ -3,7 +3,10 @@ use alloc::string::String;
 use ferredge_core::prelude::{Correlation, DeliveryState, DeviceId, EndpointRef};
 use serde::{Deserialize, Serialize};
 
-use crate::{capability::BridgeCapability, meta::BridgeMeta, op::BridgeOp, payload::BridgePayload};
+use crate::{
+    capability::BridgeCapability, fault::BridgeFault, meta::BridgeMeta, op::BridgeOp,
+    payload::BridgePayload,
+};
 
 /// Top-level bridge message envelope shared across protocols.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,23 +61,64 @@ pub struct BridgeEvent {
 
 /// Normalized bridge result or completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BridgeResult {
-    /// Source endpoint that produced the result.
-    pub source: EndpointRef,
-    /// Identifier of the command this result belongs to.
-    pub command_id: String,
-    /// Delivery or completion state.
-    pub state: DeliveryState,
-    /// Optional capability context for the result.
-    pub capability: Option<BridgeCapability>,
-    /// Optional operation context for the result.
-    pub operation: Option<BridgeOp>,
-    /// Optional result payload.
-    pub payload: Option<BridgePayload>,
-    /// Typed metadata associated with the result.
-    pub meta: BridgeMeta,
-    /// Optional correlation metadata.
-    pub correlation: Option<Correlation>,
+pub enum BridgeResult {
+    /// Delivery-progress update that has not completed yet.
+    Progress {
+        /// Source endpoint that produced the result.
+        source: EndpointRef,
+        /// Identifier of the command this result belongs to.
+        command_id: String,
+        /// Delivery state represented by this progress update.
+        state: DeliveryState,
+        /// Optional capability context for the result.
+        capability: Option<BridgeCapability>,
+        /// Optional operation context for the result.
+        operation: Option<BridgeOp>,
+        /// Typed metadata associated with the result.
+        meta: BridgeMeta,
+        /// Optional correlation metadata.
+        correlation: Option<Correlation>,
+    },
+    /// Successful completed command result.
+    Success {
+        /// Source endpoint that produced the result.
+        source: EndpointRef,
+        /// Identifier of the command this result belongs to.
+        command_id: String,
+        /// Optional capability context for the result.
+        capability: Option<BridgeCapability>,
+        /// Optional operation context for the result.
+        operation: Option<BridgeOp>,
+        /// Optional result payload.
+        payload: Option<BridgePayload>,
+        /// Typed metadata associated with the result.
+        meta: BridgeMeta,
+        /// Optional correlation metadata.
+        correlation: Option<Correlation>,
+    },
+    /// Failed command result with normalized bridge fault details.
+    Failure {
+        /// Source endpoint that produced the result.
+        source: EndpointRef,
+        /// Identifier of the command this result belongs to.
+        command_id: String,
+        /// Failure state represented by this result.
+        state: DeliveryState,
+        /// Optional capability context for the result.
+        capability: Option<BridgeCapability>,
+        /// Optional operation context for the result.
+        operation: Option<BridgeOp>,
+        /// Optional result payload.
+        payload: Option<BridgePayload>,
+        /// Optional human-readable error detail.
+        error: Option<String>,
+        /// Typed metadata associated with the result.
+        meta: BridgeMeta,
+        /// Optional correlation metadata.
+        correlation: Option<Correlation>,
+        /// Normalized fault metadata for the failure.
+        fault: BridgeFault,
+    },
 }
 
 /// Bridge fault envelope with optional source and command context.

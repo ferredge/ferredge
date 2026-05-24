@@ -1022,7 +1022,7 @@ pub(crate) fn routed_message_from_packet(
     }
 }
 
-fn pending_reply_route_from_packet(
+pub(crate) fn pending_reply_route_from_packet(
     request: &MqttPacketRequest,
 ) -> Option<(String, PendingReplyRoute)> {
     match &request.packet {

@@ -143,7 +143,7 @@ impl HttpDriver {
 
     pub fn bridge_request(
         &self,
-        command: &Command,
+        command: Command,
     ) -> Result<HttpRequest, HttpCommandConversionError> {
         let message = planner::command_to_request_response(command)?;
         HttpBridgeCodec { device: &self.dvc }.encode(&message)
@@ -153,15 +153,15 @@ impl HttpDriver {
 impl BridgeAdapter for HttpBridgeAdapter {
     type Error = BridgePlannerError;
 
-    fn command_to_bridge(&self, command: &Command) -> Result<BridgeMessage, Self::Error> {
+    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage, Self::Error> {
         planner::command_to_request_response(command)
     }
 
-    fn event_to_bridge(&self, event: &RoutedEvent) -> Result<BridgeMessage, Self::Error> {
+    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage, Self::Error> {
         Ok(planner::routed_event_to_bridge(event))
     }
 
-    fn result_to_bridge(&self, result: &RoutedResult) -> Result<BridgeMessage, Self::Error> {
+    fn result_to_bridge(&self, result: RoutedResult) -> Result<BridgeMessage, Self::Error> {
         Ok(planner::routed_result_to_bridge(result))
     }
 }
@@ -282,6 +282,12 @@ mod tests {
         BrokerAddress, BrokerChannelKind, BrokerMessageOptions, DeviceEndpoint,
         DeviceResourceAccessPermission, DeviceStatus, HttpEndpointConfig, Intent, Map,
     };
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
 
     fn make_driver() -> HttpDriver {
         let mut resources = Map::default();
@@ -340,7 +346,7 @@ mod tests {
         };
 
         let request = driver
-            .bridge_request(&command)
+            .bridge_request(command)
             .expect("read intent should convert");
 
         assert_eq!(request.method, "GET");
@@ -367,7 +373,7 @@ mod tests {
         };
 
         let request = driver
-            .bridge_request(&command)
+            .bridge_request(command)
             .expect("write intent should convert");
 
         assert_eq!(request.method, "POST");
@@ -394,12 +400,100 @@ mod tests {
         };
 
         let error = driver
-            .bridge_request(&command)
+            .bridge_request(command)
             .expect_err("broker send intent should be unsupported");
 
         assert_eq!(
             error,
             HttpCommandConversionError::Bridge(BridgePlannerError::UnsupportedIntent)
         );
+    }
+
+    #[test]
+    fn execute_reports_connect_failure_for_unopened_port() {
+        let driver = make_driver();
+        let error = runtime_stack::StackRuntime::default()
+            .block_on(driver.execute(HttpRequest {
+                method: "GET".to_string(),
+                path: "/api/temp".to_string(),
+                body: None,
+                headers: Vec::new(),
+            }))
+            .unwrap_err();
+
+        assert!(error.contains("failed to connect to endpoint"));
+    }
+
+    #[test]
+    fn execute_reports_invalid_response_when_server_closes_early() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("server should accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("server should set read timeout");
+            let mut buf = [0u8; 128];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhi")
+                .expect("server should write partial response");
+        });
+
+        let driver = make_http_driver_for_url(addr.to_string());
+        let error = runtime_stack::StackRuntime::default()
+            .block_on(driver.execute(HttpRequest {
+                method: "GET".to_string(),
+                path: "/api/temp".to_string(),
+                body: None,
+                headers: Vec::new(),
+            }))
+            .unwrap_err();
+        handle.join().expect("server should join");
+
+        assert!(error.contains("invalid HTTP response"));
+        assert!(error.contains("response body shorter than content-length"));
+    }
+
+    #[test]
+    fn execute_passes_through_non_success_status_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("server should accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("server should set read timeout");
+            let mut buf = [0u8; 128];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
+                )
+                .expect("server should write response");
+        });
+
+        let driver = make_http_driver_for_url(addr.to_string());
+        let response = runtime_stack::StackRuntime::default()
+            .block_on(driver.execute(HttpRequest {
+                method: "GET".to_string(),
+                path: "/api/temp".to_string(),
+                body: None,
+                headers: Vec::new(),
+            }))
+            .expect("http driver should pass through non-2xx response");
+        handle.join().expect("server should join");
+
+        assert!(String::from_utf8_lossy(&response.body).starts_with("HTTP/1.1 503"));
+    }
+
+    fn make_http_driver_for_url(url: String) -> HttpDriver {
+        let mut driver = make_driver();
+        driver.dvc.endpoint = DeviceEndpoint::http(HttpEndpointConfig { url });
+        driver
     }
 }

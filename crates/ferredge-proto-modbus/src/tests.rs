@@ -67,6 +67,113 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
             ),
         },
     );
+    resources.insert(
+        "coil_bits".to_string(),
+        DeviceResource {
+            name: "coil_bits".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: 20,
+                register_kind: ModbusRegisterKind::Coil,
+                codec: ModbusValueCodec::Bits,
+                quantity: Some(3),
+                description: None,
+            },
+            unit: None,
+            permission: Some(
+                DeviceResourceAccessPermission::READ | DeviceResourceAccessPermission::WRITE,
+            ),
+        },
+    );
+    resources.insert(
+        "input_u16".to_string(),
+        DeviceResource {
+            name: "input_u16".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: 200,
+                register_kind: ModbusRegisterKind::InputRegister,
+                codec: ModbusValueCodec::U16,
+                quantity: None,
+                description: None,
+            },
+            unit: None,
+            permission: Some(DeviceResourceAccessPermission::READ),
+        },
+    );
+    resources.insert(
+        "discrete_bool".to_string(),
+        DeviceResource {
+            name: "discrete_bool".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: 30,
+                register_kind: ModbusRegisterKind::DiscreteInput,
+                codec: ModbusValueCodec::Bool,
+                quantity: None,
+                description: None,
+            },
+            unit: None,
+            permission: Some(DeviceResourceAccessPermission::READ),
+        },
+    );
+    resources.insert(
+        "holding_invalid_bits".to_string(),
+        DeviceResource {
+            name: "holding_invalid_bits".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: 300,
+                register_kind: ModbusRegisterKind::HoldingRegister,
+                codec: ModbusValueCodec::Bits,
+                quantity: Some(2),
+                description: None,
+            },
+            unit: None,
+            permission: Some(DeviceResourceAccessPermission::READ),
+        },
+    );
+    resources.insert(
+        "coil_invalid_u16".to_string(),
+        DeviceResource {
+            name: "coil_invalid_u16".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: 40,
+                register_kind: ModbusRegisterKind::Coil,
+                codec: ModbusValueCodec::U16,
+                quantity: None,
+                description: None,
+            },
+            unit: None,
+            permission: Some(DeviceResourceAccessPermission::READ),
+        },
+    );
+    resources.insert(
+        "holding_zero_quantity".to_string(),
+        DeviceResource {
+            name: "holding_zero_quantity".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: 400,
+                register_kind: ModbusRegisterKind::HoldingRegister,
+                codec: ModbusValueCodec::U16,
+                quantity: Some(0),
+                description: None,
+            },
+            unit: None,
+            permission: Some(DeviceResourceAccessPermission::READ),
+        },
+    );
+    resources.insert(
+        "holding_bytes_missing_quantity".to_string(),
+        DeviceResource {
+            name: "holding_bytes_missing_quantity".to_string(),
+            resource_attributes: ModbusResourceAttributes {
+                address: 500,
+                register_kind: ModbusRegisterKind::HoldingRegister,
+                codec: ModbusValueCodec::Bytes,
+                quantity: None,
+                description: None,
+            },
+            unit: None,
+            permission: Some(DeviceResourceAccessPermission::READ),
+        },
+    );
 
     ModbusDriver::new(Device {
         id: "dvc-1".to_string(),
@@ -188,7 +295,7 @@ fn simulate_response(request: &ModbusRequest, response_proto: ModbusProto) -> Ve
 #[test]
 fn build_read_request_for_holding_register() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(&command_read("holding_u16")).unwrap();
+    let request = driver.bridge_request(command_read("holding_u16")).unwrap();
 
     assert_eq!(request.proto, ModbusProto::TcpUdp);
     assert_eq!(request.decoder, crate::ModbusResponseDecoder::U16);
@@ -199,7 +306,7 @@ fn build_read_request_for_holding_register() {
 #[test]
 fn decode_tcp_holding_register_response() {
     let driver = make_driver(tcp_endpoint());
-    let request = driver.bridge_request(&command_read("holding_u16")).unwrap();
+    let request = driver.bridge_request(command_read("holding_u16")).unwrap();
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, PayloadValue::U64(0x1234));
@@ -208,7 +315,7 @@ fn decode_tcp_holding_register_response() {
 #[test]
 fn decode_rtu_coil_response() {
     let driver = make_driver(rtu_endpoint());
-    let request = driver.bridge_request(&command_read("coil_bit")).unwrap();
+    let request = driver.bridge_request(command_read("coil_bit")).unwrap();
     let response = simulate_response(&request, ModbusProto::Rtu);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, PayloadValue::Bool(true));
@@ -217,7 +324,7 @@ fn decode_rtu_coil_response() {
 #[test]
 fn build_rtu_over_tcp_request_uses_rtu_proto() {
     let driver = make_driver(rtu_over_tcp_endpoint());
-    let request = driver.bridge_request(&command_read("holding_u16")).unwrap();
+    let request = driver.bridge_request(command_read("holding_u16")).unwrap();
 
     assert_eq!(request.proto, ModbusProto::Rtu);
     assert!(!request.is_write);
@@ -226,9 +333,7 @@ fn build_rtu_over_tcp_request_uses_rtu_proto() {
 #[test]
 fn decode_ascii_string_response() {
     let driver = make_driver(ascii_endpoint());
-    let request = driver
-        .bridge_request(&command_read("holding_text"))
-        .unwrap();
+    let request = driver.bridge_request(command_read("holding_text")).unwrap();
     let response = simulate_response(&request, ModbusProto::Ascii);
     let decoded = decode_ascii_wire_frame(&response).unwrap();
     let payload = decode_modbus_response(&request, &decoded).unwrap();
@@ -239,11 +344,195 @@ fn decode_ascii_string_response() {
 fn build_write_single_holding_request() {
     let driver = make_driver(tcp_endpoint());
     let request = driver
-        .bridge_request(&command_write("holding_u16", PayloadValue::U64(0x4321)))
+        .bridge_request(command_write("holding_u16", PayloadValue::U64(0x4321)))
         .unwrap();
 
     assert!(request.is_write);
     let response = simulate_response(&request, ModbusProto::TcpUdp);
     let payload = decode_modbus_response(&request, &response).unwrap();
     assert_eq!(payload, PayloadValue::Null);
+}
+
+#[test]
+fn build_write_single_coil_request() {
+    let driver = make_driver(tcp_endpoint());
+    let request = driver
+        .bridge_request(command_write("coil_bit", PayloadValue::Bool(true)))
+        .unwrap();
+
+    assert!(request.is_write);
+    assert_eq!(
+        request.parser_seed,
+        crate::ModbusParserSeed::WriteSingleCoil {
+            address: 12,
+            value: true,
+        }
+    );
+    let response = simulate_response(&request, ModbusProto::TcpUdp);
+    let payload = decode_modbus_response(&request, &response).unwrap();
+    assert_eq!(payload, PayloadValue::Null);
+}
+
+#[test]
+fn build_write_multiple_coils_request() {
+    let driver = make_driver(tcp_endpoint());
+    let request = driver
+        .bridge_request(command_write(
+            "coil_bits",
+            PayloadValue::List(vec![
+                PayloadValue::Bool(true),
+                PayloadValue::Bool(false),
+                PayloadValue::Bool(true),
+            ]),
+        ))
+        .unwrap();
+
+    assert!(request.is_write);
+    assert_eq!(
+        request.parser_seed,
+        crate::ModbusParserSeed::WriteMultipleCoils {
+            address: 20,
+            values: vec![1, 0, 1],
+        }
+    );
+    let response = simulate_response(&request, ModbusProto::TcpUdp);
+    let payload = decode_modbus_response(&request, &response).unwrap();
+    assert_eq!(payload, PayloadValue::Null);
+}
+
+#[test]
+fn write_to_input_register_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_write("input_u16", PayloadValue::U64(9)))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::UnsupportedWrite("input_u16".to_string())
+    );
+}
+
+#[test]
+fn write_to_discrete_input_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_write("discrete_bool", PayloadValue::Bool(true)))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::UnsupportedWrite("discrete_bool".to_string())
+    );
+}
+
+#[test]
+fn holding_register_with_bit_codec_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_read("holding_invalid_bits"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::InvalidResource(
+            "register resources cannot use Bool or Bits codec".to_string()
+        )
+    );
+}
+
+#[test]
+fn coil_with_register_codec_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_read("coil_invalid_u16"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::InvalidResource(
+            "bit resources require Bool or Bits codec".to_string()
+        )
+    );
+}
+
+#[test]
+fn zero_quantity_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_read("holding_zero_quantity"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::InvalidResource(
+            "quantity must be greater than zero".to_string()
+        )
+    );
+}
+
+#[test]
+fn bytes_without_quantity_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_read("holding_bytes_missing_quantity"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::InvalidResource(
+            "quantity is required for raw bytes and string codecs".to_string()
+        )
+    );
+}
+
+#[test]
+fn invalid_coil_payload_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_write(
+            "coil_bit",
+            PayloadValue::String("true".to_string()),
+        ))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::InvalidPayload(
+            "bool payload must be a boolean".to_string()
+        )
+    );
+}
+
+#[test]
+fn invalid_holding_payload_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_write(
+            "holding_u16",
+            PayloadValue::List(vec![PayloadValue::U64(1), PayloadValue::U64(2)]),
+        ))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::InvalidPayload(
+            "u16 payload must be a single 16-bit value".to_string()
+        )
+    );
+}
+
+#[test]
+fn invalid_string_payload_is_rejected() {
+    let driver = make_driver(tcp_endpoint());
+    let error = driver
+        .bridge_request(command_write("holding_text", PayloadValue::U64(1)))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        crate::ModbusCommandConversionError::InvalidPayload(
+            "string payload must be utf8 text".to_string()
+        )
+    );
 }

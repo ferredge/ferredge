@@ -17,21 +17,13 @@ use crate::{
 /// Bridge codec that turns a planned bridge message into a native Modbus request.
 pub struct ModbusBridgeCodec<'a> {
     value: ModbusCommandRef<'a>,
-    resource: &'a str,
-    attributes: &'a ModbusResourceAttributes,
 }
 
 impl<'a> ModbusBridgeCodec<'a> {
-    /// Creates a codec bound to one Modbus device/resource context.
-    pub fn new(
-        device: &'a Device<ModbusResourceAttributes>,
-        resource: &'a str,
-        attributes: &'a ModbusResourceAttributes,
-    ) -> Self {
+    /// Creates a codec bound to one Modbus device context.
+    pub fn new(device: &'a Device<ModbusResourceAttributes>) -> Self {
         Self {
             value: ModbusCommandRef { device },
-            resource,
-            attributes,
         }
     }
 }
@@ -56,11 +48,21 @@ impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
         let BridgeOp::RegisterAccess(operation) = &command.operation else {
             return Err(ModbusCommandConversionError::InvalidBridgeMessage);
         };
+        let resource = command
+            .meta
+            .resource
+            .as_deref()
+            .ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?;
+        let attributes = &self
+            .value
+            .device
+            .resources
+            .get(resource)
+            .ok_or_else(|| ModbusCommandConversionError::UnknownResource(resource.to_string()))?
+            .resource_attributes;
 
         match operation.action {
-            RegisterAccessAction::Read => {
-                build_read_request(self.resource, self.attributes, proto, options)
-            }
+            RegisterAccessAction::Read => build_read_request(resource, attributes, proto, options),
             RegisterAccessAction::Write => {
                 let payload = bridge_payload_to_payload_value(
                     command
@@ -68,7 +70,7 @@ impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
                         .as_ref()
                         .ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?,
                 );
-                build_write_request(self.resource, self.attributes, &payload, proto, options)
+                build_write_request(resource, attributes, &payload, proto, options)
             }
         }
     }

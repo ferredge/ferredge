@@ -13,19 +13,21 @@ use ferredge_core::prelude::{
     Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
     BrokerSubscriptionProtocolOptions, ChannelReceiver, Command, Correlation, DeliveryGuarantee,
-    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, HttpEndpointConfig, Intent,
-    Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions,
-    MqttPayloadFormat, MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions,
-    MqttWillConfig, PayloadValue, PubSub, RoutedEvent, RoutedMessage, TransportMeta,
+    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
+    MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat,
+    MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions, MqttWillConfig, PayloadValue,
+    PubSub, RoutedEvent, RoutedMessage, TransportMeta,
 };
-use ferredge_proto_http::{HttpDriver, attributes::HttpResourceAttributes};
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
 use crate::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthResponse, MqttAuthStage, MqttDriver,
     MqttListenerStatus,
-    runtime::{build_connect_packet, normalize_broker_addr, routed_message_from_packet},
+    runtime::{
+        build_connect_packet, normalize_broker_addr, pending_reply_route_from_packet,
+        routed_message_from_packet,
+    },
     runtime_stack::StackRuntime,
     types::{MqttPacketRequest, MqttWirePacket},
 };
@@ -70,7 +72,7 @@ fn make_default_driver() -> MqttDriver {
 
 fn packet_request(driver: &MqttDriver, command: &Command) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(command)
+        .bridge_packet_request(command.clone())
         .expect("mqtt packet should build")
 }
 
@@ -360,36 +362,6 @@ impl EventSink for RecordingSink {
         self.events.lock().expect("recording sink lock").push(event);
         Ok(())
     }
-}
-
-fn make_http_driver() -> HttpDriver {
-    let mut resources = Map::default();
-    resources.insert(
-        "setpoint".to_string(),
-        ferredge_core::prelude::DeviceResource {
-            name: "setpoint".to_string(),
-            resource_attributes: HttpResourceAttributes {
-                slug: "/api/setpoint".to_string(),
-                method: "POST".to_string(),
-                headers: Some(vec![("Content-Type".to_string(), "text/plain".to_string())]),
-            },
-            unit: Some("C".to_string()),
-            permission: None,
-        },
-    );
-
-    HttpDriver::new(Device {
-        id: "http-device-1".to_string(),
-        name: "HTTP Device".to_string(),
-        status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::http(HttpEndpointConfig {
-            url: "127.0.0.1:8080".to_string(),
-        }),
-        metadata: None,
-        max_connections: Some(4),
-        resources,
-        message_endpoints: Vec::new(),
-    })
 }
 
 #[test]
@@ -702,6 +674,69 @@ fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
 }
 
 #[test]
+fn mqtt_v5_publish_registers_pending_reply_route() {
+    let driver = make_default_driver();
+    let command = ferredge_core::prelude::Command {
+        id: "cmd-route-1".to_string(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".to_string(),
+        intent: ferredge_core::prelude::Intent::Send {
+            channel: BrokerAddress {
+                name: "rpc/request".to_string(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: PayloadValue::Bytes(b"{}".to_vec()),
+            options: BrokerMessageOptions {
+                reply_to: Some("rpc/reply".to_string()),
+                correlation_id: Some("corr-route-1".to_string()),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    let route = pending_reply_route_from_packet(&packet_request(&driver, &command))
+        .expect("route should be registered");
+    assert_eq!(route.0, "corr-route-1");
+    assert_eq!(route.1.command_id, "cmd-route-1");
+    assert_eq!(
+        route.1.reply_to,
+        Some(Address::Channel("rpc/reply".to_string()))
+    );
+}
+
+#[test]
+fn mqtt_v5_publish_registers_pending_reply_route_from_command_id_fallback() {
+    let driver = make_default_driver();
+    let command = ferredge_core::prelude::Command {
+        id: "cmd-route-fallback".to_string(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".to_string(),
+        intent: ferredge_core::prelude::Intent::Send {
+            channel: BrokerAddress {
+                name: "rpc/request".to_string(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: PayloadValue::Bytes(b"{}".to_vec()),
+            options: BrokerMessageOptions {
+                reply_to: Some("rpc/reply".to_string()),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    let route = pending_reply_route_from_packet(&packet_request(&driver, &command))
+        .expect("fallback route should be registered");
+    assert_eq!(route.0, "cmd-route-fallback");
+    assert_eq!(route.1.command_id, "cmd-route-fallback");
+    assert_eq!(
+        route.1.reply_to,
+        Some(Address::Channel("rpc/reply".to_string()))
+    );
+}
+
+#[test]
 fn inbound_publish_packet_converts_to_routed_event() {
     let publish = mqtt::packet::v5_0::Publish::builder()
         .topic_name("sensors/temp")
@@ -753,6 +788,7 @@ fn inbound_publish_packet_converts_to_routed_event() {
                     assert_eq!(meta.content_type, Some("application/json".to_string()));
                     assert_eq!(meta.response_topic, Some("rpc/reply".to_string()));
                     assert_eq!(meta.correlation_data, Some("corr-42".to_string()));
+                    assert_eq!(meta.correlation_data_bytes, Some(b"corr-42".to_vec()));
                     assert_eq!(meta.subscription_identifiers, vec![7]);
                     assert_eq!(
                         meta.user_properties,
@@ -820,6 +856,49 @@ fn inbound_reply_publish_converts_to_routed_result_when_correlation_matches() {
 }
 
 #[test]
+fn inbound_reply_publish_consumes_pending_reply_route_once() {
+    let publish = mqtt::packet::v5_0::Publish::builder()
+        .topic_name("rpc/reply")
+        .unwrap()
+        .payload("done")
+        .props({
+            let mut props = mqtt::packet::Properties::new();
+            props.push(mqtt::packet::Property::CorrelationData(
+                mqtt::packet::CorrelationData::new(b"corr-once".to_vec()).unwrap(),
+            ));
+            props
+        })
+        .build()
+        .unwrap();
+
+    let mut pending_reply_routes = HashMap::from([(
+        "corr-once".to_string(),
+        crate::runtime::PendingReplyRoute {
+            command_id: "cmd-once".to_string(),
+            reply_to: Some(Address::Channel("rpc/reply".to_string())),
+        },
+    )]);
+    let first = routed_message_from_packet(
+        &mut HashMap::new(),
+        &mut pending_reply_routes,
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Publish(publish.clone()),
+    )
+    .expect("first reply should convert");
+    assert!(matches!(first, RoutedMessage::Result(_)));
+    assert!(pending_reply_routes.is_empty());
+
+    let second = routed_message_from_packet(
+        &mut HashMap::new(),
+        &mut pending_reply_routes,
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Publish(publish),
+    )
+    .expect("second publish should convert");
+    assert!(matches!(second, RoutedMessage::Event(_)));
+}
+
+#[test]
 fn v5_puback_failure_converts_to_rejected_result_with_reason_codes() {
     let puback = mqtt::packet::v5_0::Puback::builder()
         .packet_id(42u16)
@@ -850,6 +929,35 @@ fn v5_puback_failure_converts_to_rejected_result_with_reason_codes() {
                 }
                 other => panic!("expected MQTT transport metadata, got {other:?}"),
             }
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
+}
+
+#[test]
+fn v5_puback_success_converts_to_completed_result() {
+    let puback = mqtt::packet::v5_0::Puback::builder()
+        .packet_id(41u16)
+        .reason_code(mqtt::result_code::PubackReasonCode::Success)
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::from([(41u16, "cmd-41".to_string())]),
+        &mut HashMap::new(),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Puback(puback),
+    )
+    .expect("puback packet should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "cmd-41");
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Completed
+            );
+            assert_eq!(result.result.error, None);
         }
         other => panic!("expected routed result, got {other:?}"),
     }
@@ -897,6 +1005,70 @@ fn v5_suback_partial_failure_converts_to_rejected_result_with_reason_codes() {
 }
 
 #[test]
+fn v5_suback_success_converts_to_completed_result() {
+    let suback = mqtt::packet::v5_0::Suback::builder()
+        .packet_id(6u16)
+        .reason_codes(vec![mqtt::result_code::SubackReasonCode::GrantedQos1])
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::from([(6u16, "cmd-sub-6".to_string())]),
+        &mut HashMap::new(),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Suback(suback),
+    )
+    .expect("suback packet should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "cmd-sub-6");
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Completed
+            );
+            assert_eq!(result.result.error, None);
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
+}
+
+#[test]
+fn v5_unsuback_failure_converts_to_rejected_result_with_reason_codes() {
+    let unsuback = mqtt::packet::v5_0::Unsuback::builder()
+        .packet_id(8u16)
+        .reason_codes(vec![mqtt::result_code::UnsubackReasonCode::NotAuthorized])
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::from([(8u16, "cmd-unsub-8".to_string())]),
+        &mut HashMap::new(),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Unsuback(unsuback),
+    )
+    .expect("unsuback packet should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "cmd-unsub-8");
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Rejected
+            );
+            assert_eq!(result.result.error.as_deref(), Some("NotAuthorized"));
+            match result.transport {
+                Some(TransportMeta::Mqtt(meta)) => {
+                    assert_eq!(meta.reason_codes, vec!["NotAuthorized".to_string()]);
+                }
+                other => panic!("expected MQTT transport metadata, got {other:?}"),
+            }
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
+}
+
+#[test]
 fn v5_disconnect_failure_converts_to_rejected_transport_result() {
     let disconnect = mqtt::packet::v5_0::Disconnect::builder()
         .reason_code(mqtt::result_code::DisconnectReasonCode::ServerBusy)
@@ -925,6 +1097,34 @@ fn v5_disconnect_failure_converts_to_rejected_transport_result() {
                 }
                 other => panic!("expected MQTT transport metadata, got {other:?}"),
             }
+        }
+        other => panic!("expected routed result, got {other:?}"),
+    }
+}
+
+#[test]
+fn v5_disconnect_normal_converts_to_completed_transport_result() {
+    let disconnect = mqtt::packet::v5_0::Disconnect::builder()
+        .reason_code(mqtt::result_code::DisconnectReasonCode::NormalDisconnection)
+        .build()
+        .unwrap();
+
+    let message = routed_message_from_packet(
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        "mqtt-device-1",
+        mqtt::packet::Packet::V5_0Disconnect(disconnect),
+    )
+    .expect("disconnect packet should convert");
+
+    match message {
+        RoutedMessage::Result(result) => {
+            assert_eq!(result.result.command_id, "__mqtt_disconnect__");
+            assert_eq!(
+                result.result.state,
+                ferredge_core::prelude::DeliveryState::Completed
+            );
+            assert_eq!(result.result.error, None);
         }
         other => panic!("expected routed result, got {other:?}"),
     }
@@ -1081,40 +1281,6 @@ fn mqtt_listener_reports_failed_when_sink_rejects_event() {
 }
 
 #[test]
-fn bridge_can_translate_mqtt_event_into_http_request() {
-    let http = make_http_driver();
-    let event = RoutedEvent {
-        source: ferredge_core::prelude::EndpointRef {
-            device_id: "mqtt-device-1".to_string(),
-            protocol: ferredge_core::prelude::DeviceProtocol::MQTT,
-        },
-        address: Address::Channel("sensors/temp".to_string()),
-        payload: PayloadValue::Bytes(b"21".to_vec()),
-        correlation: None,
-        transport: None,
-    };
-
-    let _bridge_event = planner::routed_event_to_bridge(&event);
-    let command = Command {
-        id: "bridge-http-write".to_string(),
-        source_device_id: Some(event.source.device_id.clone()),
-        target_device_id: "http-device-1".to_string(),
-        intent: Intent::Write {
-            resource: "setpoint".to_string(),
-            payload: event.payload.clone(),
-        },
-        correlation: event.correlation.clone(),
-    };
-    let request = http
-        .bridge_request(&command)
-        .expect("bridged command should convert to http request");
-
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/api/setpoint");
-    assert_eq!(request.body, Some(b"21".to_vec()));
-}
-
-#[test]
 fn bridge_can_translate_http_command_into_mqtt_publish() {
     let mqtt = make_default_driver();
     let command = Command {
@@ -1144,9 +1310,9 @@ fn bridge_can_translate_http_command_into_mqtt_publish() {
         },
         _ => panic!("expected read intent"),
     };
-    let _bridge_message = planner::command_to_messaging(&mapped_command).unwrap();
+    let _bridge_message = planner::command_to_messaging(mapped_command.clone()).unwrap();
     let packet = mqtt
-        .bridge_packet_request(&mapped_command)
+        .bridge_packet_request(mapped_command)
         .expect("bridged command should convert to mqtt packet");
 
     match packet.packet {

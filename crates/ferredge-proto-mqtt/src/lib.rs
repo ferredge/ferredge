@@ -149,10 +149,10 @@ impl MqttDriver {
 
     pub fn bridge_packet_request(
         &self,
-        command: &Command,
+        command: Command,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-        let message = planner_message_for_command(command)?;
-        MqttBridgeCodec::new(&self.dvc, command).encode(&message)
+        let message = planner_message_for_command(command.clone())?;
+        MqttBridgeCodec::new(&self.dvc, &command).encode(&message)
     }
 
     /// Registers enhanced MQTT v5 auth callback used for connect-time and re-auth exchanges.
@@ -1334,7 +1334,7 @@ impl EventSource for MqttDriver {
 }
 
 fn planner_message_for_command(
-    command: &Command,
+    command: Command,
 ) -> Result<ferredge_bridge::BridgeMessage, MqttCommandConversionError> {
     match command.intent {
         Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
@@ -1347,15 +1347,15 @@ fn planner_message_for_command(
 impl BridgeAdapter for MqttBridgeAdapter {
     type Error = MqttCommandConversionError;
 
-    fn command_to_bridge(&self, command: &Command) -> Result<BridgeMessage, Self::Error> {
+    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage, Self::Error> {
         planner_message_for_command(command)
     }
 
-    fn event_to_bridge(&self, event: &RoutedEvent) -> Result<BridgeMessage, Self::Error> {
+    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage, Self::Error> {
         Ok(planner::routed_event_to_bridge(event))
     }
 
-    fn result_to_bridge(&self, result: &RoutedResult) -> Result<BridgeMessage, Self::Error> {
+    fn result_to_bridge(&self, result: RoutedResult) -> Result<BridgeMessage, Self::Error> {
         Ok(planner::routed_result_to_bridge(result))
     }
 }

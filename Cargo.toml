@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ferredge-bridge",
+    "crates/ferredge-bridge-interop",
     "crates/ferredge-core",
     "crates/ferredge-proto-http",
     "crates/ferredge-proto-modbus",
@@ -9,6 +10,7 @@ members = [
     "crates/ferredge-runtime-tokio",
     "crates/ferredge-runtime-async-std",
     "crates/ferredge-runtime-embassy",
+    "crates/ferredge-test-support",
 ]
 
 [workspace.package]
@@ -21,6 +23,7 @@ rust-version = "1.93"
 [workspace.dependencies]
 # Internal crates
 ferredge-bridge = { path = "crates/ferredge-bridge" }
+ferredge-bridge-interop = { path = "crates/ferredge-bridge-interop" }
 ferredge-core = { path = "crates/ferredge-core" }
 ferredge-proto-http = { path = "crates/ferredge-proto-http" }
 ferredge-proto-modbus = { path = "crates/ferredge-proto-modbus" }
@@ -28,6 +31,7 @@ ferredge-proto-mqtt = { path = "crates/ferredge-proto-mqtt" }
 ferredge-runtime-tokio = { path = "crates/ferredge-runtime-tokio" }
 ferredge-runtime-async-std = { path = "crates/ferredge-runtime-async-std" }
 ferredge-runtime-embassy = { path = "crates/ferredge-runtime-embassy" }
+ferredge-test-support = { path = "crates/ferredge-test-support" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

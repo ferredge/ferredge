@@ -42,3 +42,6 @@ thiserror = { workspace = true }
 ferredge-runtime-tokio = { workspace = true, optional = true }
 ferredge-runtime-async-std = { workspace = true, optional = true }
 ferredge-runtime-embassy = { workspace = true, optional = true }
+
+[dev-dependencies]
+ferredge-test-support = { workspace = true, features = ["tokio-runtime"] }

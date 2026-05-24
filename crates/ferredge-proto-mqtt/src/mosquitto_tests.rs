@@ -1,9 +1,12 @@
 use std::{
-    net::{TcpListener, TcpStream},
-    process::{Child, Command as ProcessCommand, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    process::{Command as ProcessCommand, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
+};
+
+use ferredge_test_support::{
+    mosquitto::MosquittoGuard, process::require_command, runtime::block_on,
 };
 
 use ferredge_core::prelude::{
@@ -16,9 +19,7 @@ use ferredge_core::prelude::{
     RoutedEvent, TransportMeta,
 };
 
-use crate::{
-    MqttDriver, MqttListenerStatus, runtime_stack::StackRuntime, types::MqttPacketRequest,
-};
+use crate::{MqttDriver, MqttListenerStatus, types::MqttPacketRequest};
 
 const MOSQUITTO_START_TIMEOUT_SECS: u64 = 5;
 const MOSQUITTO_EVENT_WAIT_TIMEOUT_SECS: u64 = 5;
@@ -31,9 +32,9 @@ const MOSQUITTO_RECONNECT_SETTLE_MS: u64 = 1_200;
 const MOSQUITTO_KEEPALIVE_SHORT_SECS: u64 = 5;
 const MOSQUITTO_KEEPALIVE_LONG_SECS: u64 = 35;
 
-fn block_on<F: core::future::Future>(future: F) -> F::Output {
-    static RUNTIME: OnceLock<StackRuntime> = OnceLock::new();
-    RUNTIME.get_or_init(StackRuntime::default).block_on(future)
+fn require_mosquitto_cli() {
+    require_command("mosquitto_pub");
+    require_command("mosquitto_sub");
 }
 
 fn make_driver_with_client_id_and_keepalive(
@@ -106,76 +107,6 @@ fn make_named_driver(broker: String, device_id: &str, client_id: &str) -> MqttDr
     )
 }
 
-fn reserve_free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("free port probe should bind")
-        .local_addr()
-        .expect("free port probe should have addr")
-        .port()
-}
-
-struct MosquittoGuard {
-    child: Option<Child>,
-    port: u16,
-}
-
-impl MosquittoGuard {
-    fn start() -> Self {
-        let port = reserve_free_port();
-        let mut guard = Self { child: None, port };
-        guard.start_broker();
-        guard
-    }
-
-    fn start_broker(&mut self) {
-        assert!(self.child.is_none(), "mosquitto broker already running");
-        let child = ProcessCommand::new("mosquitto")
-            .args(["-p", &self.port.to_string(), "-v"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("mosquitto should spawn");
-        self.child = Some(child);
-
-        let deadline = Instant::now() + Duration::from_secs(MOSQUITTO_START_TIMEOUT_SECS);
-        loop {
-            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "mosquitto should start before timeout"
-            );
-            thread::sleep(Duration::from_millis(MOSQUITTO_POLL_INTERVAL_MS));
-        }
-    }
-
-    fn stop_broker(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    fn host(&self) -> String {
-        "127.0.0.1".to_string()
-    }
-
-    fn port_string(&self) -> String {
-        self.port.to_string()
-    }
-
-    fn broker_url(&self) -> String {
-        format!("mqtt://127.0.0.1:{}", self.port)
-    }
-}
-
-impl Drop for MosquittoGuard {
-    fn drop(&mut self) {
-        self.stop_broker();
-    }
-}
-
 struct RecordingSink {
     events: Arc<Mutex<Vec<RoutedEvent>>>,
 }
@@ -192,7 +123,7 @@ impl EventSink for RecordingSink {
 
 fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(&Command {
+        .bridge_packet_request(Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -210,7 +141,7 @@ fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketReq
 
 fn unsubscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(&Command {
+        .bridge_packet_request(Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -233,7 +164,7 @@ fn publish_packet(
     options: BrokerMessageOptions,
 ) -> MqttPacketRequest {
     driver
-        .bridge_packet_request(&Command {
+        .bridge_packet_request(Command {
             id: id.to_string(),
             source_device_id: None,
             target_device_id: driver.dvc.id.clone(),
@@ -340,6 +271,7 @@ fn assert_qos_roundtrip(broker: &MosquittoGuard, delivery: DeliveryGuarantee, su
 
 #[test]
 fn mosquitto_extended_client_flow() {
+    require_mosquitto_cli();
     let broker = MosquittoGuard::start();
     let subscriber = make_named_driver(
         broker.broker_url(),
@@ -371,7 +303,7 @@ fn mosquitto_extended_client_flow() {
     let pub_status = ProcessCommand::new("mosquitto_pub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -392,7 +324,7 @@ fn mosquitto_extended_client_flow() {
     let sub_child = ProcessCommand::new("mosquitto_sub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -436,7 +368,7 @@ fn mosquitto_extended_client_flow() {
     let pub_status = ProcessCommand::new("mosquitto_pub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -581,12 +513,13 @@ fn mosquitto_v5_complex_property_roundtrip() {
 
 #[test]
 fn mosquitto_will_publishes_after_ungraceful_driver_drop() {
+    require_mosquitto_cli();
     let broker = MosquittoGuard::start();
     let will_topic = "ferredge/it/will";
     let subscriber = ProcessCommand::new("mosquitto_sub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -663,6 +596,7 @@ fn mosquitto_will_publishes_after_ungraceful_driver_drop() {
 
 #[test]
 fn mosquitto_v5_topic_alias_publish_is_accepted_by_broker() {
+    require_mosquitto_cli();
     let broker = MosquittoGuard::start();
     let publisher = make_named_driver(
         broker.broker_url(),
@@ -672,7 +606,7 @@ fn mosquitto_v5_topic_alias_publish_is_accepted_by_broker() {
     let subscriber = ProcessCommand::new("mosquitto_sub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -727,6 +661,7 @@ fn mosquitto_v5_topic_alias_publish_is_accepted_by_broker() {
 
 #[test]
 fn mosquitto_retained_publish_roundtrip_preserves_meta() {
+    require_mosquitto_cli();
     let broker = MosquittoGuard::start();
     let publisher = make_named_driver(
         broker.broker_url(),
@@ -791,7 +726,7 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
     let clear_status = ProcessCommand::new("mosquitto_pub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -810,6 +745,7 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
 
 #[test]
 fn mosquitto_v5_subscription_identifier_and_no_local_work() {
+    require_mosquitto_cli();
     let broker = MosquittoGuard::start();
     let driver = make_named_driver(
         broker.broker_url(),
@@ -823,7 +759,7 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
     block_on(
         driver.subscribe(
             driver
-                .bridge_packet_request(&Command {
+                .bridge_packet_request(Command {
                     id: "subopts-sub".to_string(),
                     source_device_id: None,
                     target_device_id: driver.dvc.id.clone(),
@@ -875,7 +811,7 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
     let pub_status = ProcessCommand::new("mosquitto_pub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -930,7 +866,7 @@ fn mosquitto_shared_subscriptions_load_balance() {
         block_on(
             driver.subscribe(
                 driver
-                    .bridge_packet_request(&Command {
+                    .bridge_packet_request(Command {
                         id: sub_id.to_string(),
                         source_device_id: None,
                         target_device_id: driver.dvc.id.clone(),
@@ -1024,6 +960,7 @@ fn mosquitto_keepalive_client_flow_thirty_five_seconds() {
 
 #[test]
 fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
+    require_mosquitto_cli();
     let mut broker = MosquittoGuard::start();
     let driver = make_driver_with_config(
         broker.broker_url(),
@@ -1058,7 +995,7 @@ fn mosquitto_listener_reconnects_after_broker_restart_for_publish() {
     let sub_child = ProcessCommand::new("mosquitto_sub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",
@@ -1168,6 +1105,7 @@ fn mosquitto_listener_fails_after_reconnect_attempt_budget_exhausted() {
 
 #[test]
 fn mosquitto_replays_subscriptions_after_restart() {
+    require_mosquitto_cli();
     let mut broker = MosquittoGuard::start();
     let reconnect = BrokerReconnectConfig {
         enabled: true,
@@ -1213,7 +1151,7 @@ fn mosquitto_replays_subscriptions_after_restart() {
     let pub_status = ProcessCommand::new("mosquitto_pub")
         .args([
             "-h",
-            broker.host().as_str(),
+            broker.host(),
             "-p",
             broker.port_string().as_str(),
             "-V",

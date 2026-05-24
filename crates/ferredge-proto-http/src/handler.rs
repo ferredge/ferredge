@@ -10,6 +10,7 @@ use ferredge_core::prelude::{
 
 use crate::HttpRequest;
 
+#[derive(Debug)]
 struct ParsedEndpoint {
     connect_target: String,
     host_header: String,
@@ -31,6 +32,8 @@ pub(crate) enum HttpTransportError {
     FlushRequest(#[source] NetError),
     #[error("failed to read response: {0}")]
     ReadResponse(#[source] NetError),
+    #[error("invalid HTTP response: {0}")]
+    InvalidResponse(String),
 }
 
 /// Sends one native HTTP request to endpoint and returns raw response bytes.
@@ -93,6 +96,8 @@ where
         response.extend_from_slice(&buffer[..count]);
     }
 
+    validate_response(&response)?;
+
     Ok(response)
 }
 
@@ -148,9 +153,35 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, HttpTransportError> 
     }
 }
 
+fn validate_response(response: &[u8]) -> Result<(), HttpTransportError> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| {
+            HttpTransportError::InvalidResponse("missing header terminator".to_string())
+        })?;
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    if let Some(expected_len) = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    }) {
+        let body_len = response.len().saturating_sub(header_end + 4);
+        if body_len < expected_len {
+            return Err(HttpTransportError::InvalidResponse(
+                "response body shorter than content-length".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_endpoint;
+    use super::{HttpTransportError, parse_endpoint, validate_response};
 
     #[test]
     fn parse_endpoint_adds_default_ports() {
@@ -196,5 +227,42 @@ mod tests {
             parse_endpoint("https://example.com/api/v1").expect("url with path should parse");
         assert_eq!(parsed.connect_target, "example.com:443");
         assert_eq!(parsed.host_header, "example.com");
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_missing_authority() {
+        assert_eq!(
+            parse_endpoint("http:///api").unwrap_err(),
+            HttpTransportError::MissingAuthority
+        );
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_malformed_ipv6_authority() {
+        assert_eq!(
+            parse_endpoint("http://[::1/api").unwrap_err(),
+            HttpTransportError::MalformedIpv6Authority
+        );
+    }
+
+    #[test]
+    fn validate_response_rejects_missing_headers() {
+        assert_eq!(
+            validate_response(b"oops").unwrap_err(),
+            HttpTransportError::InvalidResponse("missing header terminator".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_response_rejects_truncated_body() {
+        assert_eq!(
+            validate_response(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nhi"
+            )
+            .unwrap_err(),
+            HttpTransportError::InvalidResponse(
+                "response body shorter than content-length".to_string()
+            )
+        );
     }
 }

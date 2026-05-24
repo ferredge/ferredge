@@ -1,0 +1,36 @@
+[package]
+name = "ferredge-bridge-interop"
+description = "Bridge-level interoperability tests across HTTP, MQTT, and Modbus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["tokio-runtime", "integration"]
+tokio-runtime = [
+    "dep:ferredge-test-support",
+    "ferredge-proto-http/tokio-runtime",
+    "ferredge-proto-mqtt/tokio-runtime",
+    "ferredge-proto-modbus/tokio-runtime",
+    "ferredge-test-support/tokio-runtime",
+]
+async-std-runtime = [
+    "dep:ferredge-test-support",
+    "ferredge-proto-http/async-std-runtime",
+    "ferredge-proto-mqtt/async-std-runtime",
+    "ferredge-proto-modbus/async-std-runtime",
+    "ferredge-test-support/async-std-runtime",
+]
+integration = []
+
+[dependencies]
+ferredge-bridge = { workspace = true }
+ferredge-core = { workspace = true, features = ["net", "runtime", "serial", "sync"] }
+ferredge-proto-http = { workspace = true }
+ferredge-proto-modbus = { workspace = true }
+ferredge-proto-mqtt = { workspace = true }
+ferredge-test-support = { workspace = true, optional = true }
+
+[dev-dependencies]

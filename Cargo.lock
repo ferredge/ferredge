@@ -381,6 +381,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferredge-bridge-interop"
+version = "0.1.0"
+dependencies = [
+ "ferredge-bridge",
+ "ferredge-core",
+ "ferredge-proto-http",
+ "ferredge-proto-modbus",
+ "ferredge-proto-mqtt",
+ "ferredge-test-support",
+]
+
+[[package]]
 name = "ferredge-core"
 version = "0.1.0"
 dependencies = [
@@ -413,6 +425,7 @@ dependencies = [
  "ferredge-runtime-async-std",
  "ferredge-runtime-embassy",
  "ferredge-runtime-tokio",
+ "ferredge-test-support",
  "rmodbus",
  "serde",
  "thiserror",
@@ -424,10 +437,10 @@ version = "0.1.0"
 dependencies = [
  "ferredge-bridge",
  "ferredge-core",
- "ferredge-proto-http",
  "ferredge-runtime-async-std",
  "ferredge-runtime-embassy",
  "ferredge-runtime-tokio",
+ "ferredge-test-support",
  "mqtt-protocol-core",
  "serde",
  "serde_json",
@@ -458,6 +471,14 @@ dependencies = [
  "serialport",
  "tokio",
  "tokio-serial",
+]
+
+[[package]]
+name = "ferredge-test-support"
+version = "0.1.0"
+dependencies = [
+ "ferredge-runtime-async-std",
+ "ferredge-runtime-tokio",
 ]
 
 [[package]]
