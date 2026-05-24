@@ -1,8 +1,14 @@
 # README
 
+> [!WARNING]
+>
+> This codebase is not stable yet.
+>
+> Expect significant API churn, breaking changes, and sharp edges while taking shape.
+
 ### Problem statement
 
-This project is planned to be a device and data agregator for edge devices and also serve as command and control, serving as a rust based alternative to edgex. It plans to work in tandem with major edge device protocols including:-
+This project is planned to be a device and data agregator for edge devices and also serve as protocol bridge across. It plans to work in tandem with major edge device protocols including:-
 - mqtt
 - http
 - modbus
@@ -12,8 +18,9 @@ This project is planned to be a device and data agregator for edge devices and a
 - uart
 - gpio
 - onif
+- canbus
 
-A big limitation of edgex is that it is modelled completely in microservice architecture with rest based communication (or via message bus). However, most for industrial applications the entire stack is deployed in a single machine (except occasionally the database / message bus). Here the microservices become an additional overhead, and horizontal scalablity is not always necessary. Also devices aren't able to directly communicate with each other in their native protocols.
+A big limitation of [EdgeX](https://www.edgexfoundry.org/) is that it is modelled completely in microservice architecture with REST based communication (or via message bus). However, most for industrial applications the entire stack is deployed in a single machine (except occasionally the database / message bus). Here the microservices become an additional overhead, and horizontal scalablity is not always necessary. Also devices aren't able to directly communicate with each other in their native protocols.
 
 Additionally, since it contains too many moving parts debugging root cause issues become a pain point. Hence this project to address these shortcomings.
 
@@ -27,7 +34,7 @@ Additionally we may incorporate various OS specific IPC protocols such as Dbus, 
 
 ### What was that about direct communication between devices?
 
-We are planning to have devices be able to communicate with other devices so long as the target can be supported. Keep in mind that most protocols would not support back and forth communcation without data loss and complex conversion mechanisms. For example, you can control a modbus device via coap but not vice versa. At least not without serious abstractions.
+We have an abstraction bridge layer that can convert messages from one protocol to another with near zero-copy conversion. This means that if you have a modbus device and an mqtt device, you can directly communicate between them without needing to convert the modbus message to a mqtt message and then back to modbus. This is achieved by having a common intermediate representation of messages that can be easily converted to and from different protocols.
 
 ### What about UI?
 
@@ -35,7 +42,7 @@ Incoming as a future goal. Once we nail down the core functionality.
 
 ### What about App service sdk?
 
-Not an immediate goal. You can just use the FFIs or device SDKs to communicate and do whatever you want.
+Not an immediate goal. You can just use the FFIs or as a library to communicate and do whatever you want.
 
 ### What about running this directly in embedded devices?
 
