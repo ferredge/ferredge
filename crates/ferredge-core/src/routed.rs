@@ -32,6 +32,8 @@ pub struct HttpMeta {
     pub path: Option<String>,
     /// HTTP response status code when available.
     pub status_code: Option<u16>,
+    /// Preserved HTTP headers associated with request or response.
+    pub headers: Vec<(String, String)>,
 }
 
 /// Optional MQTT-specific metadata carried alongside routed messages.

@@ -230,6 +230,7 @@ fn command_read(resource: &str) -> Command {
         target_device_id: "dvc-1".to_string(),
         intent: Intent::Read {
             resource: resource.to_string(),
+            options: RequestOptions::default(),
         },
         correlation: None,
     }
@@ -243,6 +244,7 @@ fn command_write(resource: &str, payload: PayloadValue) -> Command {
         intent: Intent::Write {
             resource: resource.to_string(),
             payload,
+            options: RequestOptions::default(),
         },
         correlation: None,
     }

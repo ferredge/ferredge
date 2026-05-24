@@ -8,11 +8,12 @@ pub trait BridgeAdapter {
     type Error;
 
     /// Converts an outbound core command into a bridge message.
-    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage, Self::Error>;
+    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error>;
     /// Converts an inbound routed event into a bridge message.
-    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage, Self::Error>;
+    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage<'static>, Self::Error>;
     /// Converts an inbound routed result into a bridge message.
-    fn result_to_bridge(&self, result: RoutedResult) -> Result<BridgeMessage, Self::Error>;
+    fn result_to_bridge(&self, result: RoutedResult)
+    -> Result<BridgeMessage<'static>, Self::Error>;
 }
 
 /// Encode/decode boundary between bridge messages and one native protocol type.
@@ -21,7 +22,7 @@ pub trait BridgeCodec<TNative> {
     type Error;
 
     /// Encodes one bridge message into the native protocol form.
-    fn encode(&self, message: &BridgeMessage) -> Result<TNative, Self::Error>;
+    fn encode(&self, message: &BridgeMessage<'_>) -> Result<TNative, Self::Error>;
     /// Decodes one native protocol value into a bridge message.
-    fn decode(&self, native: TNative) -> Result<BridgeMessage, Self::Error>;
+    fn decode(&self, native: TNative) -> Result<BridgeMessage<'static>, Self::Error>;
 }

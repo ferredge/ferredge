@@ -138,8 +138,6 @@ pub enum MqttCommandConversionError {
 pub(crate) struct MqttCommandRef<'a> {
     /// Device-side broker configuration and metadata.
     pub device: &'a Device<MqttResourceAttributes>,
-    /// Routed command to convert.
-    pub command: &'a Command,
 }
 
 impl MqttCommandRef<'_> {

@@ -31,7 +31,7 @@ impl<'a> ModbusBridgeCodec<'a> {
 impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
     type Error = ModbusCommandConversionError;
 
-    fn encode(&self, message: &BridgeMessage) -> Result<ModbusRequest, Self::Error> {
+    fn encode(&self, message: &BridgeMessage<'_>) -> Result<ModbusRequest, Self::Error> {
         let proto = proto_from_endpoint(&self.value.device.endpoint).ok_or_else(|| {
             ModbusCommandConversionError::InvalidResource(
                 "device endpoint is not Modbus".to_string(),
@@ -48,11 +48,10 @@ impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
         let BridgeOp::RegisterAccess(operation) = &command.operation else {
             return Err(ModbusCommandConversionError::InvalidBridgeMessage);
         };
-        let resource = command
-            .meta
-            .resource
-            .as_deref()
-            .ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?;
+        let ferredge_bridge::BridgeRoute::AddressedAccess { resource, .. } = &command.route else {
+            return Err(ModbusCommandConversionError::InvalidBridgeMessage);
+        };
+        let resource = resource.as_ref();
         let attributes = &self
             .value
             .device
@@ -75,7 +74,7 @@ impl BridgeCodec<ModbusRequest> for ModbusBridgeCodec<'_> {
         }
     }
 
-    fn decode(&self, _native: ModbusRequest) -> Result<BridgeMessage, Self::Error> {
+    fn decode(&self, _native: ModbusRequest) -> Result<BridgeMessage<'static>, Self::Error> {
         Err(ModbusCommandConversionError::InvalidBridgeMessage)
     }
 }

@@ -11,8 +11,9 @@ use std::{
 };
 
 use ferredge_bridge::{
-    BridgeAdapter, BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, BridgeProtocolHint,
-    BridgeResult, RegisterKind, RequestResponseAction, RequestResponseOp,
+    BridgeAdapter, BridgeCapability, BridgeCodec, BridgeCommand, BridgeMessage, BridgeOp,
+    BridgePayload, BridgeResult, BridgeRoute, BridgeTransportMeta, MessagingAction,
+    MessagingCapability, MessagingOp, RequestResponseAction, RequestResponseOp,
 };
 use ferredge_core::prelude::*;
 use ferredge_proto_http::{
@@ -50,6 +51,7 @@ impl EventSink for RecordingSink {
 struct CapturedHttpRequest {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -62,6 +64,7 @@ struct LocalHttpServer {
 enum HttpServerBehavior {
     Response {
         status_line: &'static str,
+        headers: Vec<(&'static str, &'static str)>,
         body: Vec<u8>,
     },
     CloseAfterRead,
@@ -71,6 +74,10 @@ impl LocalHttpServer {
     fn start(response_body: Vec<u8>) -> Self {
         Self::start_with_behavior(HttpServerBehavior::Response {
             status_line: "HTTP/1.1 200 OK",
+            headers: vec![
+                ("Content-Type", "text/plain"),
+                ("X-Response-Version", "2026-05"),
+            ],
             body: response_body,
         })
     }
@@ -124,11 +131,17 @@ impl LocalHttpServer {
                 .expect("http test server should send captured request");
 
             match behavior {
-                HttpServerBehavior::Response { status_line, body } => {
-                    let response = format!(
-                        "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
+                HttpServerBehavior::Response {
+                    status_line,
+                    headers,
+                    body,
+                } => {
+                    let mut response =
+                        format!("{status_line}\r\nContent-Length: {}\r\n", body.len());
+                    for (key, value) in headers {
+                        response.push_str(&format!("{key}: {value}\r\n"));
+                    }
+                    response.push_str("Connection: close\r\n\r\n");
                     stream
                         .write_all(response.as_bytes())
                         .expect("http test server should write response headers");
@@ -195,13 +208,26 @@ fn parse_http_request(data: &[u8]) -> CapturedHttpRequest {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().expect("http method should exist").to_string();
     let path = parts.next().expect("http path should exist").to_string();
+    let headers = lines
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect();
     let body = data[header_end + 4..].to_vec();
-    CapturedHttpRequest { method, path, body }
+    CapturedHttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    }
 }
 
 fn parse_http_response_body(data: &[u8]) -> &[u8] {
-    let header_end = find_header_end(data).expect("http response should contain headers");
-    &data[header_end + 4..]
+    match find_header_end(data) {
+        Some(header_end) => &data[header_end + 4..],
+        None => data,
+    }
 }
 
 fn wait_for_event_payload(events: &Arc<Mutex<Vec<RoutedEvent>>>, payload: &[u8]) -> RoutedEvent {
@@ -390,6 +416,15 @@ fn http_write_command(payload: &str) -> Command {
         intent: Intent::Write {
             resource: "setpoint".to_string(),
             payload: PayloadValue::String(payload.to_string()),
+            options: RequestOptions {
+                headers: vec![
+                    ("X-Request-Version".to_string(), "2026-05".to_string()),
+                    ("X-Trace-Id".to_string(), "trace-http-17".to_string()),
+                ],
+                content_type: Some("text/plain".to_string()),
+                method: None,
+                path: None,
+            },
         },
         correlation: Some(Correlation {
             request_id: "http-corr-1".to_string(),
@@ -452,6 +487,7 @@ fn modbus_write_resource_command(id: &str, resource: &str, payload: PayloadValue
         intent: Intent::Write {
             resource: resource.to_string(),
             payload,
+            options: RequestOptions::default(),
         },
         correlation: Some(Correlation {
             request_id: "modbus-corr-1".to_string(),
@@ -471,6 +507,7 @@ fn modbus_read_resource_command(id: &str, resource: &str) -> Command {
         target_device_id: "modbus-interop-device".to_string(),
         intent: Intent::Read {
             resource: resource.to_string(),
+            options: RequestOptions::default(),
         },
         correlation: Some(Correlation {
             request_id: "modbus-corr-2".to_string(),
@@ -501,7 +538,7 @@ fn modbus_request_from_command(
         .command_to_bridge(command.clone())
         .expect("modbus command should plan");
     match &command.intent {
-        Intent::Read { resource } | Intent::Write { resource, .. } => {
+        Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
             assert!(
                 driver.dvc.resources.contains_key(resource),
                 "modbus resource should exist"
@@ -576,14 +613,29 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
         .expect("http command should plan");
     match &http_bridge {
         BridgeMessage::Command(command) => {
-            assert_eq!(command.meta.resource.as_deref(), Some("setpoint"));
-            assert_eq!(command.meta.protocol, Some(BridgeProtocolHint::Http));
+            assert!(matches!(
+                command.route,
+                BridgeRoute::RequestResponse { ref resource, .. } if resource == "setpoint"
+            ));
             assert!(matches!(
                 command.operation,
                 BridgeOp::RequestResponse(RequestResponseOp {
                     action: RequestResponseAction::Write
                 })
             ));
+            let BridgeTransportMeta::Http(meta) =
+                command.transport.as_ref().expect("http transport metadata expected")
+            else {
+                panic!("expected http transport metadata");
+            };
+            assert_eq!(meta.content_type.as_deref(), Some("text/plain"));
+            let headers = command.headers.as_ref().expect("http headers expected");
+            assert!(headers
+                .iter_http_headers()
+                .any(|header| header.key == "X-Request-Version" && header.value == "2026-05"));
+            assert!(headers
+                .iter_http_headers()
+                .any(|header| header.key == "X-Trace-Id" && header.value == "trace-http-17"));
         }
         other => panic!("expected bridge command, got {other:?}"),
     }
@@ -594,6 +646,15 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
     assert_eq!(http_request.method, "POST");
     assert_eq!(http_request.path, "/interop/setpoint");
     assert_eq!(http_request.body, Some(b"17".to_vec()));
+    assert!(http_request
+        .headers
+        .contains(&("Content-Type".to_string(), "text/plain".to_string())));
+    assert!(http_request
+        .headers
+        .contains(&("X-Request-Version".to_string(), "2026-05".to_string())));
+    assert!(http_request
+        .headers
+        .contains(&("X-Trace-Id".to_string(), "trace-http-17".to_string())));
 
     let http_response =
         block_on(http_driver.execute(http_request.clone())).expect("http driver should execute");
@@ -601,6 +662,15 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
     assert_eq!(captured.method, "POST");
     assert_eq!(captured.path, "/interop/setpoint");
     assert_eq!(captured.body, b"17");
+    assert!(captured
+        .headers
+        .contains(&("Content-Type".to_string(), "text/plain".to_string())));
+    assert!(captured
+        .headers
+        .contains(&("X-Request-Version".to_string(), "2026-05".to_string())));
+    assert!(captured
+        .headers
+        .contains(&("X-Trace-Id".to_string(), "trace-http-17".to_string())));
     assert_eq!(parse_http_response_body(&http_response.body), b"41");
 
     let broker = MosquittoGuard::start();
@@ -622,9 +692,9 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
     block_on(subscriber.start()).expect("subscriber should connect");
     let subscribe_command = mqtt_subscribe_command(&subscriber.dvc.id, topic);
     let subscribe_message = MqttBridgeAdapter
-        .command_to_bridge(subscribe_command.clone())
+        .command_to_bridge(subscribe_command)
         .expect("mqtt subscribe should plan");
-    let subscribe_packet = MqttBridgeCodec::new(&subscriber.dvc, &subscribe_command)
+    let subscribe_packet = MqttBridgeCodec::new(&subscriber.dvc)
         .encode(&subscribe_message)
         .expect("mqtt subscribe should encode");
     block_on(subscriber.subscribe(
@@ -656,9 +726,9 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
         },
     );
     let mqtt_message = MqttBridgeAdapter
-        .command_to_bridge(mqtt_command.clone())
+        .command_to_bridge(mqtt_command)
         .expect("mqtt publish should plan");
-    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc, &mqtt_command)
+    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc)
         .encode(&mqtt_message)
         .expect("mqtt publish should encode");
     assert_v5_publish(&mqtt_packet.packet);
@@ -694,16 +764,99 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
         .expect("mqtt event should bridge");
     match inbound_bridge {
         BridgeMessage::Event(bridge_event) => {
-            assert_eq!(bridge_event.meta.topic.as_deref(), Some(topic));
+            assert!(matches!(
+                bridge_event.route,
+                BridgeRoute::Messaging { topic: ref route_topic } if route_topic == topic
+            ));
             assert_eq!(
-                bridge_event.correlation,
-                Some(Correlation {
-                    request_id: "corr-http-mqtt-v5".to_string(),
-                    reply_to: Some(Address::Channel("ferredge/http/reply".to_string())),
-                })
+                bridge_event
+                    .correlation
+                    .as_ref()
+                    .map(|value| value.request_id.as_ref()),
+                Some("corr-http-mqtt-v5")
             );
         }
         other => panic!("expected bridge event, got {other:?}"),
+    }
+
+    let http_result = RoutedResult {
+        source: http_source_ref(),
+        result: CommandResult {
+            command_id: "http-write-1".to_string(),
+            device_id: "http-interop-device".to_string(),
+            state: DeliveryState::Completed,
+            payload: Some(PayloadValue::from(parse_http_response_body(&http_response.body))),
+            error: None,
+            correlation: None,
+        },
+        transport: Some(TransportMeta::Http(HttpMeta {
+            method: Some("POST".to_string()),
+            path: Some("/interop/setpoint".to_string()),
+            status_code: Some(http_response.status_code),
+            headers: http_response.headers.clone(),
+        })),
+    };
+    let http_result_bridge = HttpBridgeAdapter
+        .result_to_bridge(http_result)
+        .expect("http result should bridge");
+    let (result_transport, result_headers) = match &http_result_bridge {
+        BridgeMessage::Result(BridgeResult::Success {
+            transport, headers, ..
+        }) => {
+            let BridgeTransportMeta::Http(meta) =
+                transport.as_ref().expect("http result transport expected")
+            else {
+                panic!("expected http result transport metadata");
+            };
+            assert_eq!(meta.status_code, Some(200));
+            assert_eq!(meta.content_type.as_deref(), Some("text/plain"));
+            let headers = headers.as_ref().expect("http result headers expected");
+            assert!(headers
+                .iter_http_headers()
+                .any(|header| header.key == "X-Response-Version" && header.value == "2026-05"));
+            assert!(headers
+                .iter_http_headers()
+                .any(|header| header.key == "Content-Length" && header.value == "2"));
+            (transport.clone(), headers.clone())
+        }
+        other => panic!("expected bridged http success result, got {other:?}"),
+    };
+
+    let projected_message = BridgeMessage::Command(BridgeCommand {
+        id: "http-result-mqtt-project".to_string(),
+        source_device_id: Some("http-interop-device".to_string()),
+        target_device_id: publisher.dvc.id.clone(),
+        capability: BridgeCapability::Messaging(MessagingCapability {
+            binary_payloads: true,
+        }),
+        operation: BridgeOp::Messaging(MessagingOp {
+            action: MessagingAction::Publish,
+        }),
+        payload: Some(BridgePayload::Binary(b"41".to_vec())),
+        route: BridgeRoute::Messaging {
+            topic: topic.into(),
+        },
+        transport: result_transport,
+        headers: Some(result_headers),
+        correlation: None,
+    });
+    let projected_packet = MqttBridgeCodec::new(&publisher.dvc)
+        .encode(&projected_message)
+        .expect("http result bridge should project into mqtt packet");
+    match projected_packet.packet {
+        MqttWirePacket::V5Publish(packet) => {
+            let props_debug = format!("{:?}", packet.props());
+            assert!(props_debug.contains("text/plain"));
+            assert!(props_debug.contains("ferredge-http-status-code"));
+            assert!(props_debug.contains("200"));
+            assert!(props_debug.contains("ferredge-http-path"));
+            assert!(props_debug.contains("/interop/setpoint"));
+            assert!(props_debug.contains("X-Response-Version"));
+            assert!(props_debug.contains("2026-05"));
+            assert!(props_debug.contains("Content-Length"));
+            assert!(props_debug.contains("\"2\"") || props_debug.contains(" 2"));
+        }
+        other => panic!("expected projected v5 publish packet, got {other:?}"),
     }
 
     block_on(publisher.stop()).expect("publisher should stop");
@@ -743,9 +896,9 @@ fn http_to_mqtt_v3_bridge_roundtrip() {
         BrokerMessageOptions::default(),
     );
     let mqtt_message = MqttBridgeAdapter
-        .command_to_bridge(mqtt_command.clone())
+        .command_to_bridge(mqtt_command)
         .expect("mqtt publish should plan");
-    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc, &mqtt_command)
+    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc)
         .encode(&mqtt_message)
         .expect("mqtt publish should encode");
     assert_v3_publish(&mqtt_packet.packet);
@@ -794,31 +947,32 @@ fn http_to_mqtt_v3_bridge_roundtrip() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "19");
 
+    let inbound_event = RoutedEvent {
+        source: mqtt_source_ref("mqtt-http-v3-publisher"),
+        address: Address::Channel(topic.to_string()),
+        payload: PayloadValue::String("19".to_string()),
+        correlation: None,
+        transport: Some(TransportMeta::Mqtt(MqttMeta {
+            topic: topic.to_string(),
+            qos: 0,
+            retain: false,
+            duplicate: false,
+            packet_id: None,
+            content_type: None,
+            payload_format: None,
+            message_expiry_interval_secs: None,
+            response_topic: None,
+            correlation_data: None,
+            correlation_data_bytes: None,
+            topic_alias: None,
+            subscription_identifiers: Vec::new(),
+            user_properties: Vec::new(),
+            reason_codes: Vec::new(),
+            reason_string: None,
+        })),
+    };
     let inbound_bridge = MqttBridgeAdapter
-        .event_to_bridge(RoutedEvent {
-            source: mqtt_source_ref("mqtt-http-v3-publisher"),
-            address: Address::Channel(topic.to_string()),
-            payload: PayloadValue::String("19".to_string()),
-            correlation: None,
-            transport: Some(TransportMeta::Mqtt(MqttMeta {
-                topic: topic.to_string(),
-                qos: 0,
-                retain: false,
-                duplicate: false,
-                packet_id: None,
-                content_type: None,
-                payload_format: None,
-                message_expiry_interval_secs: None,
-                response_topic: None,
-                correlation_data: None,
-                correlation_data_bytes: None,
-                topic_alias: None,
-                subscription_identifiers: Vec::new(),
-                user_properties: Vec::new(),
-                reason_codes: Vec::new(),
-                reason_string: None,
-            })),
-        })
+        .event_to_bridge(inbound_event)
         .expect("mqtt event should bridge");
     assert!(matches!(inbound_bridge, BridgeMessage::Event(_)));
 }
@@ -844,9 +998,9 @@ fn mqtt_v5_to_modbus_bridge_roundtrip() {
     block_on(subscriber.start()).expect("subscriber should connect");
     let subscribe_command = mqtt_subscribe_command(&subscriber.dvc.id, topic);
     let subscribe_message = MqttBridgeAdapter
-        .command_to_bridge(subscribe_command.clone())
+        .command_to_bridge(subscribe_command)
         .expect("mqtt subscribe should plan");
-    let subscribe_packet = MqttBridgeCodec::new(&subscriber.dvc, &subscribe_command)
+    let subscribe_packet = MqttBridgeCodec::new(&subscriber.dvc)
         .encode(&subscribe_message)
         .expect("mqtt subscribe should encode");
     block_on(subscriber.subscribe(
@@ -876,9 +1030,9 @@ fn mqtt_v5_to_modbus_bridge_roundtrip() {
         },
     );
     let mqtt_message = MqttBridgeAdapter
-        .command_to_bridge(mqtt_command.clone())
+        .command_to_bridge(mqtt_command)
         .expect("mqtt publish should plan");
-    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc, &mqtt_command)
+    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc)
         .encode(&mqtt_message)
         .expect("mqtt publish should encode");
     assert_v5_publish(&mqtt_packet.packet);
@@ -910,15 +1064,18 @@ fn mqtt_v5_to_modbus_bridge_roundtrip() {
         .expect("modbus command should plan");
     match &modbus_bridge {
         BridgeMessage::Command(command) => {
-            assert_eq!(command.meta.resource.as_deref(), Some("holding_u16"));
-            assert_eq!(command.meta.protocol, Some(BridgeProtocolHint::Modbus));
-            let register = command
-                .meta
-                .register
-                .as_ref()
-                .expect("modbus bridge should include register metadata");
-            assert_eq!(register.address, 100);
-            assert_eq!(register.kind, RegisterKind::HoldingRegister);
+            let BridgeRoute::AddressedAccess {
+                ref resource,
+                ref access,
+                node_id,
+            } = command.route
+            else {
+                panic!("expected register route");
+            };
+            assert_eq!(resource, "holding_u16");
+            assert_eq!(access.address, 100);
+            assert_eq!(access.domain.as_ref(), "holding-register");
+            assert_eq!(node_id, Some(1));
         }
         other => panic!("expected bridge command, got {other:?}"),
     }
@@ -930,12 +1087,13 @@ fn mqtt_v5_to_modbus_bridge_roundtrip() {
         .expect("modbus read should succeed");
     assert_eq!(read_response.payload, PayloadValue::U64(77));
 
+    let bridged_result = routed_result(
+        modbus_source_ref(),
+        "modbus-read-1",
+        read_response.payload.clone(),
+    );
     let result_bridge = ModbusBridgeAdapter::new(&modbus_driver.dvc)
-        .result_to_bridge(routed_result(
-            modbus_source_ref(),
-            "modbus-read-1",
-            read_response.payload.clone(),
-        ))
+        .result_to_bridge(bridged_result)
         .expect("modbus result should bridge");
     assert!(matches!(
         result_bridge,
@@ -964,9 +1122,9 @@ fn mqtt_v3_to_modbus_bridge_roundtrip() {
         BrokerMessageOptions::default(),
     );
     let mqtt_message = MqttBridgeAdapter
-        .command_to_bridge(mqtt_command.clone())
+        .command_to_bridge(mqtt_command)
         .expect("mqtt publish should plan");
-    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc, &mqtt_command)
+    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc)
         .encode(&mqtt_message)
         .expect("mqtt publish should encode");
     assert_v3_publish(&mqtt_packet.packet);
@@ -1026,12 +1184,13 @@ fn mqtt_v3_to_modbus_bridge_roundtrip() {
         .expect("modbus read should succeed");
     assert_eq!(read_response.payload, PayloadValue::U64(21));
 
+    let bridged_result = routed_result(
+        modbus_source_ref(),
+        "modbus-read-1",
+        read_response.payload.clone(),
+    );
     let result_bridge = ModbusBridgeAdapter::new(&modbus_driver.dvc)
-        .result_to_bridge(routed_result(
-            modbus_source_ref(),
-            "modbus-read-1",
-            read_response.payload.clone(),
-        ))
+        .result_to_bridge(bridged_result)
         .expect("modbus result should bridge");
     assert!(matches!(
         result_bridge,
@@ -1055,12 +1214,13 @@ fn http_to_modbus_bridge_roundtrip() {
     let captured = server.finish();
     assert_eq!(captured.body, b"23");
 
+    let http_result = routed_result(
+        http_source_ref(),
+        "http-write-1",
+        PayloadValue::from(parse_http_response_body(&response.body)),
+    );
     let http_result_bridge = HttpBridgeAdapter
-        .result_to_bridge(routed_result(
-            http_source_ref(),
-            "http-write-1",
-            PayloadValue::from(parse_http_response_body(&response.body)),
-        ))
+        .result_to_bridge(http_result)
         .expect("http result should bridge");
     match &http_result_bridge {
         BridgeMessage::Result(BridgeResult::Success {
@@ -1111,9 +1271,9 @@ fn mqtt_v5_to_modbus_coil_bridge_roundtrip() {
     block_on(subscriber.start()).expect("subscriber should connect");
     let subscribe_command = mqtt_subscribe_command(&subscriber.dvc.id, topic);
     let subscribe_message = MqttBridgeAdapter
-        .command_to_bridge(subscribe_command.clone())
+        .command_to_bridge(subscribe_command)
         .expect("mqtt subscribe should plan");
-    let subscribe_packet = MqttBridgeCodec::new(&subscriber.dvc, &subscribe_command)
+    let subscribe_packet = MqttBridgeCodec::new(&subscriber.dvc)
         .encode(&subscribe_message)
         .expect("mqtt subscribe should encode");
     block_on(subscriber.subscribe(
@@ -1136,9 +1296,9 @@ fn mqtt_v5_to_modbus_coil_bridge_roundtrip() {
         BrokerMessageOptions::default(),
     );
     let mqtt_message = MqttBridgeAdapter
-        .command_to_bridge(mqtt_command.clone())
+        .command_to_bridge(mqtt_command)
         .expect("mqtt publish should plan");
-    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc, &mqtt_command)
+    let mqtt_packet = MqttBridgeCodec::new(&publisher.dvc)
         .encode(&mqtt_message)
         .expect("mqtt publish should encode");
     block_on(publisher.start()).expect("publisher should connect");
@@ -1211,12 +1371,10 @@ fn http_bridge_surfaces_transport_failure_before_result_bridge() {
 
 #[test]
 fn rejected_routed_result_bridges_as_failure_outcome() {
+    let rejected_result =
+        routed_rejected_result(http_source_ref(), "http-write-1", "upstream rejected");
     let result_bridge = HttpBridgeAdapter
-        .result_to_bridge(routed_rejected_result(
-            http_source_ref(),
-            "http-write-1",
-            "upstream rejected",
-        ))
+        .result_to_bridge(rejected_result)
         .expect("http failure result should bridge");
 
     match result_bridge {

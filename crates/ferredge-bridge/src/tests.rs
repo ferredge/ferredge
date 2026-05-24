@@ -2,12 +2,12 @@ use alloc::{string::ToString, vec, vec::Vec};
 
 use ferredge_core::prelude::{
     Address, BrokerAddress, Command, CommandResult, Correlation, DeliveryGuarantee, DeviceProtocol,
-    EndpointRef, Intent, PayloadValue, RoutedResult,
+    EndpointRef, Intent, PayloadValue, RequestOptions, RoutedResult,
 };
 
 use crate::{
     BridgeFault, BridgeFaultCategory, BridgeMessage, BridgePayload, BridgePlannerError,
-    BridgeResult, BridgeScalar, planner,
+    BridgeResult, BridgeRoute, BridgeScalar, BridgeTransportMeta, planner,
 };
 
 #[test]
@@ -35,6 +35,7 @@ fn request_response_planner_preserves_correlation_and_resource() {
         intent: Intent::Write {
             resource: "setpoint".to_string(),
             payload: PayloadValue::Bytes(vec![9, 1]),
+            options: RequestOptions::default(),
         },
         correlation: Some(Correlation {
             request_id: "root".to_string(),
@@ -42,14 +43,22 @@ fn request_response_planner_preserves_correlation_and_resource() {
         }),
     };
 
-    let expected_correlation = command.correlation.clone();
     let BridgeMessage::Command(message) = planner::command_to_request_response(command).unwrap()
     else {
         panic!("expected bridge command");
     };
 
-    assert_eq!(message.meta.resource.as_deref(), Some("setpoint"));
-    assert_eq!(message.correlation, expected_correlation);
+    assert!(matches!(
+        message.route,
+        BridgeRoute::RequestResponse { resource, .. } if resource == "setpoint"
+    ));
+    assert_eq!(
+        message
+            .correlation
+            .as_ref()
+            .map(|value| value.request_id.as_ref()),
+        Some("root")
+    );
     assert_eq!(message.payload, Some(BridgePayload::Binary(vec![9, 1])));
 }
 
@@ -80,12 +89,17 @@ fn messaging_planner_preserves_topic_and_correlation_id() {
         panic!("expected bridge command");
     };
 
-    assert_eq!(message.meta.topic.as_deref(), Some("topic/a"));
-    assert_eq!(message.meta.correlation_id.as_deref(), Some("corr-1"));
-    assert_eq!(
-        message.meta.reply_to,
-        Some(Address::Channel("topic/reply".to_string()))
-    );
+    assert!(matches!(
+        message.route,
+        BridgeRoute::Messaging { topic } if topic == "topic/a"
+    ));
+    let BridgeTransportMeta::Mqtt(transport) = message.transport.expect("mqtt transport expected")
+    else {
+        panic!("expected mqtt transport");
+    };
+    assert_eq!(transport.correlation_data.as_deref(), Some("corr-1"));
+    assert_eq!(transport.response_topic.as_deref(), Some("topic/reply"));
+    assert!(message.headers.is_none());
 }
 
 #[test]
@@ -109,6 +123,7 @@ fn planners_reject_unsupported_intents() {
         target_device_id: "dst".to_string(),
         intent: Intent::Read {
             resource: "temp".to_string(),
+            options: RequestOptions::default(),
         },
         correlation: None,
     };
@@ -120,9 +135,9 @@ fn planners_reject_unsupported_intents() {
     assert_eq!(
         planner::command_to_register_access(
             subscribe_command,
-            crate::RegisterMeta {
+            crate::AddressedAccessMeta {
                 address: 1,
-                kind: crate::RegisterKind::HoldingRegister,
+                domain: "holding-register".into(),
                 quantity: None,
             },
             1,

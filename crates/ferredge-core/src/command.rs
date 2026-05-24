@@ -88,6 +88,19 @@ pub struct BrokerMessageOptions {
     pub protocol: Option<BrokerMessageProtocolOptions>,
 }
 
+/// Protocol-neutral request options preserved for request/response transports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RequestOptions {
+    /// Optional dynamic headers attached to the request.
+    pub headers: Vec<(String, String)>,
+    /// Optional declared content type.
+    pub content_type: Option<String>,
+    /// Optional method override for transports that support it.
+    pub method: Option<String>,
+    /// Optional path override for transports that support it.
+    pub path: Option<String>,
+}
+
 /// Protocol-neutral broker subscription options preserved in routed command layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BrokerSubscriptionOptions {
@@ -242,16 +255,21 @@ impl fmt::Display for PayloadValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Intent {
     /// Reads current state from named resource.
-    Read { resource: String },
+    Read {
+        resource: String,
+        options: RequestOptions,
+    },
     /// Writes typed payload to named resource.
     Write {
         resource: String,
         payload: PayloadValue,
+        options: RequestOptions,
     },
     /// Invokes operation with optional argument payload.
     Invoke {
         operation: String,
         args: Option<PayloadValue>,
+        options: RequestOptions,
     },
     /// Sends typed payload to broker-oriented channel such as topic, subject, queue, or stream.
     Send {

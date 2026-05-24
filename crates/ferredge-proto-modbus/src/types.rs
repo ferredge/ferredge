@@ -152,7 +152,7 @@ impl ModbusDriver {
         command: Command,
     ) -> Result<ModbusRequest, ModbusCommandConversionError> {
         let register = match &command.intent {
-            Intent::Read { resource } | Intent::Write { resource, .. } => {
+            Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
                 let resource_def = self.dvc.resources.get(resource).ok_or_else(|| {
                     ModbusCommandConversionError::UnknownResource(resource.clone())
                 })?;
@@ -187,9 +187,9 @@ impl<'a> ModbusBridgeAdapter<'a> {
 impl BridgeAdapter for ModbusBridgeAdapter<'_> {
     type Error = ModbusCommandConversionError;
 
-    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage, Self::Error> {
+    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
         let register = match &command.intent {
-            Intent::Read { resource } | Intent::Write { resource, .. } => {
+            Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
                 let resource_def = self.device.resources.get(resource).ok_or_else(|| {
                     ModbusCommandConversionError::UnknownResource(resource.clone())
                 })?;
@@ -209,29 +209,26 @@ impl BridgeAdapter for ModbusBridgeAdapter<'_> {
         planner::command_to_register_access(command, register, unit_id).map_err(Into::into)
     }
 
-    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage, Self::Error> {
+    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage<'static>, Self::Error> {
         Ok(planner::routed_event_to_bridge(event))
     }
 
-    fn result_to_bridge(&self, result: RoutedResult) -> Result<BridgeMessage, Self::Error> {
+    fn result_to_bridge(
+        &self,
+        result: RoutedResult,
+    ) -> Result<BridgeMessage<'static>, Self::Error> {
         Ok(planner::routed_result_to_bridge(result))
     }
 }
 
-fn register_meta(attributes: &ModbusResourceAttributes) -> ferredge_bridge::RegisterMeta {
-    ferredge_bridge::RegisterMeta {
-        address: attributes.address,
-        kind: match attributes.register_kind {
-            crate::attributes::ModbusRegisterKind::Coil => ferredge_bridge::RegisterKind::Coil,
-            crate::attributes::ModbusRegisterKind::DiscreteInput => {
-                ferredge_bridge::RegisterKind::DiscreteInput
-            }
-            crate::attributes::ModbusRegisterKind::HoldingRegister => {
-                ferredge_bridge::RegisterKind::HoldingRegister
-            }
-            crate::attributes::ModbusRegisterKind::InputRegister => {
-                ferredge_bridge::RegisterKind::InputRegister
-            }
+fn register_meta(attributes: &ModbusResourceAttributes) -> ferredge_bridge::AddressedAccessMeta {
+    ferredge_bridge::AddressedAccessMeta {
+        address: u32::from(attributes.address),
+        domain: match attributes.register_kind {
+            crate::attributes::ModbusRegisterKind::Coil => "coil".into(),
+            crate::attributes::ModbusRegisterKind::DiscreteInput => "discrete-input".into(),
+            crate::attributes::ModbusRegisterKind::HoldingRegister => "holding-register".into(),
+            crate::attributes::ModbusRegisterKind::InputRegister => "input-register".into(),
         },
         quantity: attributes.quantity,
     }

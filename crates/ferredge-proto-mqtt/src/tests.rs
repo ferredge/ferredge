@@ -8,7 +8,11 @@ use std::{
     time::Duration,
 };
 
-use ferredge_bridge::planner;
+use ferredge_bridge::{
+    BridgeCodec, BridgeCommand, BridgeHeaders, BridgeMessage, BridgeOp, BridgePayload, BridgeRoute,
+    BridgeTransportMeta, HttpBridgeMeta, MessagingAction, MessagingCapability, MessagingOp,
+    planner,
+};
 use ferredge_core::prelude::{
     Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
@@ -16,14 +20,14 @@ use ferredge_core::prelude::{
     Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
     MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat,
     MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions, MqttWillConfig, PayloadValue,
-    PubSub, RoutedEvent, RoutedMessage, TransportMeta,
+    PubSub, RequestOptions, RoutedEvent, RoutedMessage, TransportMeta,
 };
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
 use crate::{
-    MqttAuthChallenge, MqttAuthFlowReason, MqttAuthResponse, MqttAuthStage, MqttDriver,
-    MqttListenerStatus,
+    MqttAuthChallenge, MqttAuthFlowReason, MqttAuthResponse, MqttAuthStage, MqttBridgeCodec,
+    MqttDriver, MqttListenerStatus,
     runtime::{
         build_connect_packet, normalize_broker_addr, pending_reply_route_from_packet,
         routed_message_from_packet,
@@ -74,6 +78,12 @@ fn packet_request(driver: &MqttDriver, command: &Command) -> MqttPacketRequest {
     driver
         .bridge_packet_request(command.clone())
         .expect("mqtt packet should build")
+}
+
+fn encode_bridge_message(driver: &MqttDriver, message: &BridgeMessage<'_>) -> MqttPacketRequest {
+    MqttBridgeCodec::new(&driver.dvc)
+        .encode(message)
+        .expect("bridge message should encode")
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -483,6 +493,35 @@ fn mqtt_subscribe_builds_version_specific_packet() {
 }
 
 #[test]
+fn mqtt_v3_rejects_shared_subscriptions() {
+    let driver = make_driver("mqtt://broker".to_string(), vec![MqttProtocolVersion::V3_1_1]);
+    let command = ferredge_core::prelude::Command {
+        id: "cmd-v3-shared-sub".to_string(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".to_string(),
+        intent: ferredge_core::prelude::Intent::Subscribe {
+            channel: BrokerAddress {
+                name: "alerts/#".to_string(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            options: BrokerSubscriptionOptions {
+                shared_group: Some("shared-a".to_string()),
+                ..BrokerSubscriptionOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    let error = driver
+        .bridge_packet_request(command)
+        .expect_err("v3 shared subscriptions should be rejected");
+    assert!(matches!(
+        error,
+        crate::types::MqttCommandConversionError::MqttV5SubscriptionOptionsOnV3
+    ));
+}
+
+#[test]
 fn mqtt_v5_publish_maps_retain_alias_and_expiry_properties() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
@@ -630,6 +669,70 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
             assert!(saw_reply);
             assert!(saw_corr);
             assert!(saw_content_type);
+        }
+        other => panic!("expected v5 publish packet, got {other:?}"),
+    }
+}
+
+#[test]
+fn mqtt_v5_publish_projects_http_metadata_into_user_properties() {
+    let driver = make_default_driver();
+    let message = BridgeMessage::Command(BridgeCommand {
+        id: "bridge-http-1".to_string(),
+        source_device_id: Some("http-device-1".to_string()),
+        target_device_id: "mqtt-device-1".to_string(),
+        capability: ferredge_bridge::BridgeCapability::Messaging(MessagingCapability {
+            binary_payloads: true,
+        }),
+        operation: BridgeOp::Messaging(MessagingOp {
+            action: MessagingAction::Publish,
+        }),
+        payload: Some(BridgePayload::Binary(b"ok".to_vec())),
+        route: BridgeRoute::Messaging {
+            topic: "interop/http".into(),
+        },
+        transport: Some(BridgeTransportMeta::Http(HttpBridgeMeta {
+            method: Some("POST".into()),
+            path: Some("/api/result".into()),
+            status_code: Some(207),
+            content_type: Some("text/plain".into()),
+        })),
+        headers: Some(BridgeHeaders::http(vec![(
+            "X-Request-Version".to_string(),
+            "2026-05".to_string(),
+        )])),
+        correlation: None,
+    });
+
+    let packet = encode_bridge_message(&driver, &message);
+
+    match packet.packet {
+        MqttWirePacket::V5Publish(packet) => {
+            let mut saw_content_type = false;
+            let mut saw_status = false;
+            let mut saw_method = false;
+            let mut saw_path = false;
+            let mut saw_header = false;
+            for prop in packet.props() {
+                match prop {
+                    mqtt::packet::Property::ContentType(prop) => {
+                        saw_content_type = prop.val() == "text/plain";
+                    }
+                    mqtt::packet::Property::UserProperty(prop) => match prop.key() {
+                        "ferredge-http-status-code" => saw_status = prop.val() == "207",
+                        "ferredge-http-method" => saw_method = prop.val() == "POST",
+                        "ferredge-http-path" => saw_path = prop.val() == "/api/result",
+                        "X-Request-Version" => saw_header = prop.val() == "2026-05",
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            assert!(saw_content_type);
+            assert!(saw_status);
+            assert!(saw_method);
+            assert!(saw_path);
+            assert!(saw_header);
         }
         other => panic!("expected v5 publish packet, got {other:?}"),
     }
@@ -1289,12 +1392,13 @@ fn bridge_can_translate_http_command_into_mqtt_publish() {
         target_device_id: "http-device-1".to_string(),
         intent: Intent::Read {
             resource: "temp".to_string(),
+            options: RequestOptions::default(),
         },
         correlation: None,
     };
 
     let mapped_command = match &command.intent {
-        Intent::Read { resource } => Command {
+        Intent::Read { resource, .. } => Command {
             id: format!("{}-mqtt", command.id),
             source_device_id: Some(command.target_device_id.clone()),
             target_device_id: "mqtt-device-1".to_string(),

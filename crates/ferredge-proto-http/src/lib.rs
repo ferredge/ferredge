@@ -8,8 +8,8 @@ use alloc::{
 };
 
 use ferredge_bridge::{
-    BridgeAdapter, BridgeCodec, BridgeMessage, BridgeOp, BridgePayload, BridgePlannerError,
-    RequestResponseAction, planner,
+    BridgeAdapter, BridgeCodec, BridgeHeaders, BridgeMessage, BridgeOp, BridgePayload,
+    BridgePlannerError, BridgeRoute, BridgeTransportMeta, RequestResponseAction, planner,
 };
 use ferredge_core::prelude::*;
 
@@ -61,6 +61,10 @@ pub struct HttpRequest {
 /// Native HTTP response returned by the HTTP protocol adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
+    /// Parsed HTTP response status code.
+    pub status_code: u16,
+    /// Parsed HTTP response headers.
+    pub headers: Vec<(String, String)>,
     /// Raw response bytes returned from server.
     pub body: Vec<u8>,
 }
@@ -153,15 +157,18 @@ impl HttpDriver {
 impl BridgeAdapter for HttpBridgeAdapter {
     type Error = BridgePlannerError;
 
-    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage, Self::Error> {
+    fn command_to_bridge(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
         planner::command_to_request_response(command)
     }
 
-    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage, Self::Error> {
+    fn event_to_bridge(&self, event: RoutedEvent) -> Result<BridgeMessage<'static>, Self::Error> {
         Ok(planner::routed_event_to_bridge(event))
     }
 
-    fn result_to_bridge(&self, result: RoutedResult) -> Result<BridgeMessage, Self::Error> {
+    fn result_to_bridge(
+        &self,
+        result: RoutedResult,
+    ) -> Result<BridgeMessage<'static>, Self::Error> {
         Ok(planner::routed_result_to_bridge(result))
     }
 }
@@ -175,23 +182,21 @@ impl<'a> HttpBridgeCodec<'a> {
 impl BridgeCodec<HttpRequest> for HttpBridgeCodec<'_> {
     type Error = HttpCommandConversionError;
 
-    fn encode(&self, message: &BridgeMessage) -> Result<HttpRequest, Self::Error> {
+    fn encode(&self, message: &BridgeMessage<'_>) -> Result<HttpRequest, Self::Error> {
         let BridgeMessage::Command(command) = message else {
             return Err(HttpCommandConversionError::InvalidBridgeMessage);
         };
         let BridgeOp::RequestResponse(operation) = &command.operation else {
             return Err(HttpCommandConversionError::InvalidBridgeMessage);
         };
-        let resource = command
-            .meta
-            .resource
-            .as_ref()
-            .ok_or(HttpCommandConversionError::InvalidBridgeMessage)?;
+        let BridgeRoute::RequestResponse { resource, path } = &command.route else {
+            return Err(HttpCommandConversionError::InvalidBridgeMessage);
+        };
         let resource_def = self
             .device
             .resources
-            .get(resource)
-            .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.clone()))?;
+            .get(resource.as_ref())
+            .ok_or_else(|| HttpCommandConversionError::UnknownResource(resource.to_string()))?;
         let body = match operation.action {
             RequestResponseAction::Read | RequestResponseAction::Invoke => command
                 .payload
@@ -204,20 +209,45 @@ impl BridgeCodec<HttpRequest> for HttpBridgeCodec<'_> {
                 .map(http_body_from_bridge_payload)
                 .transpose()?,
         };
+        let mut method = resource_def.resource_attributes.method.clone();
+        let mut request_path = path
+            .as_deref()
+            .unwrap_or(resource_def.resource_attributes.slug.as_str())
+            .to_string();
+        let mut headers = resource_def
+            .resource_attributes
+            .headers
+            .clone()
+            .unwrap_or_default();
+
+        if let Some(BridgeTransportMeta::Http(meta)) = &command.transport {
+            if let Some(override_method) = &meta.method {
+                method = override_method.to_string();
+            }
+            if let Some(override_path) = &meta.path {
+                request_path = override_path.to_string();
+            }
+            if let Some(content_type) = &meta.content_type {
+                merge_header(
+                    &mut headers,
+                    "Content-Type".to_string(),
+                    content_type.to_string(),
+                );
+            }
+        }
+        if let Some(header_set) = &command.headers {
+            merge_headers(&mut headers, header_set);
+        }
 
         Ok(HttpRequest {
-            method: resource_def.resource_attributes.method.clone(),
-            path: resource_def.resource_attributes.slug.clone(),
+            method,
+            path: request_path,
             body,
-            headers: resource_def
-                .resource_attributes
-                .headers
-                .clone()
-                .unwrap_or_default(),
+            headers,
         })
     }
 
-    fn decode(&self, _native: HttpRequest) -> Result<BridgeMessage, Self::Error> {
+    fn decode(&self, _native: HttpRequest) -> Result<BridgeMessage<'static>, Self::Error> {
         Err(HttpCommandConversionError::InvalidBridgeMessage)
     }
 }
@@ -232,6 +262,24 @@ fn http_body_from_bridge_payload(
         _ => Err(HttpCommandConversionError::InvalidPayload(
             "HTTP bodies currently support only string or bytes payloads".to_string(),
         )),
+    }
+}
+
+fn merge_headers(headers: &mut Vec<(String, String)>, bridge_headers: &BridgeHeaders<'_>) {
+    for header in bridge_headers.iter_http_headers() {
+        merge_header(headers, header.key.to_string(), header.value.to_string());
+    }
+}
+
+fn merge_header(headers: &mut Vec<(String, String)>, key: String, value: String) {
+    if let Some(existing) = headers
+        .iter_mut()
+        .find(|(existing_key, _)| existing_key.eq_ignore_ascii_case(&key))
+    {
+        existing.0 = key;
+        existing.1 = value;
+    } else {
+        headers.push((key, value));
     }
 }
 
@@ -266,7 +314,7 @@ impl RequestResponse for HttpDriver {
         {
             return handler::send_request(endpoint, &request, &self.runtime, &self.net)
                 .await
-                .map(|body| HttpResponse { body })
+                .map(|response| response)
                 .map_err(|e| e.to_string());
         }
 
@@ -341,6 +389,7 @@ mod tests {
             target_device_id: "device-1".to_string(),
             intent: Intent::Read {
                 resource: "temp".to_string(),
+                options: RequestOptions::default(),
             },
             correlation: None,
         };
@@ -368,6 +417,7 @@ mod tests {
             intent: Intent::Write {
                 resource: "setpoint".to_string(),
                 payload: PayloadValue::String("42".to_string()),
+                options: RequestOptions::default(),
             },
             correlation: None,
         };
@@ -488,7 +538,8 @@ mod tests {
             .expect("http driver should pass through non-2xx response");
         handle.join().expect("server should join");
 
-        assert!(String::from_utf8_lossy(&response.body).starts_with("HTTP/1.1 503"));
+        assert_eq!(response.status_code, 503);
+        assert_eq!(response.body, b"nope");
     }
 
     fn make_http_driver_for_url(url: String) -> HttpDriver {
