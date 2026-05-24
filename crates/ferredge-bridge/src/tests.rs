@@ -7,7 +7,7 @@ use ferredge_core::prelude::{
 
 use crate::{
     BridgeFault, BridgeFaultCategory, BridgeMessage, BridgePayload, BridgePlannerError,
-    BridgeResult, BridgeRoute, BridgeScalar, BridgeTransportMeta, planner,
+    BridgeResult, BridgeRoute, BridgeTransportMeta, planner,
 };
 
 #[test]
