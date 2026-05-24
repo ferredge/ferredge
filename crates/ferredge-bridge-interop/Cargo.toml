@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["tokio-runtime", "integration"]
+default = ["tokio-runtime"]
 tokio-runtime = [
     "dep:ferredge-test-support",
     "ferredge-proto-http/tokio-runtime",
