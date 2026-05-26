@@ -1,11 +1,14 @@
 extern crate alloc;
 
+use alloc::borrow::Cow;
+
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 
+use ferredge_bridge::BridgePlannerError;
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use serde::{Deserialize, Serialize};
@@ -76,6 +79,127 @@ pub struct MqttSubscriptionRequest {
     pub user_properties: Vec<(String, String)>,
 }
 
+/// Borrowed native MQTT semantic plan shared by direct and bridge-driven outbound mapping.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum MqttNativePlan<'a> {
+    Publish {
+        command_id: Cow<'a, str>,
+        topic: Cow<'a, str>,
+        payload: ferredge_bridge::BridgePayload<'a>,
+        delivery: Option<DeliveryGuarantee>,
+        retain: bool,
+        payload_format: Option<MqttPayloadFormat>,
+        content_type: Option<Cow<'a, str>>,
+        message_expiry_interval_secs: Option<u32>,
+        topic_alias: Option<u16>,
+        headers: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+        user_properties: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+        reply_to: Option<Address<'a>>,
+        response_topic: Option<Cow<'a, str>>,
+        correlation_id: Option<Cow<'a, str>>,
+        correlation_data: Option<Vec<u8>>,
+    },
+    Subscribe {
+        command_id: Cow<'a, str>,
+        topic: Cow<'a, str>,
+        delivery: Option<DeliveryGuarantee>,
+        durable_name: Option<Cow<'a, str>>,
+        shared_group: Option<Cow<'a, str>>,
+        no_local: bool,
+        retain_as_published: bool,
+        retain_handling: Option<MqttRetainHandling>,
+        subscription_identifier: Option<u32>,
+        user_properties: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+    },
+    Unsubscribe {
+        command_id: Cow<'a, str>,
+        topic: Cow<'a, str>,
+    },
+}
+
+impl MqttNativePlan<'_> {
+    pub fn into_owned(self) -> MqttNativePlan<'static> {
+        match self {
+            MqttNativePlan::Publish {
+                command_id,
+                topic,
+                payload,
+                delivery,
+                retain,
+                payload_format,
+                content_type,
+                message_expiry_interval_secs,
+                topic_alias,
+                headers,
+                user_properties,
+                reply_to,
+                response_topic,
+                correlation_id,
+                correlation_data,
+            } => MqttNativePlan::Publish {
+                command_id: Cow::Owned(command_id.into_owned()),
+                topic: Cow::Owned(topic.into_owned()),
+                payload: payload.into_owned(),
+                delivery,
+                retain,
+                payload_format,
+                content_type: content_type.map(|value| Cow::Owned(value.into_owned())),
+                message_expiry_interval_secs,
+                topic_alias,
+                headers: headers
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
+                    })
+                    .collect(),
+                user_properties: user_properties
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
+                    })
+                    .collect(),
+                reply_to: reply_to.map(Address::into_owned),
+                response_topic: response_topic.map(|value| Cow::Owned(value.into_owned())),
+                correlation_id: correlation_id.map(|value| Cow::Owned(value.into_owned())),
+                correlation_data,
+            },
+            MqttNativePlan::Subscribe {
+                command_id,
+                topic,
+                delivery,
+                durable_name,
+                shared_group,
+                no_local,
+                retain_as_published,
+                retain_handling,
+                subscription_identifier,
+                user_properties,
+            } => MqttNativePlan::Subscribe {
+                command_id: Cow::Owned(command_id.into_owned()),
+                topic: Cow::Owned(topic.into_owned()),
+                delivery,
+                durable_name: durable_name.map(|value| Cow::Owned(value.into_owned())),
+                shared_group: shared_group.map(|value| Cow::Owned(value.into_owned())),
+                no_local,
+                retain_as_published,
+                retain_handling,
+                subscription_identifier,
+                user_properties: user_properties
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
+                    })
+                    .collect(),
+            },
+            MqttNativePlan::Unsubscribe { command_id, topic } => MqttNativePlan::Unsubscribe {
+                command_id: Cow::Owned(command_id.into_owned()),
+                topic: Cow::Owned(topic.into_owned()),
+            },
+        }
+    }
+}
+
 /// Version-aware MQTT native request produced from routed commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttWirePacket {
@@ -126,15 +250,17 @@ pub enum MqttCommandConversionError {
     /// Underlying `mqtt_protocol_core` packet builder rejected the request.
     #[error("failed to build MQTT packet: {0}")]
     PacketBuild(#[from] mqtt::result_code::MqttError),
+    #[error("invalid bridge request: {0}")]
+    Bridge(#[from] BridgePlannerError),
+    #[error("bridge message does not describe an MQTT packet request")]
+    InvalidBridgeMessage,
 }
 
 /// Borrowed view carrying enough context to convert routed command into MQTT packets.
 #[derive(Debug, Clone, Copy)]
-pub struct MqttCommandRef<'a> {
+pub(crate) struct MqttCommandRef<'a> {
     /// Device-side broker configuration and metadata.
     pub device: &'a Device<MqttResourceAttributes>,
-    /// Routed command to convert.
-    pub command: &'a Command,
 }
 
 impl MqttCommandRef<'_> {

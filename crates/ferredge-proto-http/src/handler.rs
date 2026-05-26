@@ -8,8 +8,9 @@ use ferredge_core::prelude::{
     normalize_host_port, write_all_socket,
 };
 
-use crate::HttpRequest;
+use crate::{HttpRequest, HttpResponse};
 
+#[derive(Debug)]
 struct ParsedEndpoint {
     connect_target: String,
     host_header: String,
@@ -31,15 +32,17 @@ pub(crate) enum HttpTransportError {
     FlushRequest(#[source] NetError),
     #[error("failed to read response: {0}")]
     ReadResponse(#[source] NetError),
+    #[error("invalid HTTP response: {0}")]
+    InvalidResponse(String),
 }
 
-/// Sends one native HTTP request to endpoint and returns raw response bytes.
+/// Sends one native HTTP request to endpoint and returns parsed response metadata and body.
 pub async fn send_request<N, R>(
     endpoint: &str,
     request: &HttpRequest,
     _runtime: &R,
     net: &N,
-) -> Result<Vec<u8>, HttpTransportError>
+) -> Result<HttpResponse, HttpTransportError>
 where
     N: AsyncNet,
     R: AsyncRuntime,
@@ -93,7 +96,7 @@ where
         response.extend_from_slice(&buffer[..count]);
     }
 
-    Ok(response)
+    parse_response(&response)
 }
 
 fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, HttpTransportError> {
@@ -148,9 +151,54 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, HttpTransportError> 
     }
 }
 
+fn parse_response(response: &[u8]) -> Result<HttpResponse, HttpTransportError> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| {
+            HttpTransportError::InvalidResponse("missing header terminator".to_string())
+        })?;
+    let header_text = String::from_utf8_lossy(&response[..header_end]);
+    let mut lines = header_text.lines();
+    let status_line = lines
+        .next()
+        .ok_or_else(|| HttpTransportError::InvalidResponse("missing status line".to_string()))?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| HttpTransportError::InvalidResponse("invalid status line".to_string()))?;
+    let headers = lines
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(expected_len) = headers.iter().find_map(|(name, value)| {
+        if name.eq_ignore_ascii_case("content-length") {
+            value.parse::<usize>().ok()
+        } else {
+            None
+        }
+    }) {
+        let body_len = response.len().saturating_sub(header_end + 4);
+        if body_len < expected_len {
+            return Err(HttpTransportError::InvalidResponse(
+                "response body shorter than content-length".to_string(),
+            ));
+        }
+    }
+    Ok(HttpResponse {
+        status_code,
+        headers,
+        body: response[header_end + 4..].to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_endpoint;
+    use super::{HttpTransportError, parse_endpoint, parse_response};
 
     #[test]
     fn parse_endpoint_adds_default_ports() {
@@ -196,5 +244,57 @@ mod tests {
             parse_endpoint("https://example.com/api/v1").expect("url with path should parse");
         assert_eq!(parsed.connect_target, "example.com:443");
         assert_eq!(parsed.host_header, "example.com");
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_missing_authority() {
+        assert_eq!(
+            parse_endpoint("http:///api").unwrap_err(),
+            HttpTransportError::MissingAuthority
+        );
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_malformed_ipv6_authority() {
+        assert_eq!(
+            parse_endpoint("http://[::1/api").unwrap_err(),
+            HttpTransportError::MalformedIpv6Authority
+        );
+    }
+
+    #[test]
+    fn validate_response_rejects_missing_headers() {
+        assert_eq!(
+            parse_response(b"oops").unwrap_err(),
+            HttpTransportError::InvalidResponse("missing header terminator".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_response_rejects_truncated_body() {
+        assert_eq!(
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nhi")
+                .unwrap_err(),
+            HttpTransportError::InvalidResponse(
+                "response body shorter than content-length".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_response_extracts_status_headers_and_body() {
+        let response = parse_response(
+            b"HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nX-Test: ok\r\n\r\nhello",
+        )
+        .expect("response should parse");
+        assert_eq!(response.status_code, 201);
+        assert_eq!(
+            response.headers,
+            vec![
+                ("Content-Type".to_string(), "text/plain".to_string()),
+                ("X-Test".to_string(), "ok".to_string())
+            ]
+        );
+        assert_eq!(response.body, b"hello");
     }
 }

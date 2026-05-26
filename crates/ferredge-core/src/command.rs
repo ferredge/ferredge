@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{borrow::Cow, string::String, vec::Vec};
 use core::fmt;
 
 use crate::device::DeviceId;
@@ -26,20 +26,63 @@ pub enum DeliveryState {
 
 /// Correlates async replies or completion events with original request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Correlation {
+pub struct Correlation<'a> {
     /// Identifier of original command or request.
-    pub request_id: CommandId,
+    pub request_id: Cow<'a, str>,
     /// Optional logical reply destination such as topic or resource.
-    pub reply_to: Option<Address>,
+    pub reply_to: Option<Address<'a>>,
+}
+
+impl Correlation<'_> {
+    /// Re-borrows this correlation without forcing ownership changes.
+    pub fn as_borrowed(&self) -> Correlation<'_> {
+        Correlation {
+            request_id: Cow::Borrowed(self.request_id.as_ref()),
+            reply_to: self.reply_to.as_ref().map(Address::as_borrowed),
+        }
+    }
+
+    /// Materializes an owned correlation for async or persistent boundaries.
+    pub fn into_owned(self) -> Correlation<'static> {
+        Correlation {
+            request_id: Cow::Owned(self.request_id.into_owned()),
+            reply_to: self.reply_to.map(Address::into_owned),
+        }
+    }
 }
 
 /// Protocol-neutral logical address used by routed messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Address {
+pub enum Address<'a> {
     /// Resource-oriented address such as HTTP path or Modbus register alias.
-    Resource(String),
+    Resource(Cow<'a, str>),
     /// Channel-oriented address such as MQTT or NATS topic.
-    Channel(String),
+    Channel(Cow<'a, str>),
+}
+
+impl Address<'_> {
+    /// Re-borrows this address without forcing ownership changes.
+    pub fn as_borrowed(&self) -> Address<'_> {
+        match self {
+            Self::Resource(value) => Address::Resource(Cow::Borrowed(value.as_ref())),
+            Self::Channel(value) => Address::Channel(Cow::Borrowed(value.as_ref())),
+        }
+    }
+
+    /// Materializes an owned address for long-lived boundaries.
+    pub fn into_owned(self) -> Address<'static> {
+        match self {
+            Self::Resource(value) => Address::Resource(Cow::Owned(value.into_owned())),
+            Self::Channel(value) => Address::Channel(Cow::Owned(value.into_owned())),
+        }
+    }
+
+    /// Returns the underlying string slice for either address family.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Resource(value) | Self::Channel(value) => value.as_ref(),
+        }
+    }
 }
 
 /// Common delivery guarantees shared by broker-style protocols.
@@ -86,6 +129,19 @@ pub struct BrokerMessageOptions {
     pub correlation_id: Option<String>,
     /// Optional protocol-specific broker extension.
     pub protocol: Option<BrokerMessageProtocolOptions>,
+}
+
+/// Protocol-neutral request options preserved for request/response transports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RequestOptions {
+    /// Optional dynamic headers attached to the request.
+    pub headers: Vec<(String, String)>,
+    /// Optional declared content type.
+    pub content_type: Option<String>,
+    /// Optional method override for transports that support it.
+    pub method: Option<String>,
+    /// Optional path override for transports that support it.
+    pub path: Option<String>,
 }
 
 /// Protocol-neutral broker subscription options preserved in routed command layer.
@@ -177,7 +233,7 @@ pub enum BrokerChannelKind {
 ///
 /// **Note:** f64 doesn't support `Eq` trait due to `NaN` semantics, so `PayloadValue` either.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PayloadValue {
+pub enum PayloadValue<'a> {
     /// Explicit absence of payload content.
     Null,
     /// Boolean scalar.
@@ -189,40 +245,91 @@ pub enum PayloadValue {
     /// Floating-point scalar.
     F64(f64),
     /// UTF-8 text payload.
-    String(String),
+    String(Cow<'a, str>),
     /// Opaque binary payload.
-    Bytes(Vec<u8>),
+    Bytes(Cow<'a, [u8]>),
     /// Ordered heterogeneous sequence payload.
-    List(Vec<PayloadValue>),
+    List(Cow<'a, [PayloadValue<'a>]>),
     /// Ordered object payload.
-    Map(Vec<(String, PayloadValue)>),
+    Map(Cow<'a, [(Cow<'a, str>, PayloadValue<'a>)]>),
 }
 
-impl From<Vec<u8>> for PayloadValue {
+impl PayloadValue<'_> {
+    /// Re-borrows this payload without forcing ownership changes.
+    pub fn as_borrowed(&self) -> PayloadValue<'_> {
+        match self {
+            Self::Null => PayloadValue::Null,
+            Self::Bool(value) => PayloadValue::Bool(*value),
+            Self::I64(value) => PayloadValue::I64(*value),
+            Self::U64(value) => PayloadValue::U64(*value),
+            Self::F64(value) => PayloadValue::F64(*value),
+            Self::String(value) => PayloadValue::String(Cow::Borrowed(value.as_ref())),
+            Self::Bytes(value) => PayloadValue::Bytes(Cow::Borrowed(value.as_ref())),
+            Self::List(values) => PayloadValue::List(Cow::Owned(
+                values.iter().map(PayloadValue::as_borrowed).collect(),
+            )),
+            Self::Map(values) => PayloadValue::Map(Cow::Owned(
+                values
+                    .iter()
+                    .map(|(key, value)| (Cow::Borrowed(key.as_ref()), value.as_borrowed()))
+                    .collect(),
+            )),
+        }
+    }
+
+    /// Materializes an owned payload for async or persistence boundaries.
+    pub fn into_owned(self) -> PayloadValue<'static> {
+        match self {
+            Self::Null => PayloadValue::Null,
+            Self::Bool(value) => PayloadValue::Bool(value),
+            Self::I64(value) => PayloadValue::I64(value),
+            Self::U64(value) => PayloadValue::U64(value),
+            Self::F64(value) => PayloadValue::F64(value),
+            Self::String(value) => PayloadValue::String(Cow::Owned(value.into_owned())),
+            Self::Bytes(value) => PayloadValue::Bytes(Cow::Owned(value.into_owned())),
+            Self::List(values) => PayloadValue::List(Cow::Owned(
+                values
+                    .into_owned()
+                    .into_iter()
+                    .map(PayloadValue::into_owned)
+                    .collect(),
+            )),
+            Self::Map(values) => PayloadValue::Map(Cow::Owned(
+                values
+                    .into_owned()
+                    .into_iter()
+                    .map(|(key, value)| (Cow::Owned(key.into_owned()), value.into_owned()))
+                    .collect(),
+            )),
+        }
+    }
+}
+
+impl From<Vec<u8>> for PayloadValue<'static> {
     fn from(value: Vec<u8>) -> Self {
-        Self::Bytes(value)
+        Self::Bytes(Cow::Owned(value))
     }
 }
 
-impl From<&[u8]> for PayloadValue {
-    fn from(value: &[u8]) -> Self {
-        Self::Bytes(value.to_vec())
+impl<'a> From<&'a [u8]> for PayloadValue<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        Self::Bytes(Cow::Borrowed(value))
     }
 }
 
-impl From<String> for PayloadValue {
+impl From<String> for PayloadValue<'static> {
     fn from(value: String) -> Self {
-        Self::String(value)
+        Self::String(Cow::Owned(value))
     }
 }
 
-impl From<&str> for PayloadValue {
-    fn from(value: &str) -> Self {
-        Self::String(value.to_string())
+impl<'a> From<&'a str> for PayloadValue<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::String(Cow::Borrowed(value))
     }
 }
 
-impl fmt::Display for PayloadValue {
+impl fmt::Display for PayloadValue<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Null => write!(f, "null"),
@@ -242,21 +349,26 @@ impl fmt::Display for PayloadValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Intent {
     /// Reads current state from named resource.
-    Read { resource: String },
+    Read {
+        resource: String,
+        options: RequestOptions,
+    },
     /// Writes typed payload to named resource.
     Write {
         resource: String,
-        payload: PayloadValue,
+        payload: PayloadValue<'static>,
+        options: RequestOptions,
     },
     /// Invokes operation with optional argument payload.
     Invoke {
         operation: String,
-        args: Option<PayloadValue>,
+        args: Option<PayloadValue<'static>>,
+        options: RequestOptions,
     },
     /// Sends typed payload to broker-oriented channel such as topic, subject, queue, or stream.
     Send {
         channel: BrokerAddress,
-        payload: PayloadValue,
+        payload: PayloadValue<'static>,
         options: BrokerMessageOptions,
     },
     /// Subscribes to broker-oriented channel such as topic, subject, queue, or stream.
@@ -280,12 +392,12 @@ pub struct Command {
     /// Requested protocol-neutral operation.
     pub intent: Intent,
     /// Optional async reply or completion correlation metadata.
-    pub correlation: Option<Correlation>,
+    pub correlation: Option<Correlation<'static>>,
 }
 
 /// Represents the result of command execution or delivery.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CommandResult {
+pub struct CommandResult<'a> {
     /// Identifier of command this result belongs to.
     pub command_id: CommandId,
     /// Device that produced this result.
@@ -293,9 +405,23 @@ pub struct CommandResult {
     /// Delivery or completion state.
     pub state: DeliveryState,
     /// Optional payload returned by successful completion.
-    pub payload: Option<PayloadValue>,
+    pub payload: Option<PayloadValue<'a>>,
     /// Optional human-readable error description.
-    pub error: Option<String>,
+    pub error: Option<Cow<'a, str>>,
     /// Optional correlation metadata preserved from originating command.
-    pub correlation: Option<Correlation>,
+    pub correlation: Option<Correlation<'a>>,
+}
+
+impl CommandResult<'_> {
+    /// Materializes an owned command result for long-lived boundaries.
+    pub fn into_owned(self) -> CommandResult<'static> {
+        CommandResult {
+            command_id: self.command_id,
+            device_id: self.device_id,
+            state: self.state,
+            payload: self.payload.map(PayloadValue::into_owned),
+            error: self.error.map(|value| Cow::Owned(value.into_owned())),
+            correlation: self.correlation.map(Correlation::into_owned),
+        }
+    }
 }

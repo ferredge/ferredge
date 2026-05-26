@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [features]
 default = ["tokio-runtime"]
-std = ["ferredge-core/std", "serde/std"]
+std = ["ferredge-core/std", "ferredge-bridge/std", "serde/std"]
 tokio-runtime = [
     "std",
     "dep:ferredge-runtime-tokio",
@@ -35,9 +35,13 @@ integration = []
 
 [dependencies]
 ferredge-core = { workspace = true, features = ["net", "runtime", "serial"] }
+ferredge-bridge = { workspace = true }
 serde = { workspace = true }
 rmodbus = { workspace = true }
 thiserror = { workspace = true }
 ferredge-runtime-tokio = { workspace = true, optional = true }
 ferredge-runtime-async-std = { workspace = true, optional = true }
 ferredge-runtime-embassy = { workspace = true, optional = true }
+
+[dev-dependencies]
+ferredge-test-support = { workspace = true, features = ["tokio-runtime"] }

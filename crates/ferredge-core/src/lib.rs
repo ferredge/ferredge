@@ -1,4 +1,3 @@
-mod bridge;
 mod command;
 mod device;
 #[cfg(feature = "net")]
@@ -13,7 +12,6 @@ mod serial;
 mod sync;
 
 pub mod prelude {
-    pub use crate::bridge::*;
     pub use crate::command::*;
     pub use crate::device::*;
     #[cfg(feature = "net")]

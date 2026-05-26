@@ -1,6 +1,4 @@
-use crate::command::{Command, CommandResult};
-use crate::device::{Device, DeviceResourceAttributes};
-use crate::routed::{RoutedEvent, RoutedMessage, RoutedResult};
+use crate::routed::RoutedEvent;
 
 /// Receives protocol-native or routed events emitted by drivers.
 pub trait EventSink: Send {
@@ -78,49 +76,11 @@ pub trait PubSub: Send + Sync {
         sink: S,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
-        S: EventSink<Event = RoutedEvent> + Send;
+        S: EventSink<Event = RoutedEvent<'static>> + Send;
 
     /// Removes one subscription from transport.
     fn unsubscribe(
         &self,
         subscription: Self::Subscription,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-}
-
-/// Protocol-neutral router for commands, events, and results.
-pub trait Router: Send + Sync {
-    /// Router-specific error type.
-    type Error;
-
-    /// Registers one device and its metadata with router state.
-    fn register_device<T>(
-        &self,
-        device: Device<T>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send
-    where
-        T: DeviceResourceAttributes;
-
-    /// Routes already-normalized message through router pipeline.
-    fn route_message(
-        &self,
-        message: RoutedMessage,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-    /// Routes one command and returns command-level result state.
-    fn route_command(
-        &self,
-        command: Command,
-    ) -> impl Future<Output = Result<CommandResult, Self::Error>> + Send;
-
-    /// Handles one routed event emitted from protocol ingress.
-    fn handle_event(
-        &self,
-        event: RoutedEvent,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-    /// Handles one routed result or completion update.
-    fn handle_result(
-        &self,
-        result: RoutedResult,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }

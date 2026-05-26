@@ -4,6 +4,9 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
+use ferredge_bridge::{
+    BridgeMessage, BridgeOutbound, NativeOutbound, ProtocolEncoder, ProtocolPlanner, planner,
+};
 use ferredge_core::prelude::*;
 
 mod convert;
@@ -44,13 +47,15 @@ mod mosquitto_tests;
 #[cfg(test)]
 mod tests;
 
-use types::{MqttPacketRequest, MqttResourceAttributes};
+use types::{MqttNativePlan, MqttPacketRequest, MqttResourceAttributes};
 
 use runtime::{
     MqttClientSession, build_connect_packet, disconnect_session, mqtt_version_from_core,
     normalize_broker_addr, read_from_session_async, send_packet_request_async,
 };
 
+pub use convert::MqttBridgeCodec;
+pub use runtime::{MqttDecodedInbound, MqttInboundDecoder};
 pub use types::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
     MqttCommandConversionError, MqttPublishRequest, MqttSubscriptionRequest, MqttWirePacket,
@@ -58,6 +63,9 @@ pub use types::{
 
 #[cfg(feature = "std")]
 type MqttAuthHandler = Shared<dyn MqttAuthProvider>;
+
+/// Outbound planner for MQTT messaging semantics.
+pub struct MqttCommandPlanner;
 
 const MQTT_CONNECT_IO_TIMEOUT_MS: u64 = 1_000;
 const MQTT_ACK_READ_TIMEOUT_MS: u64 = 250;
@@ -142,6 +150,33 @@ impl MqttDriver {
         }
     }
 
+    pub fn bridge_packet_request(
+        &self,
+        command: Command,
+    ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
+        let message = planner_message_for_command(command)?;
+        <MqttBridgeCodec<'_> as ProtocolEncoder<
+            BridgeOutbound,
+            BridgeMessage<'static>,
+            MqttPacketRequest,
+        >>::encode(&MqttBridgeCodec::new(&self.dvc), message)
+    }
+
+    pub fn native_packet_request(
+        &self,
+        command: Command,
+    ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
+        let plan = <MqttCommandPlanner as ProtocolPlanner<
+            NativeOutbound,
+            MqttNativePlan<'static>,
+        >>::plan(&MqttCommandPlanner, command)?;
+        <MqttBridgeCodec<'_> as ProtocolEncoder<
+            NativeOutbound,
+            MqttNativePlan<'static>,
+            MqttPacketRequest,
+        >>::encode(&MqttBridgeCodec::new(&self.dvc), plan)
+    }
+
     /// Registers enhanced MQTT v5 auth callback used for connect-time and re-auth exchanges.
     pub fn set_auth_handler<P>(&self, handler: P) -> Result<(), String>
     where
@@ -202,8 +237,7 @@ impl MqttDriver {
             keepalive_secs: config.keepalive_secs,
             last_activity: self.runtime.now(),
             awaiting_pingresp: false,
-            pending_command_ids: Map::new(),
-            pending_reply_routes: Map::new(),
+            inbound_decoder: MqttInboundDecoder::new(self.dvc.id.clone()),
             authentication_method: config.connect_properties.authentication_method.clone(),
         };
         let events = session.connection.checked_send(connect_packet);
@@ -337,7 +371,7 @@ impl MqttDriver {
     async fn replay_recovery_state_on_session_async(
         &self,
         session: &mut MqttClientSession,
-    ) -> Result<Vec<RoutedEvent>, String> {
+    ) -> Result<Vec<RoutedEvent<'static>>, String> {
         let reconnect = self.reconnect_config()?;
         let result = async {
             let mut recovered_events = Vec::new();
@@ -395,7 +429,7 @@ impl MqttDriver {
                     _ => None,
                 }));
             }
-            Ok::<Vec<RoutedEvent>, String>(recovered_events)
+            Ok::<Vec<RoutedEvent<'static>>, String>(recovered_events)
         }
         .await;
 
@@ -623,7 +657,7 @@ impl SessionCommand {
 #[derive(Debug, Clone)]
 enum SessionCommandResult {
     Done,
-    Events(Vec<RoutedEvent>),
+    Events(Vec<RoutedEvent<'static>>),
 }
 
 async fn broadcast_listener_status_to_subscribers(
@@ -819,7 +853,7 @@ impl PubSub for MqttDriver {
         sink: S,
     ) -> Result<(), Self::Error>
     where
-        S: EventSink<Event = RoutedEvent> + Send,
+        S: EventSink<Event = RoutedEvent<'static>> + Send,
     {
         {
             self.track_subscription_intent(&subscription)?;
@@ -960,7 +994,7 @@ impl PubSub for MqttDriver {
 }
 
 impl EventSource for MqttDriver {
-    type Event = RoutedEvent;
+    type Event = RoutedEvent<'static>;
     type Error = String;
 
     async fn start_listening<S>(&self, sink: S) -> Result<(), Self::Error>
@@ -1320,4 +1354,110 @@ impl EventSource for MqttDriver {
     }
 }
 
-pub use types::MqttCommandRef;
+fn planner_message_for_command(
+    command: Command,
+) -> Result<ferredge_bridge::BridgeMessage<'static>, MqttCommandConversionError> {
+    match &command.intent {
+        Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
+            planner::command_to_messaging(command).map_err(Into::into)
+        }
+        _ => Err(MqttCommandConversionError::UnsupportedIntent),
+    }
+}
+
+impl ProtocolPlanner<ferredge_bridge::BridgeOutbound, BridgeMessage<'static>>
+    for MqttCommandPlanner
+{
+    type Error = MqttCommandConversionError;
+
+    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+        planner_message_for_command(command)
+    }
+}
+
+impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPlanner {
+    type Error = MqttCommandConversionError;
+
+    fn plan(&self, command: Command) -> Result<MqttNativePlan<'static>, Self::Error> {
+        match command.intent {
+            Intent::Send {
+                channel,
+                payload,
+                options,
+            } => {
+                let mqtt_options = match options.protocol {
+                    Some(BrokerMessageProtocolOptions::Mqtt(mqtt)) => mqtt,
+                    _ => MqttMessageOptions::default(),
+                };
+                let topic = match channel.kind {
+                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(kind) => {
+                        return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
+                    }
+                };
+                Ok(MqttNativePlan::Publish {
+                    command_id: command.id.into(),
+                    topic: topic.into(),
+                    payload: ferredge_bridge::BridgePayload::from(payload).into_owned(),
+                    delivery: options.delivery,
+                    retain: mqtt_options.retain,
+                    payload_format: mqtt_options.payload_format,
+                    content_type: mqtt_options.content_type.map(Into::into),
+                    message_expiry_interval_secs: mqtt_options.message_expiry_interval_secs,
+                    topic_alias: mqtt_options.topic_alias,
+                    headers: Vec::new(),
+                    user_properties: mqtt_options
+                        .user_properties
+                        .into_iter()
+                        .map(|(key, value)| (key.into(), value.into()))
+                        .collect(),
+                    reply_to: options.reply_to.map(|value| Address::Channel(value.into())),
+                    response_topic: mqtt_options.response_topic.map(Into::into),
+                    correlation_id: options.correlation_id.map(Into::into),
+                    correlation_data: mqtt_options.correlation_data,
+                })
+            }
+            Intent::Subscribe { channel, options } => {
+                let mqtt_options = match options.protocol {
+                    Some(BrokerSubscriptionProtocolOptions::Mqtt(mqtt)) => mqtt,
+                    _ => MqttSubscriptionOptions::default(),
+                };
+                let topic = match channel.kind {
+                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(kind) => {
+                        return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
+                    }
+                };
+                Ok(MqttNativePlan::Subscribe {
+                    command_id: command.id.into(),
+                    topic: topic.into(),
+                    delivery: options.delivery,
+                    durable_name: options.durable_name.map(Into::into),
+                    shared_group: options.shared_group.map(Into::into),
+                    no_local: mqtt_options.no_local,
+                    retain_as_published: mqtt_options.retain_as_published,
+                    retain_handling: mqtt_options.retain_handling,
+                    subscription_identifier: mqtt_options.subscription_identifier,
+                    user_properties: mqtt_options
+                        .user_properties
+                        .into_iter()
+                        .map(|(key, value)| (key.into(), value.into()))
+                        .collect(),
+                })
+            }
+            Intent::Unsubscribe { channel } => {
+                let topic = match channel.kind {
+                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(kind) => {
+                        return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
+                    }
+                };
+                Ok(MqttNativePlan::Unsubscribe {
+                    command_id: command.id.into(),
+                    topic: topic.into(),
+                })
+            }
+            _ => Err(MqttCommandConversionError::UnsupportedIntent),
+        }
+    }
+}

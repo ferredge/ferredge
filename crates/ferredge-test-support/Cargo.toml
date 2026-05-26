@@ -1,0 +1,17 @@
+[package]
+name = "ferredge-test-support"
+description = "Shared external-process and runtime helpers for ferredge integration tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["tokio-runtime"]
+tokio-runtime = ["dep:ferredge-runtime-tokio"]
+async-std-runtime = ["dep:ferredge-runtime-async-std"]
+
+[dependencies]
+ferredge-runtime-tokio = { workspace = true, optional = true }
+ferredge-runtime-async-std = { workspace = true, optional = true }

@@ -10,7 +10,7 @@ rust-version.workspace = true
 [features]
 # `std` enables common std support. Runtime stack selection happens via stack-specific features.
 default = ["tokio-runtime"]
-std = ["ferredge-core/std", "mqtt_protocol_core/std", "serde/std"]
+std = ["ferredge-core/std", "ferredge-bridge/std", "mqtt_protocol_core/std", "serde/std"]
 tokio-runtime = ["std", "dep:ferredge-runtime-tokio", "ferredge-runtime-tokio/runtime", "ferredge-runtime-tokio/net"]
 async-std-runtime = ["std", "dep:ferredge-runtime-async-std", "ferredge-runtime-async-std/runtime", "ferredge-runtime-async-std/net"]
 embassy-runtime = ["dep:ferredge-runtime-embassy", "ferredge-runtime-embassy/runtime", "ferredge-runtime-embassy/net"]
@@ -19,6 +19,7 @@ integration = []
 
 [dependencies]
 ferredge-core = { workspace = true, features = ["net", "runtime", "sync"] }
+ferredge-bridge = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 mqtt_protocol_core = { package = "mqtt-protocol-core", version = "0.7.7", default-features = false }
@@ -28,4 +29,4 @@ ferredge-runtime-async-std = { workspace = true, optional = true }
 ferredge-runtime-embassy = { workspace = true, optional = true }
 
 [dev-dependencies]
-ferredge-proto-http = { workspace = true }
+ferredge-test-support = { workspace = true, features = ["tokio-runtime"] }
