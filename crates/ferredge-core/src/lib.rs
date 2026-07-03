@@ -6,12 +6,6 @@ extern crate std;
 
 mod command;
 mod device;
-#[cfg(any(
-    feature = "runtime",
-    feature = "net",
-    feature = "serial",
-    feature = "sync"
-))]
 mod maybe;
 #[cfg(feature = "net")]
 mod net;
@@ -27,12 +21,6 @@ mod sync;
 pub mod prelude {
     pub use crate::command::*;
     pub use crate::device::*;
-    #[cfg(any(
-        feature = "runtime",
-        feature = "net",
-        feature = "serial",
-        feature = "sync"
-    ))]
     pub use crate::maybe::*;
     #[cfg(feature = "net")]
     pub use crate::net::*;
