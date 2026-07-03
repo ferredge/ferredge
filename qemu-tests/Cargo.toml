@@ -1,0 +1,49 @@
+# Bare-metal execution test for the embassy adapters. Deliberately outside the main
+# workspace: it builds for thumbv7m-none-eabi and runs under qemu-system-arm (mps2-an385,
+# Cortex-M3) with semihosting, proving the runtime/net/serial features work on a real
+# no_std target, not just that they typecheck for one.
+[package]
+name = "ferredge-embassy-qemu-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+ferredge-core = { path = "../crates/ferredge-core", features = [
+    "runtime",
+    "net",
+    "serial",
+    "sync",
+    "local",
+] }
+ferredge-runtime-embassy = { path = "../crates/ferredge-runtime-embassy", features = [
+    "runtime",
+    "net",
+    "serial",
+] }
+
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
+embassy-futures = "0.1"
+embassy-net = { version = "0.9", default-features = false, features = [
+    "tcp",
+    "udp",
+    "proto-ipv4",
+    "proto-ipv6",
+    "medium-ethernet",
+] }
+embassy-net-driver = "0.2"
+embassy-time = { version = "0.5", features = ["mock-driver"] }
+embedded-io-async = "0.7"
+heapless = "0.9"
+
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+embedded-alloc = "0.6"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+[profile.release]
+lto = true
+opt-level = "s"
