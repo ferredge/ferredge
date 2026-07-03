@@ -106,3 +106,41 @@ jobs:
 
     - name: Run integration tests
       run: cargo test --workspace --verbose --features integration
+
+  embedded:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      with:
+        toolchain: stable
+        override: true
+        target: thumbv7em-none-eabihf,thumbv7m-none-eabi
+
+    - uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+      with:
+        tool: cargo-nextest
+
+    - name: Install QEMU system emulator
+      uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+      with:
+        packages: qemu-system-arm
+        version: "1"
+
+    # The embassy stack builds ferredge-core with the `local` feature, which is mutually
+    # exclusive with the tokio/async-std adapters, so these run per-package rather than
+    # as part of a workspace-wide feature build.
+    - name: Test ferredge-core with relaxed (local) bounds
+      run: cargo nextest run -p ferredge-core --features runtime,net,serial,sync,local
+
+    - name: Test embassy adapters on the host
+      run: cargo nextest run -p ferredge-runtime-embassy --features runtime,net,dns,serial,std
+
+    - name: Check embassy adapters for a no_std target
+      run: cargo check -p ferredge-runtime-embassy --features runtime,net,dns,serial --target thumbv7em-none-eabihf
+
+    - name: Run embassy adapters on bare metal under QEMU
+      working-directory: qemu-tests
+      run: cargo run --release
