@@ -24,7 +24,13 @@ net = [
     "dep:embassy-time",
 ]
 dns = ["net", "embassy-net/dns"]
-serial = ["ferredge-core/local", "ferredge-core/serial", "dep:embedded-io-async"]
+serial = [
+    "ferredge-core/local",
+    "ferredge-core/serial",
+    "ferredge-core/sync",
+    "dep:embassy-sync",
+    "dep:embedded-io-async",
+]
 std = ["ferredge-core/std", "embassy-time?/std"]
 
 [dependencies]
