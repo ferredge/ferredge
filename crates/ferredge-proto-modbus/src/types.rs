@@ -1,6 +1,10 @@
 extern crate alloc;
 
-use alloc::{borrow::Cow, string::String, vec::Vec};
+use alloc::{
+    borrow::Cow,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::time::Duration;
 
 use ferredge_bridge::{
@@ -170,13 +174,33 @@ impl core::fmt::Debug for ModbusDriver {
 }
 
 impl ModbusDriver {
+    /// Creates a new Modbus driver from device metadata.
+    ///
+    /// Uses the ambient runtime stack, so it is only available on the std runtimes; the
+    /// embassy stack has no ambient executor or network stack — construct with
+    /// [`ModbusDriver::with_stack`] there.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     pub fn new(dvc: Device<ModbusResourceAttributes>) -> Self {
-        let runtime = StackRuntime::default();
+        Self::with_stack(
+            dvc,
+            StackRuntime::default(),
+            StackNet::default(),
+            StackSerial::default(),
+        )
+    }
+
+    /// Creates a new Modbus driver from device metadata plus an explicit runtime stack.
+    pub fn with_stack(
+        dvc: Device<ModbusResourceAttributes>,
+        runtime: StackRuntime,
+        net: StackNet,
+        serial: StackSerial,
+    ) -> Self {
         Self {
             dvc,
             runtime: runtime.clone(),
-            net: StackNet::default(),
-            serial: StackSerial::default(),
+            net,
+            serial,
             persistent_session: Shared::new(runtime.mutex(None)),
         }
     }

@@ -12,17 +12,18 @@ mod tests;
 mod transport;
 mod types;
 
-#[cfg(all(feature = "tokio-runtime", feature = "async-std-runtime"))]
-compile_error!("ferredge-proto-modbus supports only one std runtime stack feature at a time");
+#[cfg(any(
+    all(feature = "tokio-runtime", feature = "async-std-runtime"),
+    all(feature = "tokio-runtime", feature = "embassy-runtime"),
+    all(feature = "async-std-runtime", feature = "embassy-runtime")
+))]
+compile_error!("ferredge-proto-modbus supports only one runtime stack feature at a time");
 #[cfg(not(any(
     feature = "tokio-runtime",
     feature = "async-std-runtime",
     feature = "embassy-runtime"
 )))]
 compile_error!("ferredge-proto-modbus requires one runtime stack feature");
-#[cfg(feature = "embassy-runtime")]
-compile_error!("ferredge-proto-modbus does not support embassy-runtime yet");
-
 #[cfg(feature = "tokio-runtime")]
 mod runtime_stack {
     pub use ferredge_runtime_tokio::{
@@ -38,6 +39,17 @@ mod runtime_stack {
         AsyncStdRuntime as StackRuntime, AsyncStdSerial as StackSerial,
         AsyncStdSerialPort as StackSerialPort, AsyncStdSocket as StackSocket,
     };
+}
+#[cfg(feature = "embassy-runtime")]
+mod runtime_stack {
+    pub use ferredge_runtime_embassy::{
+        EmbassyDatagramSocket as StackDatagramSocket, EmbassyDynSerial as StackSerial,
+        EmbassyNet as StackNet, EmbassyRuntime as StackRuntime, EmbassySocket as StackSocket,
+    };
+
+    /// Serial ports are type-erased on embassy; see `EmbassyDynSerialPort`.
+    pub type StackSerialPort =
+        ferredge_runtime_embassy::EmbassySerialPort<ferredge_runtime_embassy::EmbassyDynSerialPort>;
 }
 
 pub(crate) use runtime_stack::{

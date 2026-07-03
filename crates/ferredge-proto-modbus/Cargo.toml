@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [features]
 default = ["tokio-runtime"]
-std = ["ferredge-core/std", "ferredge-bridge/std", "serde/std"]
+std = ["ferredge-core/std", "ferredge-bridge/std", "serde/std", "rmodbus/std"]
 tokio-runtime = [
     "std",
     "dep:ferredge-runtime-tokio",
