@@ -56,6 +56,7 @@ async-std = { version = "1", features = ["attributes"] }
 tokio-serial = "5.4.5"
 serialport = "4.8.1"
 rmodbus = { version = "0.12.2", default-features = false, features = ["alloc"] }
+dynosaur = "0.3"
 embassy-executor = "0.10"
 embassy-futures = "0.1"
 embassy-net = { version = "0.9", default-features = false, features = [

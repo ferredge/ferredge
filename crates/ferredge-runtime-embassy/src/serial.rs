@@ -2,8 +2,6 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use core::cell::RefCell;
-use core::future::Future;
-use core::pin::Pin;
 
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -104,56 +102,44 @@ where
     }
 }
 
-/// Object-safe erasure of an `embedded-io-async` byte stream.
+/// Async-trait erasure of an `embedded-io-async` byte stream.
 ///
 /// `embedded_io_async::Read`/`Write` use async trait methods, so they have no `dyn` form;
-/// this boxes the futures (alloc) to recover one. Errors collapse to their [`ErrorKind`].
+/// [`dynosaur`] generates one ([`DynErasedSerialIo`]), boxing each call's future (alloc).
+/// Errors collapse to their [`ErrorKind`].
+#[dynosaur::dynosaur(DynErasedSerialIo = dyn(box) ErasedSerialIo)]
 trait ErasedSerialIo {
-    fn read<'a>(
-        &'a mut self,
-        buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<usize, ErrorKind>> + 'a>>;
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorKind>;
 
-    fn write<'a>(
-        &'a mut self,
-        buf: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<usize, ErrorKind>> + 'a>>;
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, ErrorKind>;
 
-    fn flush<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), ErrorKind>> + 'a>>;
+    async fn flush(&mut self) -> Result<(), ErrorKind>;
 }
 
-impl<T> ErasedSerialIo for T
+/// Newtype carrying the concrete HAL stream into [`ErasedSerialIo`]; a blanket impl over
+/// every `Read + Write` type would collide with the `Box` impls dynosaur generates.
+struct SerialIo<T>(T);
+
+impl<T> ErasedSerialIo for SerialIo<T>
 where
     T: embedded_io_async::Read + embedded_io_async::Write,
 {
-    fn read<'a>(
-        &'a mut self,
-        buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<usize, ErrorKind>> + 'a>> {
-        Box::pin(async move {
-            embedded_io_async::Read::read(self, buf)
-                .await
-                .map_err(|error| embedded_io_async::Error::kind(&error))
-        })
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorKind> {
+        embedded_io_async::Read::read(&mut self.0, buf)
+            .await
+            .map_err(|error| embedded_io_async::Error::kind(&error))
     }
 
-    fn write<'a>(
-        &'a mut self,
-        buf: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<usize, ErrorKind>> + 'a>> {
-        Box::pin(async move {
-            embedded_io_async::Write::write(self, buf)
-                .await
-                .map_err(|error| embedded_io_async::Error::kind(&error))
-        })
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, ErrorKind> {
+        embedded_io_async::Write::write(&mut self.0, buf)
+            .await
+            .map_err(|error| embedded_io_async::Error::kind(&error))
     }
 
-    fn flush<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), ErrorKind>> + 'a>> {
-        Box::pin(async move {
-            embedded_io_async::Write::flush(self)
-                .await
-                .map_err(|error| embedded_io_async::Error::kind(&error))
-        })
+    async fn flush(&mut self) -> Result<(), ErrorKind> {
+        embedded_io_async::Write::flush(&mut self.0)
+            .await
+            .map_err(|error| embedded_io_async::Error::kind(&error))
     }
 }
 
@@ -161,15 +147,15 @@ where
 ///
 /// Lets heterogeneous HAL ports live behind one concrete type, which protocol crates need
 /// for their non-generic `StackSerial`/`StackSerialPort` aliases. Costs one heap-boxed
-/// future per operation; use [`EmbassySerialPort`] directly when the device type is known.
+/// future per operation; prefer use [`EmbassySerialPort`] directly when the device type is known.
 pub struct EmbassyDynSerialPort {
-    inner: Box<dyn ErasedSerialIo>,
+    inner: Box<DynErasedSerialIo<'static>>,
 }
 
 impl EmbassyDynSerialPort {
     pub fn new(inner: impl embedded_io_async::Read + embedded_io_async::Write + 'static) -> Self {
         Self {
-            inner: Box::new(inner),
+            inner: DynErasedSerialIo::new_box(SerialIo(inner)),
         }
     }
 }
