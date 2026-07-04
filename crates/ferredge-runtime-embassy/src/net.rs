@@ -183,18 +183,6 @@ fn split_host_port(address: &str) -> Result<(&str, u16), NetError> {
     Ok((host.trim_start_matches('[').trim_end_matches(']'), port))
 }
 
-impl EmbassySocket {
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
-        self.read_timeout = timeout;
-        Ok(())
-    }
-
-    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
-        self.write_timeout = timeout;
-        Ok(())
-    }
-}
-
 async fn with_optional_timeout<F: core::future::Future>(
     timeout: Option<Duration>,
     future: F,
@@ -208,6 +196,16 @@ async fn with_optional_timeout<F: core::future::Future>(
 }
 
 impl AsyncSocket for EmbassySocket {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+        self.read_timeout = timeout;
+        Ok(())
+    }
+
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+        self.write_timeout = timeout;
+        Ok(())
+    }
+
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
         with_optional_timeout(self.read_timeout, self.socket.read(buf))
             .await?
@@ -275,14 +273,12 @@ impl AsyncNet for EmbassyNet {
     }
 }
 
-impl EmbassyDatagramSocket {
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+impl AsyncDatagramSocket for EmbassyDatagramSocket {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.read_timeout = timeout;
         Ok(())
     }
-}
 
-impl AsyncDatagramSocket for EmbassyDatagramSocket {
     async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
         let (size, metadata) = with_optional_timeout(self.read_timeout, self.socket.recv_from(buf))
             .await?

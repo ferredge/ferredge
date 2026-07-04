@@ -3,6 +3,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use core::future::Future;
+use core::time::Duration;
 
 use crate::maybe::{MaybeSend, MaybeSync};
 
@@ -44,12 +45,21 @@ pub trait AsyncDatagramSocket: MaybeSend + MaybeSync + 'static {
         address: &str,
     ) -> impl Future<Output = Result<usize, NetError>> + MaybeSend;
 
+    /// Sets or clears the receive timeout applied to subsequent `recv_from` calls.
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError>;
+
     /// Closes the datagram socket gracefully when the transport supports it.
     fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + MaybeSend;
 }
 
 /// Async bidirectional byte stream used by protocol adapters.
 pub trait AsyncSocket: MaybeSend + MaybeSync + 'static {
+    /// Sets or clears the timeout applied to subsequent `read` calls.
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError>;
+
+    /// Sets or clears the timeout applied to subsequent `write` and `flush` calls.
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError>;
+
     /// Reads bytes into the provided buffer and returns the number of bytes read.
     fn read(&mut self, buf: &mut [u8])
     -> impl Future<Output = Result<usize, NetError>> + MaybeSend;
@@ -175,6 +185,14 @@ mod tests {
     }
 
     impl AsyncSocket for MockSocket {
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
             let Some(read_data) = self.read_data.take() else {
                 return Err(NetError::Closed);
@@ -206,6 +224,14 @@ mod tests {
     }
 
     impl AsyncSocket for MockPartialWriteSocket {
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
         async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, NetError> {
             Err(NetError::Closed)
         }
@@ -266,6 +292,10 @@ mod tests {
     }
 
     impl AsyncDatagramSocket for MockDatagramSocket {
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
         async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
             let Some(recv_data) = self.recv_data.take() else {
                 return Err(NetError::Closed);
