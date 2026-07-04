@@ -1,13 +1,18 @@
-use std::{net::TcpStream, process::Command, time::Duration};
+use std::{
+    net::TcpStream,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::{
     net::reserve_free_port,
     process::{ProcessGuard, null_stdio, require_command},
-    wait::wait_until,
 };
 
 const MOSQUITTO_START_TIMEOUT: Duration = Duration::from_secs(5);
 const MOSQUITTO_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MOSQUITTO_START_ATTEMPTS: usize = 5;
 
 pub struct MosquittoGuard {
     process: Option<ProcessGuard>,
@@ -22,25 +27,66 @@ impl MosquittoGuard {
             process: None,
             port,
         };
-        guard.start_broker();
-        guard
+        // The reserved port is released before mosquitto binds it, so a parallel
+        // test can steal it in between; retry on a fresh port when that happens.
+        for attempt in 0..MOSQUITTO_START_ATTEMPTS {
+            if attempt > 0 {
+                guard.port = reserve_free_port();
+            }
+            if guard.try_start_broker() {
+                return guard;
+            }
+            guard.stop_broker();
+        }
+        panic!("mosquitto failed to start after {MOSQUITTO_START_ATTEMPTS} attempts");
     }
 
+    /// Restarts the broker on the port already handed out to clients, so the
+    /// port is retried as-is instead of reserving a fresh one.
     pub fn start_broker(&mut self) {
         assert!(self.process.is_none(), "mosquitto broker already running");
+        for _ in 0..MOSQUITTO_START_ATTEMPTS {
+            if self.try_start_broker() {
+                return;
+            }
+            self.stop_broker();
+            thread::sleep(MOSQUITTO_POLL_INTERVAL);
+        }
+        panic!(
+            "mosquitto failed to restart on port {} after {MOSQUITTO_START_ATTEMPTS} attempts",
+            self.port
+        );
+    }
+
+    /// Spawns mosquitto on `self.port` and waits for readiness. Returns `false`
+    /// when the process exits during startup — typically because another process
+    /// won the race for the port — so the caller can retry.
+    fn try_start_broker(&mut self) -> bool {
         let mut command = Command::new("mosquitto");
         command.args(["-p", &self.port.to_string(), "-v"]);
-        self.process = Some(ProcessGuard::spawn(
-            "mosquitto",
-            null_stdio(&mut command),
-            false,
-        ));
-        wait_until(
-            "mosquitto should start before timeout",
-            MOSQUITTO_START_TIMEOUT,
-            MOSQUITTO_POLL_INTERVAL,
-            || TcpStream::connect(("127.0.0.1", self.port)).is_ok(),
-        );
+        let mut process = ProcessGuard::spawn("mosquitto", null_stdio(&mut command), false);
+
+        let deadline = Instant::now() + MOSQUITTO_START_TIMEOUT;
+        loop {
+            if process.has_exited() {
+                return false;
+            }
+            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "mosquitto should start before timeout"
+            );
+            thread::sleep(MOSQUITTO_POLL_INTERVAL);
+        }
+        // A successful probe may have reached another process that owns the
+        // port; only a live child proves the listener is ours.
+        if process.has_exited() {
+            return false;
+        }
+        self.process = Some(process);
+        true
     }
 
     pub fn stop_broker(&mut self) {

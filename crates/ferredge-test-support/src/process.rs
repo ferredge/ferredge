@@ -138,6 +138,16 @@ impl ProcessGuard {
         self.child.as_mut().expect("process should be running")
     }
 
+    pub fn has_exited(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(child) => child
+                .try_wait()
+                .map(|status| status.is_some())
+                .unwrap_or(true),
+            None => true,
+        }
+    }
+
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();

@@ -1,9 +1,13 @@
-use std::{net::TcpStream, process::Command, thread, time::Duration};
+use std::{
+    net::TcpStream,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::{
     net::reserve_free_port,
     process::{ProcessGuard, piped_stdio, require_command},
-    wait::wait_until,
 };
 
 const DIAGSLAVE_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -11,6 +15,7 @@ const DIAGSLAVE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const DIAGSLAVE_UDP_START_SETTLE: Duration = Duration::from_millis(300);
 const DIAGSLAVE_SERIAL_START_SETTLE: Duration = Duration::from_millis(300);
 const DIAGSLAVE_TCP_START_SETTLE: Duration = Duration::from_millis(50);
+const DIAGSLAVE_START_ATTEMPTS: usize = 5;
 
 pub struct DiagslaveGuard {
     process: Option<ProcessGuard>,
@@ -52,29 +57,69 @@ impl DiagslaveGuard {
 
     pub fn start_slave(&mut self) {
         assert!(self.process.is_none(), "diagslave already running");
-        let mut command = Command::new("diagslave");
-        command.args(["-m", self.mode, "-a", "1", "-p", &self.port.to_string()]);
-        self.process = Some(ProcessGuard::spawn(
-            format!("diagslave {}", self.mode),
-            piped_stdio(&mut command),
-            true,
-        ));
+        // The reserved port is released before diagslave binds it, so a parallel
+        // test can steal it in between; retry on a fresh port when that happens.
+        for attempt in 0..DIAGSLAVE_START_ATTEMPTS {
+            if attempt > 0 {
+                self.port = reserve_free_port();
+            }
+            if self.try_start_slave() {
+                return;
+            }
+            self.stop_slave();
+        }
+        panic!(
+            "diagslave {} failed to start after {DIAGSLAVE_START_ATTEMPTS} attempts",
+            self.mode
+        );
+    }
+
+    /// Spawns diagslave on `self.port` and waits for readiness. Returns `false`
+    /// when the process exits during startup — typically because another process
+    /// won the race for the port — so the caller can retry.
+    fn try_start_slave(&mut self) -> bool {
+        let mut process = {
+            let mut command = Command::new("diagslave");
+            command.args(["-m", self.mode, "-a", "1", "-p", &self.port.to_string()]);
+            ProcessGuard::spawn(
+                format!("diagslave {}", self.mode),
+                piped_stdio(&mut command),
+                true,
+            )
+        };
 
         if self.mode == "udp" {
             thread::sleep(DIAGSLAVE_UDP_START_SETTLE);
-            return;
+            if process.has_exited() {
+                return false;
+            }
+            self.process = Some(process);
+            return true;
         }
 
-        wait_until(
-            "diagslave should start before timeout",
-            DIAGSLAVE_START_TIMEOUT,
-            DIAGSLAVE_POLL_INTERVAL,
-            || {
-                matches!(self.mode, "tcp" | "enc")
-                    && TcpStream::connect(("127.0.0.1", self.port)).is_ok()
-            },
-        );
+        let deadline = Instant::now() + DIAGSLAVE_START_TIMEOUT;
+        loop {
+            if process.has_exited() {
+                return false;
+            }
+            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "diagslave {} should start before timeout",
+                self.mode
+            );
+            thread::sleep(DIAGSLAVE_POLL_INTERVAL);
+        }
         thread::sleep(DIAGSLAVE_TCP_START_SETTLE);
+        // A successful probe may have reached another process that owns the
+        // port; only a live child proves the listener is ours.
+        if process.has_exited() {
+            return false;
+        }
+        self.process = Some(process);
+        true
     }
 
     #[cfg(unix)]
@@ -117,7 +162,19 @@ impl DiagslaveGuard {
             self.start_serial_slave(&serial_port);
             return;
         }
-        self.start_slave();
+        // Drivers under test already hold this port, so retry on it as-is
+        // instead of reserving a fresh one.
+        for _ in 0..DIAGSLAVE_START_ATTEMPTS {
+            if self.try_start_slave() {
+                return;
+            }
+            self.stop_slave();
+            thread::sleep(DIAGSLAVE_POLL_INTERVAL);
+        }
+        panic!(
+            "diagslave {} failed to restart on port {} after {DIAGSLAVE_START_ATTEMPTS} attempts",
+            self.mode, self.port
+        );
     }
 }
 
