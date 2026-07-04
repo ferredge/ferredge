@@ -3,10 +3,7 @@ extern crate alloc;
 use alloc::borrow::Cow;
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
 use ferredge_bridge::BridgePlannerError;
 use ferredge_core::prelude::*;
@@ -326,14 +323,14 @@ pub struct MqttAuthResponse {
 }
 
 /// Provider for MQTT v5 enhanced authentication steps.
-pub trait MqttAuthProvider: Send + Sync {
+pub trait MqttAuthProvider: MaybeSend + MaybeSync {
     /// Builds next auth response for broker challenge.
     fn respond(&self, challenge: MqttAuthChallenge) -> Result<Option<MqttAuthResponse>, String>;
 }
 
 impl<F> MqttAuthProvider for F
 where
-    F: Fn(MqttAuthChallenge) -> Result<Option<MqttAuthResponse>, String> + Send + Sync,
+    F: Fn(MqttAuthChallenge) -> Result<Option<MqttAuthResponse>, String> + MaybeSend + MaybeSync,
 {
     fn respond(&self, challenge: MqttAuthChallenge) -> Result<Option<MqttAuthResponse>, String> {
         self(challenge)
