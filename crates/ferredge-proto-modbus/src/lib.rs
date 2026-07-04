@@ -27,36 +27,28 @@ compile_error!("ferredge-proto-modbus requires one runtime stack feature");
 #[cfg(feature = "tokio-runtime")]
 mod runtime_stack {
     pub use ferredge_runtime_tokio::{
-        TokioDatagramSocket as StackDatagramSocket, TokioNet as StackNet,
-        TokioRuntime as StackRuntime, TokioSerial as StackSerial,
-        TokioSerialPort as StackSerialPort, TokioSocket as StackSocket,
+        TokioNet as StackNet, TokioRuntime as StackRuntime, TokioSerial as StackSerial,
     };
 }
 #[cfg(feature = "async-std-runtime")]
 mod runtime_stack {
     pub use ferredge_runtime_async_std::{
-        AsyncStdDatagramSocket as StackDatagramSocket, AsyncStdNet as StackNet,
-        AsyncStdRuntime as StackRuntime, AsyncStdSerial as StackSerial,
-        AsyncStdSerialPort as StackSerialPort, AsyncStdSocket as StackSocket,
+        AsyncStdNet as StackNet, AsyncStdRuntime as StackRuntime, AsyncStdSerial as StackSerial,
     };
 }
 #[cfg(feature = "embassy-runtime")]
 mod runtime_stack {
     pub use ferredge_runtime_embassy::{
-        EmbassyDatagramSocket as StackDatagramSocket, EmbassyDynSerial as StackSerial,
-        EmbassyNet as StackNet, EmbassyRuntime as StackRuntime, EmbassySocket as StackSocket,
+        EmbassyDynSerial as StackSerial, EmbassyNet as StackNet, EmbassyRuntime as StackRuntime,
     };
-
-    /// Serial ports are type-erased on embassy; see `EmbassyDynSerialPort`.
-    pub type StackSerialPort =
-        ferredge_runtime_embassy::EmbassySerialPort<ferredge_runtime_embassy::EmbassyDynSerialPort>;
 }
 
-pub(crate) use runtime_stack::{
-    StackDatagramSocket, StackNet, StackRuntime, StackSerial, StackSerialPort, StackSocket,
-};
+pub(crate) use runtime_stack::{StackNet, StackRuntime, StackSerial};
 
 pub use convert::ModbusBridgeCodec;
+pub use transport::{
+    ModbusTransport, SerialTransport, StackSession, StackTransport, TcpTransport, UdpTransport,
+};
 pub use types::{
     ModbusCommandConversionError, ModbusCommandPlanner, ModbusDecodedResponse, ModbusDriver,
     ModbusNativePlan, ModbusParserSeed, ModbusRequest, ModbusResponse, ModbusResponseDecoder,
