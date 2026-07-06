@@ -30,13 +30,13 @@ serial = [
     "ferredge-core/sync",
     "dep:embassy-sync",
     "dep:embedded-io-async",
-    "dep:dynosaur",
+    "dep:dynosaur_derive",
 ]
 std = ["ferredge-core/std", "embassy-time?/std"]
 
 [dependencies]
 ferredge-core = { workspace = true }
-dynosaur = { workspace = true, optional = true }
+dynosaur_derive = { workspace = true, optional = true }
 embassy-executor = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
 embassy-net = { workspace = true, optional = true }

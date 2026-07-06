@@ -105,9 +105,9 @@ where
 /// Async-trait erasure of an `embedded-io-async` byte stream.
 ///
 /// `embedded_io_async::Read`/`Write` use async trait methods, so they have no `dyn` form;
-/// [`dynosaur`] generates one ([`DynErasedSerialIo`]), boxing each call's future (alloc).
+/// [`dynosaur_derive`] generates one ([`DynErasedSerialIo`]), boxing each call's future (alloc).
 /// Errors collapse to their [`ErrorKind`].
-#[dynosaur::dynosaur(DynErasedSerialIo = dyn(box) ErasedSerialIo)]
+#[dynosaur_derive::dynosaur(DynErasedSerialIo = dyn(box) ErasedSerialIo)]
 trait ErasedSerialIo {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorKind>;
 

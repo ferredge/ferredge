@@ -145,13 +145,13 @@ where
             let net_a = make_net(
                 &runtime,
                 driver_a,
-                Ipv4Cidr::new(Ipv4Address::new(192, 168, 7, 1), 24),
+                Ipv4Cidr::new(Ipv4Address::new(10, 0, 7, 1), 24),
                 0x0123_4567_89ab_cdef,
             );
             let net_b = make_net(
                 &runtime,
                 driver_b,
-                Ipv4Cidr::new(Ipv4Address::new(192, 168, 7, 2), 24),
+                Ipv4Cidr::new(Ipv4Address::new(10, 0, 7, 2), 24),
                 0xfedc_ba98_7654_3210,
             );
             let test_future = make(runtime.clone(), net_a, net_b);
@@ -191,7 +191,7 @@ fn tcp_echo_between_two_stacks() {
         });
 
         let mut client = net_a
-            .connect("192.168.7.2:4000")
+            .connect("10.0.7.2:4000")
             .await
             .expect("connect should succeed");
         write_all_socket(&mut client, b"ping")
@@ -226,7 +226,7 @@ fn tcp_read_timeout_fires() {
         });
 
         let mut client = net_a
-            .connect("192.168.7.2:4001")
+            .connect("10.0.7.2:4001")
             .await
             .expect("connect should succeed");
         client
@@ -255,7 +255,7 @@ fn udp_datagrams_between_two_stacks() {
             .expect("sender bind should succeed");
 
         sender
-            .send_to(b"udp", "192.168.7.2:5000")
+            .send_to(b"udp", "10.0.7.2:5000")
             .await
             .expect("send_to should succeed");
         let mut buf = [0u8; 16];
@@ -264,7 +264,7 @@ fn udp_datagrams_between_two_stacks() {
             .await
             .expect("recv_from should succeed");
         assert_eq!(&buf[..n], b"udp");
-        assert_eq!(peer, "192.168.7.1:5001");
+        assert_eq!(peer, "10.0.7.1:5001");
 
         receiver.close().await.expect("close should succeed");
     });
