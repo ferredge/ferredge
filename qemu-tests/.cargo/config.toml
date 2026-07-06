@@ -2,5 +2,6 @@
 target = "thumbv7m-none-eabi"
 
 [target.thumbv7m-none-eabi]
-runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"
+# Wires UART0/UART1 to the `just up` harness ptys when present, else stubs them.
+runner = "./run-qemu.sh"
 rustflags = ["-C", "link-arg=-Tlink.x"]

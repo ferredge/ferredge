@@ -23,6 +23,17 @@ ferredge-runtime-embassy = { path = "../crates/ferredge-runtime-embassy", featur
     "net",
     "serial",
 ] }
+ferredge-proto-modbus = { path = "../crates/ferredge-proto-modbus", default-features = false, features = [
+    "embassy-runtime",
+] }
+ferredge-proto-mqtt = { path = "../crates/ferredge-proto-mqtt", default-features = false, features = [
+    "embassy-runtime",
+] }
+ferredge-proto-http = { path = "../crates/ferredge-proto-http", default-features = false, features = [
+    "embassy-runtime",
+], optional = true }
+rmodbus = { version = "0.12.2", default-features = false, features = ["alloc"] }
+log = { version = "0.4", default-features = false }
 
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
 embassy-futures = "0.1"
@@ -32,9 +43,14 @@ embassy-net = { version = "0.9", default-features = false, features = [
     "proto-ipv4",
     "proto-ipv6",
     "medium-ethernet",
+    "medium-ip",
+    "dhcpv4",
 ] }
 embassy-net-driver = "0.2"
-embassy-time = { version = "0.5", features = ["mock-driver"] }
+embassy-net-driver-channel = { version = "0.4", optional = true }
+embassy-time = { version = "0.5", features = ["tick-hz-1_000"] }
+systick-timer = { version = "0.2.3", features = ["embassy-time-driver"] }
+embassy-time-driver = "0.2"
 embedded-io-async = "0.7"
 heapless = "0.9"
 
@@ -43,6 +59,13 @@ cortex-m-rt = "0.7"
 cortex-m-semihosting = "0.5"
 embedded-alloc = "0.6"
 panic-semihosting = { version = "0.6", features = ["exit"] }
+
+[features]
+default = []
+# Talks to the real host services (diagslave, mosquitto, http.server) brought up by
+# `just up`, over the emulated LAN9118 NIC and QEMU user-mode networking; see
+# run-qemu.sh and the repo-root justfile.
+harness = ["dep:embassy-net-driver-channel", "dep:ferredge-proto-http"]
 
 [profile.release]
 lto = true
