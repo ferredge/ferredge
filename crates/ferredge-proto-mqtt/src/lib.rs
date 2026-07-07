@@ -67,7 +67,7 @@ mod mosquitto_tests;
 #[cfg(test)]
 mod tests;
 
-use types::{MqttNativePlan, MqttPacketRequest, MqttResourceAttributes};
+use types::{MqttNativePlan, MqttPacketRequest};
 
 use runtime::{
     MqttClientSession, build_connect_packet, disconnect_session, mqtt_version_from_core,
@@ -78,7 +78,8 @@ pub use convert::MqttBridgeCodec;
 pub use runtime::{MqttDecodedInbound, MqttInboundDecoder};
 pub use types::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
-    MqttCommandConversionError, MqttPublishRequest, MqttSubscriptionRequest, MqttWirePacket,
+    MqttCommandConversionError, MqttPublishRequest, MqttResourceAttributes,
+    MqttSubscriptionRequest, MqttWirePacket,
 };
 
 type MqttAuthHandler = Shared<dyn MqttAuthProvider>;
