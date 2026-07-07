@@ -4,17 +4,18 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
+use embassy_executor::Spawner;
 use embassy_net::{Ipv4Address, Ipv4Cidr};
 use ferredge_core::prelude::*;
 use ferredge_runtime_embassy::EmbassyRuntime;
 
 use crate::fakes::{SharedWire, TestDriver, Wire, make_net};
 
-pub async fn run(runtime: &EmbassyRuntime) {
+pub async fn run(spawner: Spawner, runtime: &EmbassyRuntime) {
     let a_to_b: SharedWire = Rc::new(RefCell::new(Wire::default()));
     let b_to_a: SharedWire = Rc::new(RefCell::new(Wire::default()));
     let net_a = make_net(
-        runtime,
+        spawner,
         TestDriver {
             rx: b_to_a.clone(),
             tx: a_to_b.clone(),
@@ -24,7 +25,7 @@ pub async fn run(runtime: &EmbassyRuntime) {
         0x0123_4567_89ab_cdef,
     );
     let net_b = make_net(
-        runtime,
+        spawner,
         TestDriver {
             rx: a_to_b,
             tx: b_to_a,

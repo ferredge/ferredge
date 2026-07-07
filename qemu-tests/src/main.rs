@@ -15,14 +15,11 @@
 extern crate alloc;
 extern crate panic_semihosting;
 
-use alloc::boxed::Box;
 use core::mem::MaybeUninit;
 
-use cortex_m_rt::entry;
 use cortex_m_semihosting::debug;
-use embassy_executor::Executor;
+use embassy_executor::Spawner;
 use embedded_alloc::LlffHeap as Heap;
-use ferredge_core::prelude::AsyncRuntime;
 use ferredge_runtime_embassy::EmbassyRuntime;
 
 mod fakes;
@@ -39,8 +36,8 @@ const HEAP_SIZE: usize = 1024 * 1024; // 1 MB
 
 static LOGGER: logger::SemihostingLogger = logger::SemihostingLogger;
 
-#[entry]
-fn main() -> ! {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
     {
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         unsafe { HEAP.init(core::ptr::addr_of_mut!(HEAP_MEM) as usize, HEAP_SIZE) }
@@ -55,17 +52,11 @@ fn main() -> ! {
     hw::time_driver::init(&mut peripherals.SYST);
     log::debug!("SysTick time driver initialized");
 
-    let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
-    executor.run(|spawner| {
-        let runtime: EmbassyRuntime = EmbassyRuntime::new(spawner);
+    let runtime: EmbassyRuntime = EmbassyRuntime::new(spawner);
 
-        let tests_runtime = runtime.clone();
-        runtime.spawn(async move {
-            suites::run_all(&tests_runtime).await;
-            #[cfg(feature = "harness")]
-            harness::run(&tests_runtime).await;
-            log::info!("all embedded embassy tests passed");
-            debug::exit(debug::EXIT_SUCCESS);
-        });
-    })
+    suites::run_all(spawner, &runtime).await;
+    #[cfg(feature = "harness")]
+    harness::run(spawner, &runtime).await;
+    log::info!("all embedded embassy tests passed");
+    debug::exit(debug::EXIT_SUCCESS);
 }

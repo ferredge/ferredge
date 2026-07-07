@@ -8,10 +8,10 @@ use core::{
     task::{Context, Waker},
 };
 
+use embassy_executor::Spawner;
 use embassy_net::{Config, Ipv4Cidr, StackResources, StaticConfigV4};
 use embassy_net_driver::{Capabilities, Driver, HardwareAddress, LinkState, RxToken, TxToken};
-use ferredge_core::prelude::AsyncRuntime;
-use ferredge_runtime_embassy::{EmbassyNet, EmbassyNetConfig, EmbassyRuntime};
+use ferredge_runtime_embassy::{EmbassyNet, EmbassyNetConfig};
 
 /// Echoes writes back into its own read buffer.
 #[derive(Default)]
@@ -135,21 +135,30 @@ impl Driver for TestDriver {
     }
 }
 
+/// Drives an embassy-net stack over the in-memory wire; the runners never terminate,
+/// and the net (2) and mqtt (2) suites each bring up a pair, hence the pool of 4.
+#[embassy_executor::task(pool_size = 4)]
+async fn net_task(mut runner: embassy_net::Runner<'static, TestDriver>) -> ! {
+    runner.run().await
+}
+
 /// Spawns an embassy-net stack over `driver` with a static address and wraps it in the
 /// ferredge adapter.
 pub fn make_net(
-    runtime: &EmbassyRuntime,
+    spawner: Spawner,
     driver: TestDriver,
     address: Ipv4Cidr,
     seed: u64,
 ) -> EmbassyNet {
+    // Heap-leaked rather than StaticCell: this runs once per stack (4 total) and the
+    // resources must outlive the never-ending runner task anyway.
     let resources: &'static mut StackResources<8> = Box::leak(Box::new(StackResources::new()));
     let config = Config::ipv4_static(StaticConfigV4 {
         address,
         gateway: None,
         dns_servers: heapless::Vec::new(),
     });
-    let (stack, mut runner) = embassy_net::new(driver, config, resources, seed);
-    runtime.spawn(async move { runner.run().await });
+    let (stack, runner) = embassy_net::new(driver, config, resources, seed);
+    spawner.spawn(net_task(runner).expect("net task pool slot"));
     EmbassyNet::new(stack, EmbassyNetConfig::default())
 }

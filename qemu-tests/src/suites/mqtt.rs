@@ -5,6 +5,7 @@
 use alloc::{rc::Rc, string::ToString, vec, vec::Vec};
 use core::cell::RefCell;
 
+use embassy_executor::Spawner;
 use embassy_net::{Ipv4Address, Ipv4Cidr};
 use ferredge_core::prelude::*;
 use ferredge_proto_mqtt::{MqttDriver, MqttListenerStatus};
@@ -12,11 +13,11 @@ use ferredge_runtime_embassy::EmbassyRuntime;
 
 use crate::fakes::{SharedWire, TestDriver, Wire, make_net};
 
-pub async fn run(runtime: &EmbassyRuntime) {
+pub async fn run(spawner: Spawner, runtime: &EmbassyRuntime) {
     let a_to_b: SharedWire = Rc::new(RefCell::new(Wire::default()));
     let b_to_a: SharedWire = Rc::new(RefCell::new(Wire::default()));
     let net = make_net(
-        runtime,
+        spawner,
         TestDriver {
             rx: b_to_a.clone(),
             tx: a_to_b.clone(),
@@ -27,7 +28,7 @@ pub async fn run(runtime: &EmbassyRuntime) {
     );
     // Peer stack participates in ARP and refuses the TCP connection.
     let _peer = make_net(
-        runtime,
+        spawner,
         TestDriver {
             rx: a_to_b,
             tx: b_to_a,
