@@ -10,5 +10,6 @@ fn main() {
         .write_all(include_bytes!("memory.x"))
         .expect("memory.x should be writable");
     println!("cargo:rustc-link-search={}", out.display());
+    println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=memory.x");
 }
