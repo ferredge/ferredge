@@ -10,6 +10,10 @@ rust-version.workspace = true
 [features]
 default = []
 std = ["serde/std", "bitflags/std"]
+# Erases the Send/Sync bounds on runtime/net/serial/sync traits so single-executor
+# runtimes (e.g. embassy) can implement them. Incompatible with the tokio/async-std
+# adapters in the same build; enable only via a single-executor adapter crate.
+local = []
 hashbrown = ["dep:hashbrown"]
 sync = []
 runtime = ["sync"]
@@ -18,7 +22,7 @@ serial = []
 
 [dependencies]
 serde = { workspace = true }
-bitflags = { version = "2.10.0", features = ["serde"] }
+bitflags = { version = "2.10.0", default-features = false, features = ["serde"] }
 hashbrown = { version = "0.17", optional = true }
 thiserror = { workspace = true }
 

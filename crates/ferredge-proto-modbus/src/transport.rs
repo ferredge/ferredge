@@ -1,14 +1,19 @@
-use alloc::{format, string::String, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+use core::convert::Infallible;
+use core::future::Future;
 use core::time::Duration;
 
 use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
 use crate::{
-    ModbusDriver, ModbusRequest, ModbusResponse, StackDatagramSocket, StackSerialPort, StackSocket,
+    ModbusDriver, ModbusRequest, ModbusResponse, StackNet, StackSerial,
     codec::{build_modbus_response, decode_ascii_wire_frame},
     convert::endpoint_options,
-    types::PersistentSession,
 };
 
 /// Use this to load the entire datagram into memory before processing,
@@ -21,7 +26,344 @@ const MAX_MODBUS_TCP_UDP_FRAME_LEN: usize = 260;
 const MAX_MODBUS_RTU_FRAME_LEN: usize = 256;
 const MAX_MODBUS_ASCII_FRAME_LEN: usize = (MAX_MODBUS_RTU_FRAME_LEN * 2) + 3;
 
-impl Lifecycle for ModbusDriver {
+/// One Modbus wire transport bound to a device endpoint family.
+///
+/// A transport owns exactly the stack its endpoints need and defines the persistent state
+/// ([`Session`](Self::Session)) it keeps between requests, so a driver instance carries no
+/// unused stacks: [`SerialTransport`] needs no network stack at all, [`TcpTransport`] only
+/// an [`AsyncNet`], [`UdpTransport`] only an [`AsyncDatagramNet`]. [`StackTransport`]
+/// bundles all three and serves every Modbus endpoint — it is the driver default.
+pub trait ModbusTransport: Clone + MaybeSend + MaybeSync + 'static {
+    /// Persistent connection state kept between requests when the endpoint enables
+    /// `persistent_session`. Transports without persistence use [`Infallible`].
+    type Session: MaybeSend + 'static;
+
+    /// Executes one raw request/response exchange against the endpoint, reusing or
+    /// replenishing `session` as the endpoint's persistence policy dictates.
+    fn execute(
+        &self,
+        endpoint: &DeviceEndpoint,
+        request: &ModbusRequest,
+        session: &mut Option<Self::Session>,
+    ) -> impl Future<Output = Result<Vec<u8>, String>> + MaybeSend;
+
+    /// Closes one persistent session gracefully.
+    fn close(&self, session: Self::Session) -> impl Future<Output = ()> + MaybeSend;
+}
+
+/// [`ModbusTransport`] for Modbus TCP and RTU-over-TCP endpoints.
+#[derive(Clone)]
+pub struct TcpTransport<N: AsyncNet = StackNet> {
+    net: N,
+}
+
+impl<N: AsyncNet> TcpTransport<N> {
+    pub fn new(net: N) -> Self {
+        Self { net }
+    }
+
+    async fn open_socket(
+        &self,
+        addr: &str,
+        port: u16,
+        timeout: Option<Duration>,
+    ) -> Result<N::Socket, String> {
+        let mut socket = self
+            .net
+            .connect(&format_host_port(addr, port))
+            .await
+            .map_err(|e| format!("failed to connect Modbus TCP socket: {e:?}"))?;
+        socket
+            .set_read_timeout(timeout)
+            .map_err(|e| format!("failed to set Modbus TCP read timeout: {e:?}"))?;
+        socket
+            .set_write_timeout(timeout)
+            .map_err(|e| format!("failed to set Modbus TCP write timeout: {e:?}"))?;
+        Ok(socket)
+    }
+}
+
+impl<N: AsyncNet> ModbusTransport for TcpTransport<N> {
+    type Session = N::Socket;
+
+    async fn execute(
+        &self,
+        endpoint: &DeviceEndpoint,
+        request: &ModbusRequest,
+        session: &mut Option<Self::Session>,
+    ) -> Result<Vec<u8>, String> {
+        let (addr, port, persistent, label) = match endpoint {
+            DeviceEndpoint::ModbusTCP(config) => (
+                config.addr.as_str(),
+                config.port,
+                config.options.persistent_session,
+                "Modbus TCP",
+            ),
+            DeviceEndpoint::ModbusRTUOverTCP(config) => (
+                config.addr.as_str(),
+                config.port,
+                config.options.persistent_session,
+                "Modbus RTU-over-TCP",
+            ),
+            _ => return Err("device endpoint is not Modbus TCP".to_string()),
+        };
+
+        let mut socket = match (persistent, session.take()) {
+            (true, Some(socket)) => socket,
+            (_, taken) => {
+                // A stale session from a previously-persistent config is closed, not reused.
+                if let Some(stale) = taken {
+                    self.close(stale).await;
+                }
+                self.open_socket(addr, port, request.timeout).await?
+            }
+        };
+
+        let result = async {
+            write_stream_request(&mut socket, &request.frame, label).await?;
+            read_stream_response_socket(&mut socket, request.proto).await
+        }
+        .await;
+
+        match result {
+            Ok(frame) => {
+                if persistent {
+                    *session = Some(socket);
+                }
+                Ok(frame)
+            }
+            Err(error) => {
+                let _ = socket.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn close(&self, mut session: Self::Session) {
+        let _ = session.close().await;
+    }
+}
+
+/// [`ModbusTransport`] for Modbus UDP endpoints. Datagram exchanges are connectionless,
+/// so this transport keeps no session.
+#[derive(Clone)]
+pub struct UdpTransport<N: AsyncDatagramNet = StackNet> {
+    net: N,
+}
+
+impl<N: AsyncDatagramNet> UdpTransport<N> {
+    pub fn new(net: N) -> Self {
+        Self { net }
+    }
+}
+
+impl<N: AsyncDatagramNet> ModbusTransport for UdpTransport<N> {
+    type Session = Infallible;
+
+    async fn execute(
+        &self,
+        endpoint: &DeviceEndpoint,
+        request: &ModbusRequest,
+        _session: &mut Option<Self::Session>,
+    ) -> Result<Vec<u8>, String> {
+        let DeviceEndpoint::ModbusUDP(config) = endpoint else {
+            return Err("device endpoint is not Modbus UDP".to_string());
+        };
+
+        let mut socket = self
+            .net
+            .bind_datagram("0.0.0.0:0")
+            .await
+            .map_err(|e| format!("failed to bind Modbus UDP socket: {e:?}"))?;
+        socket
+            .set_read_timeout(request.timeout)
+            .map_err(|e| format!("failed to set Modbus UDP read timeout: {e:?}"))?;
+        socket
+            .send_to(&request.frame, &format_host_port(&config.addr, config.port))
+            .await
+            .map_err(|e| format!("failed to send Modbus UDP request: {e:?}"))?;
+        read_datagram_response(&mut socket).await
+    }
+
+    async fn close(&self, session: Self::Session) {
+        match session {}
+    }
+}
+
+/// [`ModbusTransport`] for Modbus RTU and ASCII serial endpoints.
+#[derive(Clone)]
+pub struct SerialTransport<S: AsyncSerial = StackSerial> {
+    serial: S,
+}
+
+impl<S: AsyncSerial> SerialTransport<S> {
+    pub fn new(serial: S) -> Self {
+        Self { serial }
+    }
+
+    async fn open_port(&self, config: &SerialPortConfig, label: &str) -> Result<S::Port, String> {
+        self.serial
+            .open(config)
+            .await
+            .map_err(|e| format!("failed to open {label} serial port: {e:?}"))
+    }
+}
+
+impl<S: AsyncSerial> ModbusTransport for SerialTransport<S> {
+    type Session = S::Port;
+
+    async fn execute(
+        &self,
+        endpoint: &DeviceEndpoint,
+        request: &ModbusRequest,
+        session: &mut Option<Self::Session>,
+    ) -> Result<Vec<u8>, String> {
+        let (config, persistent, label, is_ascii) = match endpoint {
+            DeviceEndpoint::ModbusRTU(config) => (
+                &config.serial,
+                config.options.persistent_session,
+                "Modbus RTU",
+                false,
+            ),
+            DeviceEndpoint::ModbusASCII(config) => (
+                &config.serial,
+                config.options.persistent_session,
+                "Modbus ASCII",
+                true,
+            ),
+            _ => return Err("device endpoint is not Modbus serial".to_string()),
+        };
+
+        let mut port = match (persistent, session.take()) {
+            (true, Some(port)) => port,
+            (_, taken) => {
+                if let Some(stale) = taken {
+                    self.close(stale).await;
+                }
+                self.open_port(config, label).await?
+            }
+        };
+
+        let result = async {
+            write_serial_request(&mut port, &request.frame, label).await?;
+            let raw = read_stream_response_serial(&mut port, request.proto).await?;
+            if is_ascii {
+                decode_ascii_wire_frame(&raw)
+            } else {
+                Ok(raw)
+            }
+        }
+        .await;
+
+        match result {
+            Ok(frame) => {
+                if persistent {
+                    *session = Some(port);
+                }
+                Ok(frame)
+            }
+            Err(error) => {
+                let _ = port.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn close(&self, mut session: Self::Session) {
+        let _ = session.close().await;
+    }
+}
+
+/// Persistent session held by [`StackTransport`]: one live stream socket or serial port.
+pub enum StackSession<Sock, Port> {
+    Tcp(Sock),
+    Serial(Port),
+}
+
+/// Full-stack [`ModbusTransport`] serving every Modbus endpoint family.
+///
+/// This is the driver default and matches the runtime stack's network and serial adapters.
+/// It composes the lean transports, so devices bound to a single endpoint family can drop
+/// the unused stacks entirely by using one of those directly.
+#[derive(Clone)]
+pub struct StackTransport<N = StackNet, S = StackSerial>
+where
+    N: AsyncNet + AsyncDatagramNet,
+    S: AsyncSerial,
+{
+    tcp: TcpTransport<N>,
+    udp: UdpTransport<N>,
+    serial: SerialTransport<S>,
+}
+
+impl<N, S> StackTransport<N, S>
+where
+    N: AsyncNet + AsyncDatagramNet,
+    S: AsyncSerial,
+{
+    pub fn new(net: N, serial: S) -> Self {
+        Self {
+            tcp: TcpTransport::new(net.clone()),
+            udp: UdpTransport::new(net),
+            serial: SerialTransport::new(serial),
+        }
+    }
+}
+
+impl<N, S> ModbusTransport for StackTransport<N, S>
+where
+    N: AsyncNet + AsyncDatagramNet,
+    S: AsyncSerial,
+{
+    type Session = StackSession<N::Socket, S::Port>;
+
+    async fn execute(
+        &self,
+        endpoint: &DeviceEndpoint,
+        request: &ModbusRequest,
+        session: &mut Option<Self::Session>,
+    ) -> Result<Vec<u8>, String> {
+        match endpoint {
+            DeviceEndpoint::ModbusTCP(_) | DeviceEndpoint::ModbusRTUOverTCP(_) => {
+                let mut sub = match session.take() {
+                    Some(StackSession::Tcp(socket)) => Some(socket),
+                    Some(other) => {
+                        self.close(other).await;
+                        None
+                    }
+                    None => None,
+                };
+                let result = self.tcp.execute(endpoint, request, &mut sub).await;
+                *session = sub.map(StackSession::Tcp);
+                result
+            }
+            DeviceEndpoint::ModbusUDP(_) => self.udp.execute(endpoint, request, &mut None).await,
+            DeviceEndpoint::ModbusRTU(_) | DeviceEndpoint::ModbusASCII(_) => {
+                let mut sub = match session.take() {
+                    Some(StackSession::Serial(port)) => Some(port),
+                    Some(other) => {
+                        self.close(other).await;
+                        None
+                    }
+                    None => None,
+                };
+                let result = self.serial.execute(endpoint, request, &mut sub).await;
+                *session = sub.map(StackSession::Serial);
+                result
+            }
+            _ => Err("device endpoint is not Modbus".to_string()),
+        }
+    }
+
+    async fn close(&self, session: Self::Session) {
+        match session {
+            StackSession::Tcp(socket) => self.tcp.close(socket).await,
+            StackSession::Serial(port) => self.serial.close(port).await,
+        }
+    }
+}
+
+impl<T: ModbusTransport> Lifecycle for ModbusDriver<T> {
     type Error = String;
 
     async fn start(&self) -> Result<(), Self::Error> {
@@ -29,12 +371,11 @@ impl Lifecycle for ModbusDriver {
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
-        self.close_persistent_session().await?;
-        Ok(())
+        self.close_persistent_session().await
     }
 }
 
-impl RequestResponse for ModbusDriver {
+impl<T: ModbusTransport> RequestResponse for ModbusDriver<T> {
     type Request = ModbusRequest;
     type Response = ModbusResponse;
     type Error = String;
@@ -45,7 +386,7 @@ impl RequestResponse for ModbusDriver {
     }
 }
 
-impl ModbusDriver {
+impl<T: ModbusTransport> ModbusDriver<T> {
     pub(crate) async fn execute_on_endpoint(
         &self,
         request: &ModbusRequest,
@@ -56,8 +397,20 @@ impl ModbusDriver {
         let max_attempts = request_attempt_budget(reconnect, request.is_write);
         let mut last_error = None;
 
+        // The session lock is held across attempts: Modbus endpoints are strictly
+        // request-response, so concurrent executes must serialize anyway.
+        let mut session = self
+            .persistent_session
+            .lock()
+            .await
+            .map_err(|_| "failed to lock Modbus persistent session".to_string())?;
+
         for attempt in 0..max_attempts {
-            match self.execute_once(request).await {
+            match self
+                .transport
+                .execute(&self.dvc.endpoint, request, &mut *session)
+                .await
+            {
                 Ok(frame) => return Ok(frame),
                 Err(error) => {
                     let retryable = is_retryable_transport_error(&error);
@@ -75,293 +428,21 @@ impl ModbusDriver {
         Err(last_error.unwrap_or_else(|| "Modbus execute failed".to_string()))
     }
 
-    async fn execute_once(&self, request: &ModbusRequest) -> Result<Vec<u8>, String> {
-        match &self.dvc.endpoint {
-            DeviceEndpoint::ModbusTCP(config) => self.execute_tcp(request, config).await,
-            DeviceEndpoint::ModbusRTUOverTCP(config) => {
-                self.execute_rtu_over_tcp(request, config).await
-            }
-            DeviceEndpoint::ModbusUDP(config) => self.execute_udp(request, config).await,
-            DeviceEndpoint::ModbusRTU(config) => self.execute_rtu(request, config).await,
-            DeviceEndpoint::ModbusASCII(config) => self.execute_ascii(request, config).await,
-            _ => Err("device endpoint is not Modbus".to_string()),
-        }
-    }
-
-    async fn execute_tcp(
-        &self,
-        request: &ModbusRequest,
-        config: &ModbusTcpEndpointConfig,
-    ) -> Result<Vec<u8>, String> {
-        if config.options.persistent_session {
-            return self.execute_tcp_persistent(request, config).await;
-        }
-        let mut socket = self.open_tcp_socket(config, request.timeout).await?;
-        write_stream_request(&mut socket, &request.frame, "Modbus TCP").await?;
-        read_stream_response_socket(&mut socket, request.proto).await
-    }
-
-    async fn execute_udp(
-        &self,
-        request: &ModbusRequest,
-        config: &ModbusUdpEndpointConfig,
-    ) -> Result<Vec<u8>, String> {
-        let mut socket = self
-            .net
-            .bind_datagram("0.0.0.0:0")
-            .await
-            .map_err(|e| format!("failed to bind Modbus UDP socket: {e:?}"))?;
-        socket
-            .set_read_timeout(request.timeout)
-            .map_err(|e| format!("failed to set Modbus UDP read timeout: {e:?}"))?;
-        socket
-            .send_to(&request.frame, &format_host_port(&config.addr, config.port))
-            .await
-            .map_err(|e| format!("failed to send Modbus UDP request: {e:?}"))?;
-        read_datagram_response(&mut socket).await
-    }
-
-    async fn execute_rtu_over_tcp(
-        &self,
-        request: &ModbusRequest,
-        config: &ModbusRtuOverTcpEndpointConfig,
-    ) -> Result<Vec<u8>, String> {
-        if config.options.persistent_session {
-            return self
-                .execute_tcp_persistent_on_addr(request, &config.addr, config.port)
-                .await;
-        }
-        let mut socket = self
-            .open_tcp_socket_addr(&config.addr, config.port, request.timeout)
-            .await?;
-        write_stream_request(&mut socket, &request.frame, "Modbus RTU-over-TCP").await?;
-        read_stream_response_socket(&mut socket, request.proto).await
-    }
-
-    async fn execute_rtu(
-        &self,
-        request: &ModbusRequest,
-        config: &ModbusRtuEndpointConfig,
-    ) -> Result<Vec<u8>, String> {
-        if config.options.persistent_session {
-            return self
-                .execute_serial_persistent(
-                    request,
-                    &config.serial,
-                    "Modbus RTU",
-                    PersistentSessionKind::Rtu,
-                )
-                .await;
-        }
-        let mut port = self.open_serial_port(&config.serial, "Modbus RTU").await?;
-        write_serial_request(&mut port, &request.frame, "Modbus RTU").await?;
-        read_stream_response_serial(&mut port, request.proto).await
-    }
-
-    async fn execute_ascii(
-        &self,
-        request: &ModbusRequest,
-        config: &ModbusAsciiEndpointConfig,
-    ) -> Result<Vec<u8>, String> {
-        if config.options.persistent_session {
-            return self
-                .execute_serial_persistent(
-                    request,
-                    &config.serial,
-                    "Modbus ASCII",
-                    PersistentSessionKind::Ascii,
-                )
-                .await;
-        }
-        let mut port = self
-            .open_serial_port(&config.serial, "Modbus ASCII")
-            .await?;
-        write_serial_request(&mut port, &request.frame, "Modbus ASCII").await?;
-        let raw_ascii = read_stream_response_serial(&mut port, request.proto).await?;
-        decode_ascii_wire_frame(&raw_ascii)
-    }
-
-    async fn execute_tcp_persistent(
-        &self,
-        request: &ModbusRequest,
-        config: &ModbusTcpEndpointConfig,
-    ) -> Result<Vec<u8>, String> {
-        self.execute_tcp_persistent_on_addr(request, &config.addr, config.port)
-            .await
-    }
-
-    async fn execute_tcp_persistent_on_addr(
-        &self,
-        request: &ModbusRequest,
-        addr: &str,
-        port: u16,
-    ) -> Result<Vec<u8>, String> {
-        let mut socket = match self.take_persistent_session().await? {
-            Some(PersistentSession::Tcp(socket)) => socket,
-            Some(other) => {
-                self.close_session(other).await;
-                self.open_tcp_socket_addr(addr, port, request.timeout)
-                    .await?
-            }
-            None => {
-                self.open_tcp_socket_addr(addr, port, request.timeout)
-                    .await?
-            }
-        };
-
-        let result = async {
-            write_stream_request(&mut socket, &request.frame, "Modbus TCP").await?;
-            read_stream_response_socket(&mut socket, request.proto).await
-        }
-        .await;
-
-        match result {
-            Ok(frame) => {
-                self.store_persistent_session(PersistentSession::Tcp(socket))
-                    .await?;
-                Ok(frame)
-            }
-            Err(error) => {
-                self.close_session(PersistentSession::Tcp(socket)).await;
-                Err(error)
-            }
-        }
-    }
-
-    async fn execute_serial_persistent(
-        &self,
-        request: &ModbusRequest,
-        config: &SerialPortConfig,
-        label: &str,
-        kind: PersistentSessionKind,
-    ) -> Result<Vec<u8>, String> {
-        let mut port = match self.take_persistent_session().await? {
-            Some(PersistentSession::Rtu(port)) if kind == PersistentSessionKind::Rtu => port,
-            Some(PersistentSession::Ascii(port)) if kind == PersistentSessionKind::Ascii => port,
-            Some(other) => {
-                self.close_session(other).await;
-                self.open_serial_port(config, label).await?
-            }
-            None => self.open_serial_port(config, label).await?,
-        };
-
-        let result = async {
-            write_serial_request(&mut port, &request.frame, label).await?;
-            let raw = read_stream_response_serial(&mut port, request.proto).await?;
-            if kind == PersistentSessionKind::Ascii {
-                decode_ascii_wire_frame(&raw)
-            } else {
-                Ok(raw)
-            }
-        }
-        .await;
-
-        match result {
-            Ok(frame) => {
-                let session = match kind {
-                    PersistentSessionKind::Rtu => PersistentSession::Rtu(port),
-                    PersistentSessionKind::Ascii => PersistentSession::Ascii(port),
-                };
-                self.store_persistent_session(session).await?;
-                Ok(frame)
-            }
-            Err(error) => {
-                let session = match kind {
-                    PersistentSessionKind::Rtu => PersistentSession::Rtu(port),
-                    PersistentSessionKind::Ascii => PersistentSession::Ascii(port),
-                };
-                self.close_session(session).await;
-                Err(error)
-            }
-        }
-    }
-
-    async fn open_tcp_socket(
-        &self,
-        config: &ModbusTcpEndpointConfig,
-        timeout: Option<Duration>,
-    ) -> Result<StackSocket, String> {
-        self.open_tcp_socket_addr(&config.addr, config.port, timeout)
-            .await
-    }
-
-    async fn open_tcp_socket_addr(
-        &self,
-        addr: &str,
-        port: u16,
-        timeout: Option<Duration>,
-    ) -> Result<StackSocket, String> {
-        let mut socket = self
-            .net
-            .connect(&format_host_port(addr, port))
-            .await
-            .map_err(|e| format!("failed to connect Modbus TCP socket: {e:?}"))?;
-        socket
-            .set_read_timeout(timeout)
-            .map_err(|e| format!("failed to set Modbus TCP read timeout: {e:?}"))?;
-        socket
-            .set_write_timeout(timeout)
-            .map_err(|e| format!("failed to set Modbus TCP write timeout: {e:?}"))?;
-        Ok(socket)
-    }
-
-    async fn open_serial_port(
-        &self,
-        config: &SerialPortConfig,
-        label: &str,
-    ) -> Result<StackSerialPort, String> {
-        self.serial
-            .open(config)
-            .await
-            .map_err(|e| format!("failed to open {label} serial port: {e:?}"))
-    }
-
-    async fn take_persistent_session(&self) -> Result<Option<PersistentSession>, String> {
-        let mut guard = self
-            .persistent_session
-            .lock()
-            .await
-            .map_err(|_| "failed to lock Modbus persistent session".to_string())?;
-        Ok(guard.take())
-    }
-
-    async fn store_persistent_session(&self, session: PersistentSession) -> Result<(), String> {
-        let mut guard = self
-            .persistent_session
-            .lock()
-            .await
-            .map_err(|_| "failed to lock Modbus persistent session".to_string())?;
-        *guard = Some(session);
-        Ok(())
-    }
-
     async fn close_persistent_session(&self) -> Result<(), String> {
-        if let Some(session) = self.take_persistent_session().await? {
-            self.close_session(session).await;
+        let mut guard = self
+            .persistent_session
+            .lock()
+            .await
+            .map_err(|_| "failed to lock Modbus persistent session".to_string())?;
+        if let Some(session) = guard.take() {
+            self.transport.close(session).await;
         }
         Ok(())
     }
-
-    async fn close_session(&self, mut session: PersistentSession) {
-        match &mut session {
-            PersistentSession::Tcp(socket) => {
-                let _ = socket.close().await;
-            }
-            PersistentSession::Rtu(port) | PersistentSession::Ascii(port) => {
-                let _ = port.close().await;
-            }
-        }
-    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PersistentSessionKind {
-    Rtu,
-    Ascii,
-}
-
-async fn write_stream_request(
-    socket: &mut StackSocket,
+async fn write_stream_request<Sock: AsyncSocket>(
+    socket: &mut Sock,
     frame: &[u8],
     label: &str,
 ) -> Result<(), String> {
@@ -374,8 +455,8 @@ async fn write_stream_request(
         .map_err(|e| format!("failed to flush {label} request: {e:?}"))
 }
 
-async fn write_serial_request(
-    port: &mut StackSerialPort,
+async fn write_serial_request<P: AsyncSerialPort>(
+    port: &mut P,
     frame: &[u8],
     label: &str,
 ) -> Result<(), String> {
@@ -387,8 +468,8 @@ async fn write_serial_request(
         .map_err(|e| format!("failed to flush {label} request: {e:?}"))
 }
 
-async fn read_stream_response_socket(
-    socket: &mut StackSocket,
+async fn read_stream_response_socket<Sock: AsyncSocket>(
+    socket: &mut Sock,
     proto: ModbusProto,
 ) -> Result<Vec<u8>, String> {
     let mut frame = Vec::new();
@@ -421,8 +502,8 @@ async fn read_stream_response_socket(
     Ok(trim_frame(frame, proto))
 }
 
-async fn read_stream_response_serial(
-    port: &mut StackSerialPort,
+async fn read_stream_response_serial<P: AsyncSerialPort>(
+    port: &mut P,
     proto: ModbusProto,
 ) -> Result<Vec<u8>, String> {
     let mut frame = Vec::new();
@@ -455,7 +536,7 @@ async fn read_stream_response_serial(
     Ok(trim_frame(frame, proto))
 }
 
-async fn read_datagram_response(socket: &mut StackDatagramSocket) -> Result<Vec<u8>, String> {
+async fn read_datagram_response<D: AsyncDatagramSocket>(socket: &mut D) -> Result<Vec<u8>, String> {
     let mut buf = [0u8; MAX_MODBUS_TCP_UDP_FRAME_LEN];
     let (size, _) = socket
         .recv_from(&mut buf)

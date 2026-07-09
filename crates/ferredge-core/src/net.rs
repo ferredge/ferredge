@@ -1,7 +1,11 @@
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use core::future::Future;
+use core::time::Duration;
+
+use crate::maybe::{MaybeSend, MaybeSync};
 
 /// Error returned by abstract async network operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -27,37 +31,47 @@ pub enum NetError {
 }
 
 /// Async datagram socket used by UDP-style protocol adapters.
-pub trait AsyncDatagramSocket: Send + Sync + 'static {
+pub trait AsyncDatagramSocket: MaybeSend + MaybeSync + 'static {
     /// Receives one datagram into the provided buffer and returns byte count plus peer address.
     fn recv_from(
         &mut self,
         buf: &mut [u8],
-    ) -> impl Future<Output = Result<(usize, String), NetError>> + Send;
+    ) -> impl Future<Output = Result<(usize, String), NetError>> + MaybeSend;
 
     /// Sends one datagram to the provided peer address and returns byte count sent.
     fn send_to(
         &mut self,
         buf: &[u8],
         address: &str,
-    ) -> impl Future<Output = Result<usize, NetError>> + Send;
+    ) -> impl Future<Output = Result<usize, NetError>> + MaybeSend;
+
+    /// Sets or clears the receive timeout applied to subsequent `recv_from` calls.
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError>;
 
     /// Closes the datagram socket gracefully when the transport supports it.
-    fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + Send;
+    fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + MaybeSend;
 }
 
 /// Async bidirectional byte stream used by protocol adapters.
-pub trait AsyncSocket: Send + Sync + 'static {
+pub trait AsyncSocket: MaybeSend + MaybeSync + 'static {
+    /// Sets or clears the timeout applied to subsequent `read` calls.
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError>;
+
+    /// Sets or clears the timeout applied to subsequent `write` and `flush` calls.
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError>;
+
     /// Reads bytes into the provided buffer and returns the number of bytes read.
-    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, NetError>> + Send;
+    fn read(&mut self, buf: &mut [u8])
+    -> impl Future<Output = Result<usize, NetError>> + MaybeSend;
 
     /// Writes bytes from the provided buffer and returns the number of bytes written.
-    fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize, NetError>> + Send;
+    fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize, NetError>> + MaybeSend;
 
     /// Flushes buffered outbound bytes when the transport supports it.
-    fn flush(&mut self) -> impl Future<Output = Result<(), NetError>> + Send;
+    fn flush(&mut self) -> impl Future<Output = Result<(), NetError>> + MaybeSend;
 
     /// Closes the socket gracefully when the transport supports it.
-    fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + Send;
+    fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + MaybeSend;
 }
 
 /// Brackets one bare IPv6 host literal for URI/socket-address use.
@@ -108,37 +122,42 @@ where
 }
 
 /// Async listener that accepts inbound sockets.
-pub trait AsyncListener: Send + Sync + 'static {
+pub trait AsyncListener: MaybeSend + MaybeSync + 'static {
     /// Socket type produced by this listener.
     type Socket: AsyncSocket;
 
     /// Accepts one inbound connection from the listener.
-    fn accept(&mut self) -> impl Future<Output = Result<Self::Socket, NetError>> + Send;
+    fn accept(&mut self) -> impl Future<Output = Result<Self::Socket, NetError>> + MaybeSend;
 
     /// Closes the listener and releases bound resources.
-    fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + Send;
+    fn close(&mut self) -> impl Future<Output = Result<(), NetError>> + MaybeSend;
 }
 
 /// Async network transport factory shared by protocol adapters.
 ///
 /// Implementations are intended to bridge concrete ecosystems such as Tokio, async-std,
 /// or embassy-net into a transport-neutral socket model consumed by protocol crates.
-pub trait AsyncNet: Clone + Send + Sync + 'static {
+pub trait AsyncNet: Clone + MaybeSend + MaybeSync + 'static {
     /// Connected socket type returned by `connect`.
     type Socket: AsyncSocket;
     /// Listener type returned by `bind`.
     type Listener: AsyncListener<Socket = Self::Socket>;
 
     /// Establishes one outbound byte-stream connection to the given address.
-    fn connect(&self, address: &str)
-    -> impl Future<Output = Result<Self::Socket, NetError>> + Send;
+    fn connect(
+        &self,
+        address: &str,
+    ) -> impl Future<Output = Result<Self::Socket, NetError>> + MaybeSend;
 
     /// Binds one listener to the given local address when supported.
-    fn bind(&self, address: &str) -> impl Future<Output = Result<Self::Listener, NetError>> + Send;
+    fn bind(
+        &self,
+        address: &str,
+    ) -> impl Future<Output = Result<Self::Listener, NetError>> + MaybeSend;
 }
 
 /// Async datagram network transport factory shared by UDP-style protocol adapters.
-pub trait AsyncDatagramNet: Clone + Send + Sync + 'static {
+pub trait AsyncDatagramNet: Clone + MaybeSend + MaybeSync + 'static {
     /// Datagram socket type returned by `bind_datagram`.
     type DatagramSocket: AsyncDatagramSocket;
 
@@ -146,13 +165,13 @@ pub trait AsyncDatagramNet: Clone + Send + Sync + 'static {
     fn bind_datagram(
         &self,
         address: &str,
-    ) -> impl Future<Output = Result<Self::DatagramSocket, NetError>> + Send;
+    ) -> impl Future<Output = Result<Self::DatagramSocket, NetError>> + MaybeSend;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{string::ToString, vec, vec::Vec};
+    use alloc::{boxed::Box, string::ToString, vec, vec::Vec};
     use core::{
         pin::Pin,
         task::{Context, Poll, Waker},
@@ -166,6 +185,14 @@ mod tests {
     }
 
     impl AsyncSocket for MockSocket {
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
             let Some(read_data) = self.read_data.take() else {
                 return Err(NetError::Closed);
@@ -197,6 +224,14 @@ mod tests {
     }
 
     impl AsyncSocket for MockPartialWriteSocket {
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
         async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, NetError> {
             Err(NetError::Closed)
         }
@@ -257,6 +292,10 @@ mod tests {
     }
 
     impl AsyncDatagramSocket for MockDatagramSocket {
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), NetError> {
+            Ok(())
+        }
+
         async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
             let Some(recv_data) = self.recv_data.take() else {
                 return Err(NetError::Closed);

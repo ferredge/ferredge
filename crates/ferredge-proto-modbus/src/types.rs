@@ -1,6 +1,10 @@
 extern crate alloc;
 
-use alloc::{borrow::Cow, string::String, vec::Vec};
+use alloc::{
+    borrow::Cow,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::time::Duration;
 
 use ferredge_bridge::{
@@ -10,9 +14,15 @@ use ferredge_bridge::{
 use ferredge_core::prelude::*;
 use rmodbus::ModbusProto;
 
+// Only the ambient `new()` names the default stack types directly; `with_stack` and
+// `with_transport` take them as generics.
+#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
+use crate::{StackNet, StackSerial};
 use crate::{
-    StackNet, StackRuntime, StackSerial, StackSerialPort, StackSocket,
-    attributes::ModbusResourceAttributes, convert::endpoint_options,
+    StackRuntime,
+    attributes::ModbusResourceAttributes,
+    convert::endpoint_options,
+    transport::{ModbusTransport, StackTransport},
 };
 
 type RuntimeMutex<T> = <StackRuntime as AsyncRuntime>::Mutex<T>;
@@ -146,22 +156,23 @@ pub struct ModbusDecodedResponse<'a, 'ctx> {
     response: &'a ModbusResponse,
 }
 
-pub(crate) enum PersistentSession {
-    Tcp(StackSocket),
-    Rtu(StackSerialPort),
-    Ascii(StackSerialPort),
-}
-
+/// Modbus driver generic over its wire transport `T`.
+///
+/// `T` defaults to [`StackTransport`], which bundles the runtime stack's network and serial
+/// adapters and serves every Modbus endpoint family. Devices bound to a single family can
+/// pass a lean transport to [`ModbusDriver::with_transport`] instead — e.g. a
+/// [`SerialTransport`](crate::SerialTransport) for RTU/ASCII devices carries no network
+/// stack at all, and on embassy a concrete `EmbassySerial<YourUart>` also skips the
+/// type-erased serial default.
 #[derive(Clone)]
-pub struct ModbusDriver {
+pub struct ModbusDriver<T: ModbusTransport = StackTransport> {
     pub dvc: Device<ModbusResourceAttributes>,
     pub(crate) runtime: StackRuntime,
-    pub(crate) net: StackNet,
-    pub(crate) serial: StackSerial,
-    pub(crate) persistent_session: Shared<RuntimeMutex<Option<PersistentSession>>>,
+    pub(crate) transport: T,
+    pub(crate) persistent_session: Shared<RuntimeMutex<Option<T::Session>>>,
 }
 
-impl core::fmt::Debug for ModbusDriver {
+impl<T: ModbusTransport> core::fmt::Debug for ModbusDriver<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ModbusDriver")
             .field("dvc", &self.dvc)
@@ -170,13 +181,51 @@ impl core::fmt::Debug for ModbusDriver {
 }
 
 impl ModbusDriver {
+    /// Creates a new Modbus driver from device metadata.
+    ///
+    /// Uses the ambient runtime stack, so it is only available on the std runtimes; the
+    /// embassy stack has no ambient executor or network stack — construct with
+    /// [`ModbusDriver::with_stack`] or [`ModbusDriver::with_transport`] there.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     pub fn new(dvc: Device<ModbusResourceAttributes>) -> Self {
-        let runtime = StackRuntime::default();
+        Self::with_stack(
+            dvc,
+            StackRuntime::default(),
+            StackNet::default(),
+            StackSerial::default(),
+        )
+    }
+}
+
+impl<N, S> ModbusDriver<StackTransport<N, S>>
+where
+    N: AsyncNet + AsyncDatagramNet,
+    S: AsyncSerial,
+{
+    /// Creates a new Modbus driver from device metadata plus an explicit runtime stack,
+    /// serving every Modbus endpoint family through a [`StackTransport`].
+    pub fn with_stack(
+        dvc: Device<ModbusResourceAttributes>,
+        runtime: StackRuntime,
+        net: N,
+        serial: S,
+    ) -> Self {
+        Self::with_transport(dvc, runtime, StackTransport::new(net, serial))
+    }
+}
+
+impl<T: ModbusTransport> ModbusDriver<T> {
+    /// Creates a new Modbus driver from device metadata plus an explicit runtime and wire
+    /// transport. The transport determines which endpoint families the driver can execute.
+    pub fn with_transport(
+        dvc: Device<ModbusResourceAttributes>,
+        runtime: StackRuntime,
+        transport: T,
+    ) -> Self {
         Self {
             dvc,
             runtime: runtime.clone(),
-            net: StackNet::default(),
-            serial: StackSerial::default(),
+            transport,
             persistent_session: Shared::new(runtime.mutex(None)),
         }
     }

@@ -287,20 +287,17 @@ impl AsyncRuntime for TokioRuntime {
 }
 
 #[cfg(feature = "net")]
-impl TokioSocket {
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+impl AsyncSocket for TokioSocket {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.read_timeout = timeout;
         Ok(())
     }
 
-    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.write_timeout = timeout;
         Ok(())
     }
-}
 
-#[cfg(feature = "net")]
-impl AsyncSocket for TokioSocket {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
         match self.read_timeout {
             Some(timeout) => tokio::time::timeout(timeout, self.stream.read(buf))
@@ -355,15 +352,12 @@ impl AsyncListener for TokioListener {
 }
 
 #[cfg(feature = "net")]
-impl TokioDatagramSocket {
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+impl AsyncDatagramSocket for TokioDatagramSocket {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.read_timeout = timeout;
         Ok(())
     }
-}
 
-#[cfg(feature = "net")]
-impl AsyncDatagramSocket for TokioDatagramSocket {
     async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
         let (size, address) = match self.read_timeout {
             Some(timeout) => tokio::time::timeout(timeout, self.socket.recv_from(buf))

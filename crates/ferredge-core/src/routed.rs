@@ -2,7 +2,7 @@
 extern crate alloc;
 
 #[cfg(feature = "std")]
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 #[cfg(not(feature = "std"))]
 use alloc::borrow::Cow;

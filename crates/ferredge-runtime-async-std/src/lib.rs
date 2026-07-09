@@ -263,20 +263,17 @@ impl AsyncRuntime for AsyncStdRuntime {
 }
 
 #[cfg(feature = "net")]
-impl AsyncStdSocket {
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+impl AsyncSocket for AsyncStdSocket {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.read_timeout = timeout;
         Ok(())
     }
 
-    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.write_timeout = timeout;
         Ok(())
     }
-}
 
-#[cfg(feature = "net")]
-impl AsyncSocket for AsyncStdSocket {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
         match self.read_timeout {
             Some(timeout) => async_std::future::timeout(timeout, self.stream.read(buf))
@@ -331,15 +328,12 @@ impl AsyncListener for AsyncStdListener {
 }
 
 #[cfg(feature = "net")]
-impl AsyncStdDatagramSocket {
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
+impl AsyncDatagramSocket for AsyncStdDatagramSocket {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.read_timeout = timeout;
         Ok(())
     }
-}
 
-#[cfg(feature = "net")]
-impl AsyncDatagramSocket for AsyncStdDatagramSocket {
     async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, String), NetError> {
         let (size, address) = match self.read_timeout {
             Some(timeout) => async_std::future::timeout(timeout, self.socket.recv_from(buf))

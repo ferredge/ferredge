@@ -4,6 +4,7 @@ extern crate alloc;
 
 use alloc::{
     borrow::Cow,
+    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -17,8 +18,12 @@ use ferredge_core::prelude::*;
 
 pub mod attributes;
 mod handler;
-#[cfg(all(feature = "tokio-runtime", feature = "async-std-runtime"))]
-compile_error!("ferredge-proto-http supports only one std runtime stack feature at a time");
+#[cfg(any(
+    all(feature = "tokio-runtime", feature = "async-std-runtime"),
+    all(feature = "tokio-runtime", feature = "embassy-runtime"),
+    all(feature = "async-std-runtime", feature = "embassy-runtime")
+))]
+compile_error!("ferredge-proto-http supports only one runtime stack feature at a time");
 #[cfg(not(any(
     feature = "tokio-runtime",
     feature = "async-std-runtime",
@@ -174,22 +179,22 @@ pub struct HttpDecodedResponse<'a, 'ctx> {
 
 impl HttpDriver {
     /// Creates a new HTTP driver from device metadata.
+    ///
+    /// Uses the ambient runtime stack, so it is only available on the std runtimes; the
+    /// embassy stack has no ambient executor or network stack — construct with
+    /// [`HttpDriver::with_stack`] there.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     pub fn new(dvc: Device<attributes::HttpResourceAttributes>) -> Self {
-        Self {
-            dvc,
-            #[cfg(any(
-                feature = "tokio-runtime",
-                feature = "async-std-runtime",
-                feature = "embassy-runtime"
-            ))]
-            runtime: StackRuntime::default(),
-            #[cfg(any(
-                feature = "tokio-runtime",
-                feature = "async-std-runtime",
-                feature = "embassy-runtime"
-            ))]
-            net: StackNet::default(),
-        }
+        Self::with_stack(dvc, StackRuntime::default(), StackNet::default())
+    }
+
+    /// Creates a new HTTP driver from device metadata plus an explicit runtime stack.
+    pub fn with_stack(
+        dvc: Device<attributes::HttpResourceAttributes>,
+        runtime: StackRuntime,
+        net: StackNet,
+    ) -> Self {
+        Self { dvc, runtime, net }
     }
 
     pub fn native_request(

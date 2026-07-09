@@ -1,5 +1,8 @@
 use core::{future::Future, time::Duration};
 
+extern crate alloc;
+
+use crate::maybe::{MaybeSend, MaybeSync};
 use crate::sync::AsyncMutex;
 
 /// Error returned by runtime-backed task handles.
@@ -34,7 +37,7 @@ pub enum ChannelError {
 ///
 /// Implementations should represent a monotonically increasing point in time suitable for
 /// elapsed-duration checks used by protocol keepalive and timeout logic.
-pub trait RuntimeInstant: Clone + Send + Sync + 'static {
+pub trait RuntimeInstant: Clone + MaybeSend + MaybeSync + 'static {
     /// Returns the duration elapsed since this instant was captured.
     fn elapsed(&self) -> Duration;
 }
@@ -43,12 +46,12 @@ pub trait RuntimeInstant: Clone + Send + Sync + 'static {
 ///
 /// Concrete runtimes such as Tokio, async-std, or embassy can map this trait to their own
 /// task-handle concepts while keeping protocol crates generic over the runtime.
-pub trait TaskHandle<T>: Send
+pub trait TaskHandle<T>: MaybeSend
 where
-    T: Send + 'static,
+    T: MaybeSend + 'static,
 {
     /// Waits for the task to finish and returns its output or runtime-level failure.
-    fn join(&mut self) -> impl Future<Output = Result<T, TaskJoinError>> + Send;
+    fn join(&mut self) -> impl Future<Output = Result<T, TaskJoinError>> + MaybeSend;
 
     /// Requests cancellation of the task when supported by the runtime.
     fn abort(&self);
@@ -58,24 +61,24 @@ where
 }
 
 /// Async sender half of a bounded runtime channel.
-pub trait ChannelSender<T>: Clone + Send + Sync
+pub trait ChannelSender<T>: Clone + MaybeSend + MaybeSync
 where
-    T: Send + 'static,
+    T: MaybeSend + 'static,
 {
     /// Sends one item, waiting until capacity is available.
-    fn send(&self, item: T) -> impl Future<Output = Result<(), ChannelError>> + Send;
+    fn send(&self, item: T) -> impl Future<Output = Result<(), ChannelError>> + MaybeSend;
 
     /// Attempts to send one item without waiting for capacity.
     fn try_send(&self, item: T) -> Result<(), ChannelError>;
 }
 
 /// Async receiver half of a bounded runtime channel.
-pub trait ChannelReceiver<T>: Send
+pub trait ChannelReceiver<T>: MaybeSend
 where
-    T: Send + 'static,
+    T: MaybeSend + 'static,
 {
     /// Receives the next item from the channel.
-    fn recv(&mut self) -> impl Future<Output = Result<T, ChannelError>> + Send;
+    fn recv(&mut self) -> impl Future<Output = Result<T, ChannelError>> + MaybeSend;
 
     /// Attempts to receive one item without waiting.
     fn try_recv(&mut self) -> Result<T, ChannelError>;
@@ -86,26 +89,26 @@ where
 /// Implementations are intended for executor ecosystems such as Tokio, async-std, or embassy.
 /// The trait focuses on the minimum orchestration pieces protocol drivers usually need:
 /// task spawning, bounded channels, and timers.
-pub trait AsyncRuntime: Clone + Send + Sync + 'static {
+pub trait AsyncRuntime: Clone + MaybeSend + MaybeSync + 'static {
     /// Task handle returned by `spawn`.
     type Task<T>: TaskHandle<T>
     where
-        T: Send + 'static;
+        T: MaybeSend + 'static;
 
     /// Bounded channel sender created by `channel`.
     type Sender<T>: ChannelSender<T>
     where
-        T: Send + 'static;
+        T: MaybeSend + 'static;
 
     /// Bounded channel receiver created by `channel`.
     type Receiver<T>: ChannelReceiver<T>
     where
-        T: Send + 'static;
+        T: MaybeSend + 'static;
 
     /// Async mutex type created by `mutex`.
     type Mutex<T>: AsyncMutex<T>
     where
-        T: Send + 'static;
+        T: MaybeSend + 'static;
 
     /// Monotonic instant type returned by `now`.
     type Instant: RuntimeInstant;
@@ -113,28 +116,30 @@ pub trait AsyncRuntime: Clone + Send + Sync + 'static {
     /// Spawns one background future onto the runtime.
     fn spawn<F>(&self, future: F) -> Self::Task<F::Output>
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static;
+        F: Future + MaybeSend + 'static,
+        F::Output: MaybeSend + 'static;
 
     /// Creates one bounded channel suitable for backpressure-aware event pipelines.
     fn channel<T>(&self, capacity: usize) -> (Self::Sender<T>, Self::Receiver<T>)
     where
-        T: Send + 'static;
+        T: MaybeSend + 'static;
 
     /// Creates one async mutex backed by the selected runtime.
     fn mutex<T>(&self, value: T) -> Self::Mutex<T>
     where
-        T: Send + 'static;
+        T: MaybeSend + 'static;
 
     /// Returns the current monotonic instant for elapsed-time checks.
     fn now(&self) -> Self::Instant;
 
     /// Suspends the current task for the requested duration.
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send;
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + MaybeSend;
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::boxed::Box;
+
     use super::*;
     use core::{
         pin::Pin,
@@ -148,7 +153,7 @@ mod tests {
 
     impl<T> TaskHandle<T> for MockTask<T>
     where
-        T: Send + 'static,
+        T: MaybeSend + 'static,
     {
         async fn join(&mut self) -> Result<T, TaskJoinError> {
             self.0.take().ok_or(TaskJoinError::Cancelled)
@@ -177,7 +182,7 @@ mod tests {
 
     impl<T> ChannelSender<T> for MockSender<T>
     where
-        T: Send + 'static,
+        T: MaybeSend + 'static,
     {
         async fn send(&self, _item: T) -> Result<(), ChannelError> {
             Ok(())
@@ -216,7 +221,7 @@ mod tests {
 
     impl<T> ChannelReceiver<T> for MockReceiver<T>
     where
-        T: Send + 'static,
+        T: MaybeSend + 'static,
     {
         async fn recv(&mut self) -> Result<T, ChannelError> {
             Err(ChannelError::Closed)
@@ -229,7 +234,7 @@ mod tests {
 
     impl<T> AsyncMutex<T> for MockMutex<T>
     where
-        T: Send + 'static,
+        T: MaybeSend + 'static,
     {
         type Guard<'a>
             = MockGuard<'a, T>
@@ -261,39 +266,39 @@ mod tests {
         type Task<T>
             = MockTask<T>
         where
-            T: Send + 'static;
+            T: MaybeSend + 'static;
         type Sender<T>
             = MockSender<T>
         where
-            T: Send + 'static;
+            T: MaybeSend + 'static;
         type Receiver<T>
             = MockReceiver<T>
         where
-            T: Send + 'static;
+            T: MaybeSend + 'static;
         type Mutex<T>
             = MockMutex<T>
         where
-            T: Send + 'static;
+            T: MaybeSend + 'static;
         type Instant = MockInstant;
 
         fn spawn<F>(&self, _future: F) -> Self::Task<F::Output>
         where
-            F: Future + Send + 'static,
-            F::Output: Send + 'static,
+            F: Future + MaybeSend + 'static,
+            F::Output: MaybeSend + 'static,
         {
             MockTask(None)
         }
 
         fn channel<T>(&self, _capacity: usize) -> (Self::Sender<T>, Self::Receiver<T>)
         where
-            T: Send + 'static,
+            T: MaybeSend + 'static,
         {
             (MockSender::default(), MockReceiver::default())
         }
 
         fn mutex<T>(&self, value: T) -> Self::Mutex<T>
         where
-            T: Send + 'static,
+            T: MaybeSend + 'static,
         {
             MockMutex(std::sync::Mutex::new(value))
         }

@@ -669,6 +669,8 @@ pub struct Device<T: DeviceResourceAttributes> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::{string::ToString, vec};
+
     use super::*;
 
     #[test]

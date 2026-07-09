@@ -1,8 +1,14 @@
 //! MQTT protocol adapter for ferredge.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
 extern crate alloc;
 
-use alloc::string::{String, ToString};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use ferredge_bridge::{
     BridgeMessage, BridgeOutbound, NativeOutbound, ProtocolEncoder, ProtocolPlanner, planner,
@@ -10,11 +16,14 @@ use ferredge_bridge::{
 use ferredge_core::prelude::*;
 
 mod convert;
-#[cfg(feature = "std")]
 mod runtime;
 mod types;
-#[cfg(all(feature = "tokio-runtime", feature = "async-std-runtime"))]
-compile_error!("ferredge-proto-mqtt supports only one std runtime stack feature at a time");
+#[cfg(any(
+    all(feature = "tokio-runtime", feature = "async-std-runtime"),
+    all(feature = "tokio-runtime", feature = "embassy-runtime"),
+    all(feature = "async-std-runtime", feature = "embassy-runtime")
+))]
+compile_error!("ferredge-proto-mqtt supports only one runtime stack feature at a time");
 #[cfg(feature = "tokio-runtime")]
 mod runtime_stack {
     pub use ferredge_runtime_tokio::{
@@ -29,9 +38,20 @@ mod runtime_stack {
         AsyncStdTask as RuntimeTask,
     };
 }
+#[cfg(feature = "embassy-runtime")]
+mod runtime_stack {
+    pub use ferredge_runtime_embassy::{
+        EmbassyNet as StackNet, EmbassyRuntime as StackRuntime, EmbassySocket as StackSocket,
+        EmbassyTask as RuntimeTask,
+    };
+}
 
 // compile error when no runtime stack feature is enabled
-#[cfg(not(any(feature = "tokio-runtime", feature = "async-std-runtime")))]
+#[cfg(not(any(
+    feature = "tokio-runtime",
+    feature = "async-std-runtime",
+    feature = "embassy-runtime"
+)))]
 compile_error!("ferredge-proto-mqtt requires a supported runtime stack feature to be enabled");
 
 use runtime_stack::{RuntimeTask, StackNet, StackRuntime};
@@ -47,7 +67,7 @@ mod mosquitto_tests;
 #[cfg(test)]
 mod tests;
 
-use types::{MqttNativePlan, MqttPacketRequest, MqttResourceAttributes};
+use types::{MqttNativePlan, MqttPacketRequest};
 
 use runtime::{
     MqttClientSession, build_connect_packet, disconnect_session, mqtt_version_from_core,
@@ -58,10 +78,10 @@ pub use convert::MqttBridgeCodec;
 pub use runtime::{MqttDecodedInbound, MqttInboundDecoder};
 pub use types::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
-    MqttCommandConversionError, MqttPublishRequest, MqttSubscriptionRequest, MqttWirePacket,
+    MqttCommandConversionError, MqttPublishRequest, MqttResourceAttributes,
+    MqttSubscriptionRequest, MqttWirePacket,
 };
 
-#[cfg(feature = "std")]
 type MqttAuthHandler = Shared<dyn MqttAuthProvider>;
 
 /// Outbound planner for MQTT messaging semantics.
@@ -87,14 +107,15 @@ pub enum MqttListenerStatus {
 
 /// MQTT adapter backed by `mqtt_protocol_core` packet builders.
 ///
-/// In `std` builds this type also owns the live TCP session and background listener runtime.
-/// In `no_std` builds it remains useful for packet conversion, but transport operations fail
-/// with explicit runtime-availability errors.
+/// Owns the live TCP session and background listener runtime on every supported runtime
+/// stack, including the embassy `no_std` stack. On embassy there is no ambient executor, so
+/// construct with [`MqttDriver::with_stack`] and use the `*_async` methods; the blocking
+/// convenience wrappers are only available on the std runtimes (tokio/async-std).
 #[derive(Clone)]
 pub struct MqttDriver {
     /// Device metadata and broker configuration served by this driver.
     pub dvc: Device<MqttResourceAttributes>,
-    /// Live MQTT client session for std-enabled runtime transport.
+    /// Live MQTT client session used by the runtime transport.
     session: Shared<RuntimeMutex<Option<MqttClientSession>>>,
     /// Last negotiated CONNACK capabilities and identifiers observed from broker.
     negotiated_connack: Shared<RuntimeMutex<Option<MqttConnackProperties>>>,
@@ -130,8 +151,22 @@ impl core::fmt::Debug for MqttDriver {
 
 impl MqttDriver {
     /// Creates a new MQTT driver from device metadata.
+    ///
+    /// Uses the ambient runtime stack, so it is only available on the std runtimes; the
+    /// embassy stack has no ambient executor or network stack — construct with
+    /// [`MqttDriver::with_stack`] there.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     pub fn new(dvc: Device<MqttResourceAttributes>) -> Self {
-        let runtime = Shared::new(StackRuntime::default());
+        Self::with_stack(dvc, StackRuntime::default(), StackNet::default())
+    }
+
+    /// Creates a new MQTT driver from device metadata plus an explicit runtime stack.
+    pub fn with_stack(
+        dvc: Device<MqttResourceAttributes>,
+        runtime: StackRuntime,
+        net: StackNet,
+    ) -> Self {
+        let runtime = Shared::new(runtime);
 
         Self {
             dvc,
@@ -143,7 +178,7 @@ impl MqttDriver {
             listener_status_subscribers: Shared::new(runtime.mutex(Vec::new())),
             listener_command_sender: Shared::new(runtime.mutex(None)),
             runtime: runtime.clone(),
-            net: StackNet::default(),
+            net,
             desired_subscriptions: Shared::new(runtime.mutex(Map::new())),
             recovery_queue: Shared::new(runtime.mutex(VecDeque::new())),
             auth_handler: Shared::new(runtime.mutex(None)),
@@ -178,16 +213,26 @@ impl MqttDriver {
     }
 
     /// Registers enhanced MQTT v5 auth callback used for connect-time and re-auth exchanges.
-    pub fn set_auth_handler<P>(&self, handler: P) -> Result<(), String>
+    pub async fn set_auth_handler_async<P>(&self, handler: P) -> Result<(), String>
     where
         P: MqttAuthProvider + 'static,
     {
         let mut guard = self
-            .runtime
-            .block_on(self.auth_handler.lock())
+            .auth_handler
+            .lock()
+            .await
             .map_err(|_| "failed to lock MQTT auth handler".to_string())?;
         *guard = Some(Shared::new(handler));
         Ok(())
+    }
+
+    /// Blocking variant of [`MqttDriver::set_auth_handler_async`] for the std runtimes.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
+    pub fn set_auth_handler<P>(&self, handler: P) -> Result<(), String>
+    where
+        P: MqttAuthProvider + 'static,
+    {
+        self.runtime.block_on(self.set_auth_handler_async(handler))
     }
 
     async fn ensure_connected_async(&self) -> Result<(), String> {
@@ -294,12 +339,20 @@ impl MqttDriver {
 
     /// Returns the most recent broker CONNACK negotiation snapshot, if available.
 
-    pub fn negotiated_connack(&self) -> Result<Option<MqttConnackProperties>, String> {
+    /// Returns the most recent broker CONNACK negotiation snapshot, if available.
+    pub async fn negotiated_connack_async(&self) -> Result<Option<MqttConnackProperties>, String> {
         let guard = self
-            .runtime
-            .block_on(self.negotiated_connack.lock())
+            .negotiated_connack
+            .lock()
+            .await
             .map_err(|_| "failed to lock negotiated MQTT CONNACK state".to_string())?;
         Ok((*guard).clone())
+    }
+
+    /// Blocking variant of [`MqttDriver::negotiated_connack_async`] for the std runtimes.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
+    pub fn negotiated_connack(&self) -> Result<Option<MqttConnackProperties>, String> {
+        self.runtime.block_on(self.negotiated_connack_async())
     }
 
     fn reconnect_config(&self) -> Result<BrokerReconnectConfig, String> {
@@ -331,13 +384,14 @@ impl MqttDriver {
         }
     }
 
-    fn track_subscription_intent(&self, request: &MqttPacketRequest) -> Result<(), String> {
+    async fn track_subscription_intent(&self, request: &MqttPacketRequest) -> Result<(), String> {
         let Some(topic) = Self::request_topic_key(request) else {
             return Ok(());
         };
         let mut desired = self
-            .runtime
-            .block_on(self.desired_subscriptions.lock())
+            .desired_subscriptions
+            .lock()
+            .await
             .map_err(|_| "failed to lock MQTT desired subscriptions".to_string())?;
         match request.packet {
             MqttWirePacket::V5Subscribe(_) | MqttWirePacket::V3Subscribe(_) => {
@@ -351,15 +405,16 @@ impl MqttDriver {
         Ok(())
     }
 
-    fn enqueue_recovery_request(&self, request: MqttPacketRequest) -> Result<(), String> {
+    async fn enqueue_recovery_request(&self, request: MqttPacketRequest) -> Result<(), String> {
         let reconnect = self.reconnect_config()?;
         if !reconnect.queue_requests_while_disconnected {
             return Err("MQTT recovery queue is disabled".to_string());
         }
 
         let mut queue = self
-            .runtime
-            .block_on(self.recovery_queue.lock())
+            .recovery_queue
+            .lock()
+            .await
             .map_err(|_| "failed to lock MQTT recovery queue".to_string())?;
         if queue.len() >= reconnect.max_queued_requests as usize {
             queue.pop_front();
@@ -436,106 +491,127 @@ impl MqttDriver {
         result
     }
 
-    fn stop_listener(&self) -> Result<(), String> {
+    async fn stop_listener_async(&self) -> Result<(), String> {
         self.listener_running.store(false, AtomicOrdering::SeqCst);
         {
             let mut sender_guard = self
-                .runtime
-                .block_on(self.listener_command_sender.lock())
+                .listener_command_sender
+                .lock()
+                .await
                 .map_err(|_| "failed to lock MQTT listener command sender".to_string())?;
             *sender_guard = None;
         }
-        let mut handle_guard = self
-            .runtime
-            .block_on(self.listener_handle.lock())
-            .map_err(|_| "failed to lock MQTT listener handle".to_string())?;
-        if let Some(handle) = handle_guard.take() {
-            let mut handle = handle;
-            if self.runtime.block_on(handle.join()).is_err() {
-                let mut error_guard = self
-                    .runtime
-                    .block_on(self.listener_error.lock())
-                    .map_err(|_| "failed to lock MQTT listener error".to_string())?;
-                if error_guard.is_none() {
-                    *error_guard = Some("MQTT listener task panicked".to_string());
-                }
+        let handle = {
+            let mut handle_guard = self
+                .listener_handle
+                .lock()
+                .await
+                .map_err(|_| "failed to lock MQTT listener handle".to_string())?;
+            handle_guard.take()
+        };
+        if let Some(mut handle) = handle
+            && handle.join().await.is_err()
+        {
+            let mut error_guard = self
+                .listener_error
+                .lock()
+                .await
+                .map_err(|_| "failed to lock MQTT listener error".to_string())?;
+            if error_guard.is_none() {
+                *error_guard = Some("MQTT listener task panicked".to_string());
             }
         }
-        self.broadcast_listener_status(self.listener_status()?)?;
-        Ok(())
+        let status = self.listener_status_async().await?;
+        self.broadcast_listener_status_async(status).await
     }
 
     /// Returns the last background listener error captured by the runtime, if any.
-    pub fn last_listener_error(&self) -> Result<Option<String>, String> {
-        {
-            let error = self
-                .runtime
-                .block_on(self.listener_error.lock())
-                .map_err(|_| "failed to lock MQTT listener error".to_string())?;
-            return Ok(error.clone());
-        }
+    pub async fn last_listener_error_async(&self) -> Result<Option<String>, String> {
+        let error = self
+            .listener_error
+            .lock()
+            .await
+            .map_err(|_| "failed to lock MQTT listener error".to_string())?;
+        Ok(error.clone())
+    }
 
-        #[cfg(not(feature = "std"))]
-        {
-            Ok(None)
-        }
+    /// Blocking variant of [`MqttDriver::last_listener_error_async`] for the std runtimes.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
+    pub fn last_listener_error(&self) -> Result<Option<String>, String> {
+        self.runtime.block_on(self.last_listener_error_async())
     }
 
     /// Clears any previously captured background listener error.
-    pub fn clear_listener_error(&self) -> Result<(), String> {
+    pub async fn clear_listener_error_async(&self) -> Result<(), String> {
         {
             let mut guard = self
-                .runtime
-                .block_on(self.listener_error.lock())
+                .listener_error
+                .lock()
+                .await
                 .map_err(|_| "failed to lock MQTT listener error".to_string())?;
             *guard = None;
-            self.broadcast_listener_status(MqttListenerStatus::Stopped)?;
-            return Ok(());
         }
+        self.broadcast_listener_status_async(MqttListenerStatus::Stopped)
+            .await
+    }
 
-        #[cfg(not(feature = "std"))]
-        {
-            Ok(())
-        }
+    /// Blocking variant of [`MqttDriver::clear_listener_error_async`] for the std runtimes.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
+    pub fn clear_listener_error(&self) -> Result<(), String> {
+        self.runtime.block_on(self.clear_listener_error_async())
     }
 
     /// Returns high-level background listener status for this MQTT driver.
+    pub async fn listener_status_async(&self) -> Result<MqttListenerStatus, String> {
+        if self.listener_running.load(AtomicOrdering::SeqCst) {
+            return Ok(MqttListenerStatus::Running);
+        }
+
+        match self.last_listener_error_async().await? {
+            Some(error) => Ok(MqttListenerStatus::Failed(error)),
+            None => Ok(MqttListenerStatus::Stopped),
+        }
+    }
+
+    /// Blocking variant of [`MqttDriver::listener_status_async`] for the std runtimes.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     pub fn listener_status(&self) -> Result<MqttListenerStatus, String> {
-        {
-            if self.listener_running.load(AtomicOrdering::SeqCst) {
-                return Ok(MqttListenerStatus::Running);
-            }
-
-            return match self.last_listener_error()? {
-                Some(error) => Ok(MqttListenerStatus::Failed(error)),
-                None => Ok(MqttListenerStatus::Stopped),
-            };
-        }
-
-        #[cfg(not(feature = "std"))]
-        {
-            Ok(MqttListenerStatus::Stopped)
-        }
+        self.runtime.block_on(self.listener_status_async())
     }
 
     /// Subscribes to background listener status changes for this MQTT driver.
 
-    pub fn subscribe_listener_status(&self) -> Result<RuntimeReceiver<MqttListenerStatus>, String> {
+    /// Subscribes to background listener status changes for this MQTT driver.
+    pub async fn subscribe_listener_status_async(
+        &self,
+    ) -> Result<RuntimeReceiver<MqttListenerStatus>, String> {
         let (tx, rx) = self.runtime.channel(8);
-        let current = self.listener_status()?;
+        let current = self.listener_status_async().await?;
         tx.try_send(current)
             .map_err(|_| "failed to seed MQTT listener status subscriber".to_string())?;
-        self.runtime
-            .block_on(self.listener_status_subscribers.lock())
+        self.listener_status_subscribers
+            .lock()
+            .await
             .map_err(|_| "failed to lock MQTT listener subscribers".to_string())?
             .push(tx);
         Ok(rx)
     }
 
-    fn broadcast_listener_status(&self, status: MqttListenerStatus) -> Result<(), String> {
+    /// Blocking variant of [`MqttDriver::subscribe_listener_status_async`] for the std runtimes.
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
+    pub fn subscribe_listener_status(&self) -> Result<RuntimeReceiver<MqttListenerStatus>, String> {
+        self.runtime
+            .block_on(self.subscribe_listener_status_async())
+    }
+
+    async fn broadcast_listener_status_async(
+        &self,
+        status: MqttListenerStatus,
+    ) -> Result<(), String> {
         let mut subscribers = self
-            .runtime
-            .block_on(self.listener_status_subscribers.lock())
+            .listener_status_subscribers
+            .lock()
+            .await
             .map_err(|_| "failed to lock MQTT listener subscribers".to_string())?;
         subscribers.retain(|subscriber| {
             !matches!(
@@ -750,34 +826,24 @@ impl Lifecycle for MqttDriver {
     type Error = String;
 
     async fn start(&self) -> Result<(), Self::Error> {
-        {
-            return self.ensure_connected_async().await;
-        }
-
-        #[cfg(not(feature = "std"))]
-        Err("MQTT runtime requires the \"std\" feature".to_string())
+        self.ensure_connected_async().await
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
-        {
-            self.stop_listener()?;
-            let maybe_session = {
-                let mut guard = self
-                    .session
-                    .lock()
-                    .await
-                    .map_err(|_| "failed to lock MQTT session".to_string())?;
-                guard.take()
-            };
-            if let Some(mut session) = maybe_session {
-                let _ = disconnect_session(&self.runtime, &mut session).await;
-            }
-            self.broadcast_listener_status(self.listener_status()?)?;
-            return Ok(());
+        self.stop_listener_async().await?;
+        let maybe_session = {
+            let mut guard = self
+                .session
+                .lock()
+                .await
+                .map_err(|_| "failed to lock MQTT session".to_string())?;
+            guard.take()
+        };
+        if let Some(mut session) = maybe_session {
+            let _ = disconnect_session(&self.runtime, &mut session).await;
         }
-
-        #[cfg(not(feature = "std"))]
-        Err("MQTT runtime requires the \"std\" feature".to_string())
+        let status = self.listener_status_async().await?;
+        self.broadcast_listener_status_async(status).await
     }
 }
 
@@ -787,64 +853,54 @@ impl PubSub for MqttDriver {
     type Error = String;
 
     async fn publish(&self, request: Self::PublishRequest) -> Result<(), Self::Error> {
-        {
-            if self.listener_running.load(AtomicOrdering::SeqCst) {
-                match self
-                    .send_listener_command(SessionCommand {
-                        kind: SessionCommandKind::Publish(request.clone()),
-                        response: None,
-                    })
-                    .await
-                {
-                    Ok(SessionCommandResult::Done) => return Ok(()),
-                    Ok(SessionCommandResult::Events(_)) => return Ok(()),
-                    Err(error) => {
-                        if self.enqueue_recovery_request(request).is_ok() {
-                            return Ok(());
-                        }
-                        return Err(error);
+        if self.listener_running.load(AtomicOrdering::SeqCst) {
+            match self
+                .send_listener_command(SessionCommand {
+                    kind: SessionCommandKind::Publish(request.clone()),
+                    response: None,
+                })
+                .await
+            {
+                Ok(SessionCommandResult::Done) => return Ok(()),
+                Ok(SessionCommandResult::Events(_)) => return Ok(()),
+                Err(error) => {
+                    if self.enqueue_recovery_request(request).await.is_ok() {
+                        return Ok(());
                     }
+                    return Err(error);
                 }
             }
-            if let Err(error) = self.ensure_connected_async().await {
-                return Err(error);
-            }
-            let mut session = self.take_session_wait_async().await?;
-            let result = async {
-                send_packet_request_async(
-                    &self.runtime,
-                    &mut session,
-                    &self.dvc.id,
-                    request.clone(),
-                )
-                .await?;
-                let _ = read_from_session_async(
-                    &self.runtime,
-                    &mut session,
-                    &self.dvc.id,
-                    Some(&self.negotiated_connack),
-                    Some(&self.auth_handler),
-                    Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
-                )
-                .await?;
-                Ok::<(), String>(())
-            }
-            .await;
-            if result.is_ok() {
-                self.restore_session(session).await?;
-            } else {
-                self.clear_session().await?;
-                if self.listener_running.load(AtomicOrdering::SeqCst) {
-                    let _ = self.enqueue_recovery_request(request);
-                    return Ok(());
-                }
-            }
-            result?;
-            return Ok(());
         }
-
-        #[cfg(not(feature = "std"))]
-        Err("MQTT runtime requires the \"std\" feature".to_string())
+        if let Err(error) = self.ensure_connected_async().await {
+            return Err(error);
+        }
+        let mut session = self.take_session_wait_async().await?;
+        let result = async {
+            send_packet_request_async(&self.runtime, &mut session, &self.dvc.id, request.clone())
+                .await?;
+            let _ = read_from_session_async(
+                &self.runtime,
+                &mut session,
+                &self.dvc.id,
+                Some(&self.negotiated_connack),
+                Some(&self.auth_handler),
+                Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
+            )
+            .await?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if result.is_ok() {
+            self.restore_session(session).await?;
+        } else {
+            self.clear_session().await?;
+            if self.listener_running.load(AtomicOrdering::SeqCst) {
+                let _ = self.enqueue_recovery_request(request).await;
+                return Ok(());
+            }
+        }
+        result?;
+        Ok(())
     }
 
     async fn subscribe<S>(
@@ -853,143 +909,133 @@ impl PubSub for MqttDriver {
         sink: S,
     ) -> Result<(), Self::Error>
     where
-        S: EventSink<Event = RoutedEvent<'static>> + Send,
+        S: EventSink<Event = RoutedEvent<'static>> + MaybeSend,
     {
-        {
-            self.track_subscription_intent(&subscription)?;
-            if self.listener_running.load(AtomicOrdering::SeqCst) {
-                match self
-                    .send_listener_command(SessionCommand {
-                        kind: SessionCommandKind::Subscribe(subscription.clone()),
-                        response: None,
-                    })
-                    .await
-                {
-                    Ok(SessionCommandResult::Done) => return Ok(()),
-                    Ok(SessionCommandResult::Events(events)) => {
-                        let mut sink = sink;
-                        for event in events {
-                            sink.handle(event)
-                                .map_err(|_| "failed to forward MQTT event to sink".to_string())?;
-                        }
-                        return Ok(());
-                    }
-                    Err(error) => {
-                        if self.enqueue_recovery_request(subscription).is_ok() {
-                            return Ok(());
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-            if let Err(error) = self.ensure_connected_async().await {
-                return Err(error);
-            }
-            let mut session = self.take_session_wait_async().await?;
-            let result = async {
-                send_packet_request_async(
-                    &self.runtime,
-                    &mut session,
-                    &self.dvc.id,
-                    subscription.clone(),
-                )
-                .await?;
-                read_from_session_async(
-                    &self.runtime,
-                    &mut session,
-                    &self.dvc.id,
-                    Some(&self.negotiated_connack),
-                    Some(&self.auth_handler),
-                    Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
-                )
+        self.track_subscription_intent(&subscription).await?;
+        if self.listener_running.load(AtomicOrdering::SeqCst) {
+            match self
+                .send_listener_command(SessionCommand {
+                    kind: SessionCommandKind::Subscribe(subscription.clone()),
+                    response: None,
+                })
                 .await
-            }
-            .await;
-            if result.is_ok() {
-                self.restore_session(session).await?;
-            } else {
-                self.clear_session().await?;
-                if self.listener_running.load(AtomicOrdering::SeqCst) {
-                    let _ = self.enqueue_recovery_request(subscription);
+            {
+                Ok(SessionCommandResult::Done) => return Ok(()),
+                Ok(SessionCommandResult::Events(events)) => {
+                    let mut sink = sink;
+                    for event in events {
+                        sink.handle(event)
+                            .map_err(|_| "failed to forward MQTT event to sink".to_string())?;
+                    }
                     return Ok(());
                 }
-            }
-            let messages = result?;
-            let mut sink = sink;
-            for message in messages {
-                if let RoutedMessage::Event(event) = message {
-                    sink.handle(event)
-                        .map_err(|_| "failed to forward MQTT event to sink".to_string())?;
+                Err(error) => {
+                    if self.enqueue_recovery_request(subscription).await.is_ok() {
+                        return Ok(());
+                    }
+                    return Err(error);
                 }
             }
-            return Ok(());
         }
-
-        #[cfg(not(feature = "std"))]
-        Err("MQTT runtime requires the \"std\" feature".to_string())
+        if let Err(error) = self.ensure_connected_async().await {
+            return Err(error);
+        }
+        let mut session = self.take_session_wait_async().await?;
+        let result = async {
+            send_packet_request_async(
+                &self.runtime,
+                &mut session,
+                &self.dvc.id,
+                subscription.clone(),
+            )
+            .await?;
+            read_from_session_async(
+                &self.runtime,
+                &mut session,
+                &self.dvc.id,
+                Some(&self.negotiated_connack),
+                Some(&self.auth_handler),
+                Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
+            )
+            .await
+        }
+        .await;
+        if result.is_ok() {
+            self.restore_session(session).await?;
+        } else {
+            self.clear_session().await?;
+            if self.listener_running.load(AtomicOrdering::SeqCst) {
+                let _ = self.enqueue_recovery_request(subscription).await;
+                return Ok(());
+            }
+        }
+        let messages = result?;
+        let mut sink = sink;
+        for message in messages {
+            if let RoutedMessage::Event(event) = message {
+                sink.handle(event)
+                    .map_err(|_| "failed to forward MQTT event to sink".to_string())?;
+            }
+        }
+        Ok(())
     }
 
     async fn unsubscribe(&self, subscription: Self::Subscription) -> Result<(), Self::Error> {
-        {
-            self.track_subscription_intent(&subscription)?;
-            if self.listener_running.load(AtomicOrdering::SeqCst) {
-                match self
-                    .send_listener_command(SessionCommand {
-                        kind: SessionCommandKind::Unsubscribe(subscription.clone()),
-                        response: None,
-                    })
-                    .await
-                {
-                    Ok(SessionCommandResult::Done) | Ok(SessionCommandResult::Events(_)) => {
-                        return Ok(());
-                    }
-                    Err(error) => {
-                        if self.enqueue_recovery_request(subscription).is_ok() {
-                            return Ok(());
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-            if let Err(error) = self.ensure_connected_async().await {
-                return Err(error);
-            }
-            let mut session = self.take_session_wait_async().await?;
-            let result = async {
-                send_packet_request_async(
-                    &self.runtime,
-                    &mut session,
-                    &self.dvc.id,
-                    subscription.clone(),
-                )
-                .await?;
-                let _ = read_from_session_async(
-                    &self.runtime,
-                    &mut session,
-                    &self.dvc.id,
-                    Some(&self.negotiated_connack),
-                    Some(&self.auth_handler),
-                    Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
-                )
-                .await?;
-                Ok::<(), String>(())
-            }
-            .await;
-            if result.is_ok() {
-                self.restore_session(session).await?;
-            } else {
-                self.clear_session().await?;
-                if self.listener_running.load(AtomicOrdering::SeqCst) {
-                    let _ = self.enqueue_recovery_request(subscription);
+        self.track_subscription_intent(&subscription).await?;
+        if self.listener_running.load(AtomicOrdering::SeqCst) {
+            match self
+                .send_listener_command(SessionCommand {
+                    kind: SessionCommandKind::Unsubscribe(subscription.clone()),
+                    response: None,
+                })
+                .await
+            {
+                Ok(SessionCommandResult::Done) | Ok(SessionCommandResult::Events(_)) => {
                     return Ok(());
                 }
+                Err(error) => {
+                    if self.enqueue_recovery_request(subscription).await.is_ok() {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
             }
-            result?;
-            return Ok(());
         }
-
-        #[cfg(not(feature = "std"))]
-        Err("MQTT runtime requires the \"std\" feature".to_string())
+        if let Err(error) = self.ensure_connected_async().await {
+            return Err(error);
+        }
+        let mut session = self.take_session_wait_async().await?;
+        let result = async {
+            send_packet_request_async(
+                &self.runtime,
+                &mut session,
+                &self.dvc.id,
+                subscription.clone(),
+            )
+            .await?;
+            let _ = read_from_session_async(
+                &self.runtime,
+                &mut session,
+                &self.dvc.id,
+                Some(&self.negotiated_connack),
+                Some(&self.auth_handler),
+                Some(core::time::Duration::from_millis(MQTT_ACK_READ_TIMEOUT_MS)),
+            )
+            .await?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if result.is_ok() {
+            self.restore_session(session).await?;
+        } else {
+            self.clear_session().await?;
+            if self.listener_running.load(AtomicOrdering::SeqCst) {
+                let _ = self.enqueue_recovery_request(subscription).await;
+                return Ok(());
+            }
+        }
+        result?;
+        Ok(())
     }
 }
 
@@ -999,358 +1045,346 @@ impl EventSource for MqttDriver {
 
     async fn start_listening<S>(&self, sink: S) -> Result<(), Self::Error>
     where
-        S: EventSink<Event = Self::Event> + Send + 'static,
+        S: EventSink<Event = Self::Event> + MaybeSend + 'static,
     {
+        self.ensure_connected_async().await?;
+        if self.listener_running.swap(true, AtomicOrdering::SeqCst) {
+            return Err("MQTT listener already running".to_string());
+        }
+
+        let session = Shared::clone(&self.session);
+        let running = Shared::clone(&self.listener_running);
+        let listener_error = Shared::clone(&self.listener_error);
+        let status_subscribers = Shared::clone(&self.listener_status_subscribers);
+        let listener_command_sender = Shared::clone(&self.listener_command_sender);
+        let negotiated_connack = Shared::clone(&self.negotiated_connack);
+        let auth_handler = Shared::clone(&self.auth_handler);
+        let device_id = self.dvc.id.clone();
+        let driver = self.clone();
+        let runtime = self.runtime.clone();
+        let reconnect = self.reconnect_config()?;
+        let (command_tx, command_rx): (
+            RuntimeSender<SessionCommand>,
+            RuntimeReceiver<SessionCommand>,
+        ) = runtime.channel(MQTT_LISTENER_COMMAND_CHANNEL_CAPACITY);
+        self.clear_listener_error_async().await?;
+        self.broadcast_listener_status_async(MqttListenerStatus::Running)
+            .await?;
         {
-            self.ensure_connected_async().await?;
-            if self.listener_running.swap(true, AtomicOrdering::SeqCst) {
-                return Err("MQTT listener already running".to_string());
-            }
+            let mut sender_guard = self
+                .listener_command_sender
+                .lock()
+                .await
+                .map_err(|_| "failed to lock MQTT listener command sender".to_string())?;
+            *sender_guard = Some(command_tx);
+        }
+        let handle = runtime.clone().spawn(async move {
+            let mut sink = sink;
+            let mut reconnect_attempt = 0u32;
+            let mut command_rx = command_rx;
 
-            let session = Shared::clone(&self.session);
-            let running = Shared::clone(&self.listener_running);
-            let listener_error = Shared::clone(&self.listener_error);
-            let status_subscribers = Shared::clone(&self.listener_status_subscribers);
-            let listener_command_sender = Shared::clone(&self.listener_command_sender);
-            let negotiated_connack = Shared::clone(&self.negotiated_connack);
-            let auth_handler = Shared::clone(&self.auth_handler);
-            let device_id = self.dvc.id.clone();
-            let driver = self.clone();
-            let runtime = self.runtime.clone();
-            let reconnect = self.reconnect_config()?;
-            let (command_tx, command_rx): (
-                RuntimeSender<SessionCommand>,
-                RuntimeReceiver<SessionCommand>,
-            ) = runtime.channel(MQTT_LISTENER_COMMAND_CHANNEL_CAPACITY);
-            self.clear_listener_error()?;
-            self.broadcast_listener_status(MqttListenerStatus::Running)?;
-            {
-                let mut sender_guard = self
-                    .listener_command_sender
-                    .lock()
-                    .await
-                    .map_err(|_| "failed to lock MQTT listener command sender".to_string())?;
-                *sender_guard = Some(command_tx);
-            }
-            let handle = runtime.clone().spawn(async move {
-                let mut sink = sink;
-                let mut reconnect_attempt = 0u32;
-                let mut command_rx = command_rx;
-
-                'listen: while running.load(AtomicOrdering::SeqCst) {
-                    let mut session_value = match {
-                        let mut guard = match session.lock().await {
-                            Ok(guard) => guard,
-                            Err(_) => {
-                                if let Ok(mut error_guard) = listener_error.lock().await {
-                                    *error_guard = Some(
-                                        "failed to lock MQTT session while listening".to_string(),
-                                    );
-                                }
-                                broadcast_listener_status_to_subscribers(
-                                        &status_subscribers,
-                                        MqttListenerStatus::Failed(
-                                            "failed to lock MQTT session while listening".to_string(),
-                                        ),
-                                ).await;
-                                break;
+            'listen: while running.load(AtomicOrdering::SeqCst) {
+                let mut session_value = match {
+                    let mut guard = match session.lock().await {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            if let Ok(mut error_guard) = listener_error.lock().await {
+                                *error_guard = Some(
+                                    "failed to lock MQTT session while listening".to_string(),
+                                );
                             }
-                        };
-                        guard.take()
-                    } {
-                        Some(session) => session,
-                        None => {
-                            runtime
-                                .sleep(core::time::Duration::from_millis(MQTT_SESSION_WAIT_POLL_MS))
-                                .await;
-                            continue;
+                            broadcast_listener_status_to_subscribers(
+                                    &status_subscribers,
+                                    MqttListenerStatus::Failed(
+                                        "failed to lock MQTT session while listening".to_string(),
+                                    ),
+                            ).await;
+                            break;
                         }
                     };
+                    guard.take()
+                } {
+                    Some(session) => session,
+                    None => {
+                        runtime
+                            .sleep(core::time::Duration::from_millis(MQTT_SESSION_WAIT_POLL_MS))
+                            .await;
+                        continue;
+                    }
+                };
 
-                    loop {
-                        match command_rx.try_recv() {
-                            Ok(command) => {
-                                if let Err(error) =
-                                    process_session_command(
-                                        &runtime,
-                                        &mut session_value,
-                                        &device_id,
-                                        &auth_handler,
-                                        command,
-                                    )
-                                        .await
-                                {
-                                    if let Ok(mut guard) = session.lock().await {
-                                        *guard = None;
+                loop {
+                    match command_rx.try_recv() {
+                        Ok(command) => {
+                            if let Err(error) =
+                                process_session_command(
+                                    &runtime,
+                                    &mut session_value,
+                                    &device_id,
+                                    &auth_handler,
+                                    command,
+                                )
+                                    .await
+                            {
+                                if let Ok(mut guard) = session.lock().await {
+                                    *guard = None;
+                                }
+                                let mut error = error;
+                                while running.load(AtomicOrdering::SeqCst) {
+                                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                                    if !reconnect.allows_attempt(reconnect_attempt) {
+                                        break;
                                     }
-                                    let mut error = error;
-                                    while running.load(AtomicOrdering::SeqCst) {
-                                        reconnect_attempt = reconnect_attempt.saturating_add(1);
-                                        if !reconnect.allows_attempt(reconnect_attempt) {
-                                            break;
-                                        }
 
-                                        runtime
-                                            .sleep(core::time::Duration::from_millis(
-                                                reconnect.delay_ms_for_attempt(reconnect_attempt),
-                                            ))
-                                            .await;
+                                    runtime
+                                        .sleep(core::time::Duration::from_millis(
+                                            reconnect.delay_ms_for_attempt(reconnect_attempt),
+                                        ))
+                                        .await;
 
-                                        if !running.load(AtomicOrdering::SeqCst) {
-                                            break;
-                                        }
+                                    if !running.load(AtomicOrdering::SeqCst) {
+                                        break;
+                                    }
 
-                                        match driver.ensure_connected_async().await {
-                                            Ok(()) => {
-                                                let maybe_reconnected_session = {
-                                                    let mut guard = match session.lock().await {
-                                                        Ok(guard) => guard,
-                                                        Err(_) => {
-                                                            error = "failed to lock MQTT session after reconnect".to_string();
-                                                            continue;
-                                                        }
-                                                    };
-                                                    guard.take()
-                                                };
-
-                                                let Some(mut reconnected_session) = maybe_reconnected_session else {
-                                                    error = "MQTT session missing after reconnect".to_string();
-                                                    continue;
-                                                };
-
-                                                let recovered_events = match driver
-                                                    .replay_recovery_state_on_session_async(
-                                                        &mut reconnected_session,
-                                                    )
-                                                    .await
-                                                {
-                                                    Ok(recovered_events) => recovered_events,
-                                                    Err(recovery_error) => {
-                                                        if let Ok(mut guard) = session.lock().await {
-                                                            *guard = None;
-                                                        }
-                                                        error = recovery_error;
+                                    match driver.ensure_connected_async().await {
+                                        Ok(()) => {
+                                            let maybe_reconnected_session = {
+                                                let mut guard = match session.lock().await {
+                                                    Ok(guard) => guard,
+                                                    Err(_) => {
+                                                        error = "failed to lock MQTT session after reconnect".to_string();
                                                         continue;
                                                     }
                                                 };
+                                                guard.take()
+                                            };
 
-                                                if let Ok(mut guard) = session.lock().await {
-                                                    *guard = Some(reconnected_session);
-                                                }
-                                                for event in recovered_events {
-                                                    if sink.handle(event).is_err() {
-                                                        if let Ok(mut error_guard) = listener_error.lock().await
-                                                        {
-                                                            *error_guard = Some(
-                                                                "failed to forward MQTT event to sink"
-                                                                    .to_string(),
-                                                            );
-                                                        }
-                                                        broadcast_listener_status_to_subscribers(
-                                                            &status_subscribers,
-                                                            MqttListenerStatus::Failed(
-                                                                "failed to forward MQTT event to sink"
-                                                                    .to_string(),
-                                                            ),
-                                                        ).await;
-                                                        running.store(false, AtomicOrdering::SeqCst);
-                                                        break 'listen;
+                                            let Some(mut reconnected_session) = maybe_reconnected_session else {
+                                                error = "MQTT session missing after reconnect".to_string();
+                                                continue;
+                                            };
+
+                                            let recovered_events = match driver
+                                                .replay_recovery_state_on_session_async(
+                                                    &mut reconnected_session,
+                                                )
+                                                .await
+                                            {
+                                                Ok(recovered_events) => recovered_events,
+                                                Err(recovery_error) => {
+                                                    if let Ok(mut guard) = session.lock().await {
+                                                        *guard = None;
                                                     }
-                                                }
-                                                reconnect_attempt = 0;
-                                                if let Ok(mut error_guard) = listener_error.lock().await {
-                                                    *error_guard = None;
-                                                }
-                                                continue 'listen;
-                                            }
-                                            Err(connect_error) => {
-                                                error = connect_error;
-                                            }
-                                        }
-                                    }
-                                    if !running.load(AtomicOrdering::SeqCst) {
-                                        break 'listen;
-                                    }
-                                    if let Ok(mut error_guard) = listener_error.lock().await {
-                                        *error_guard = Some(error.clone());
-                                    }
-                                    broadcast_listener_status_to_subscribers(
-                                        &status_subscribers,
-                                        MqttListenerStatus::Failed(error),
-                                    ).await;
-                                    running.store(false, AtomicOrdering::SeqCst);
-                                    break 'listen;
-                                }
-                            }
-                            Err(ChannelError::Empty) => break,
-                            Err(ChannelError::Closed) => break,
-                            Err(ChannelError::Full | ChannelError::RuntimeUnavailable) => {
-                                break;
-                            }
-                        }
-                    }
-
-                    let messages = read_from_session_async(
-                        &runtime,
-                        &mut session_value,
-                        &device_id,
-                        Some(&negotiated_connack),
-                        Some(&auth_handler),
-                        Some(core::time::Duration::from_millis(MQTT_LISTENER_IDLE_POLL_MS)),
-                    )
-                    .await;
-
-                    match messages {
-                        Ok(messages) => {
-                            reconnect_attempt = 0;
-                            if let Ok(mut guard) = session.lock().await {
-                                *guard = Some(session_value);
-                            }
-                            for message in messages {
-                                if let RoutedMessage::Event(event) = message {
-                                    if sink.handle(event).is_err() {
-                                        if let Ok(mut error_guard) = listener_error.lock().await {
-                                            *error_guard = Some(
-                                                "failed to forward MQTT event to sink".to_string(),
-                                            );
-                                        }
-                                        broadcast_listener_status_to_subscribers(
-                                            &status_subscribers,
-                                            MqttListenerStatus::Failed(
-                                                "failed to forward MQTT event to sink".to_string(),
-                                            ),
-                                        ).await;
-                                        running.store(false, AtomicOrdering::SeqCst);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(mut error) => {
-                            if let Ok(mut guard) = session.lock().await {
-                                *guard = None;
-                            }
-                            while running.load(AtomicOrdering::SeqCst) {
-                                reconnect_attempt = reconnect_attempt.saturating_add(1);
-                                if !reconnect.allows_attempt(reconnect_attempt) {
-                                    break;
-                                }
-
-                                runtime
-                                    .sleep(core::time::Duration::from_millis(
-                                        reconnect.delay_ms_for_attempt(reconnect_attempt),
-                                    ))
-                                    .await;
-
-                                if !running.load(AtomicOrdering::SeqCst) {
-                                    break;
-                                }
-
-                                match driver.ensure_connected_async().await {
-                                    Ok(()) => {
-                                        let maybe_reconnected_session = {
-                                            let mut guard = match session.lock().await {
-                                                Ok(guard) => guard,
-                                                Err(_) => {
-                                                    error =
-                                                        "failed to lock MQTT session after reconnect"
-                                                            .to_string();
+                                                    error = recovery_error;
                                                     continue;
                                                 }
                                             };
-                                            guard.take()
-                                        };
 
-                                        let Some(mut reconnected_session) = maybe_reconnected_session else {
-                                            error =
-                                                "MQTT session missing after reconnect".to_string();
-                                            continue;
-                                        };
-
-                                        if let Err(recovery_error) = driver
-                                            .replay_recovery_state_on_session_async(
-                                                &mut reconnected_session,
-                                            )
-                                            .await
-                                        {
                                             if let Ok(mut guard) = session.lock().await {
-                                                *guard = None;
+                                                *guard = Some(reconnected_session);
                                             }
-                                            error = recovery_error;
-                                            continue;
+                                            for event in recovered_events {
+                                                if sink.handle(event).is_err() {
+                                                    if let Ok(mut error_guard) = listener_error.lock().await
+                                                    {
+                                                        *error_guard = Some(
+                                                            "failed to forward MQTT event to sink"
+                                                                .to_string(),
+                                                        );
+                                                    }
+                                                    broadcast_listener_status_to_subscribers(
+                                                        &status_subscribers,
+                                                        MqttListenerStatus::Failed(
+                                                            "failed to forward MQTT event to sink"
+                                                                .to_string(),
+                                                        ),
+                                                    ).await;
+                                                    running.store(false, AtomicOrdering::SeqCst);
+                                                    break 'listen;
+                                                }
+                                            }
+                                            reconnect_attempt = 0;
+                                            if let Ok(mut error_guard) = listener_error.lock().await {
+                                                *error_guard = None;
+                                            }
+                                            continue 'listen;
                                         }
-
-                                        if let Ok(mut guard) = session.lock().await {
-                                            *guard = Some(reconnected_session);
+                                        Err(connect_error) => {
+                                            error = connect_error;
                                         }
-                                        reconnect_attempt = 0;
-                                        if let Ok(mut error_guard) = listener_error.lock().await {
-                                            *error_guard = None;
-                                        }
-                                        continue 'listen;
-                                    }
-                                    Err(connect_error) => {
-                                        error = connect_error;
                                     }
                                 }
+                                if !running.load(AtomicOrdering::SeqCst) {
+                                    break 'listen;
+                                }
+                                if let Ok(mut error_guard) = listener_error.lock().await {
+                                    *error_guard = Some(error.clone());
+                                }
+                                broadcast_listener_status_to_subscribers(
+                                    &status_subscribers,
+                                    MqttListenerStatus::Failed(error),
+                                ).await;
+                                running.store(false, AtomicOrdering::SeqCst);
+                                break 'listen;
                             }
-                            if reconnect_attempt == 0 && running.load(AtomicOrdering::SeqCst) {
-                                continue;
-                            }
-                            if !running.load(AtomicOrdering::SeqCst) {
-                                break;
-                            }
-                            if let Ok(mut error_guard) = listener_error.lock().await {
-                                *error_guard = Some(error.clone());
-                            }
-                            broadcast_listener_status_to_subscribers(
-                                &status_subscribers,
-                                MqttListenerStatus::Failed(error),
-                            ).await;
-                            running.store(false, AtomicOrdering::SeqCst);
+                        }
+                        Err(ChannelError::Empty) => break,
+                        Err(ChannelError::Closed) => break,
+                        Err(ChannelError::Full | ChannelError::RuntimeUnavailable) => {
                             break;
                         }
                     }
                 }
-                if let Ok(mut sender_guard) = listener_command_sender.lock().await {
-                    *sender_guard = None;
+
+                let messages = read_from_session_async(
+                    &runtime,
+                    &mut session_value,
+                    &device_id,
+                    Some(&negotiated_connack),
+                    Some(&auth_handler),
+                    Some(core::time::Duration::from_millis(MQTT_LISTENER_IDLE_POLL_MS)),
+                )
+                .await;
+
+                match messages {
+                    Ok(messages) => {
+                        reconnect_attempt = 0;
+                        if let Ok(mut guard) = session.lock().await {
+                            *guard = Some(session_value);
+                        }
+                        for message in messages {
+                            if let RoutedMessage::Event(event) = message {
+                                if sink.handle(event).is_err() {
+                                    if let Ok(mut error_guard) = listener_error.lock().await {
+                                        *error_guard = Some(
+                                            "failed to forward MQTT event to sink".to_string(),
+                                        );
+                                    }
+                                    broadcast_listener_status_to_subscribers(
+                                        &status_subscribers,
+                                        MqttListenerStatus::Failed(
+                                            "failed to forward MQTT event to sink".to_string(),
+                                        ),
+                                    ).await;
+                                    running.store(false, AtomicOrdering::SeqCst);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(mut error) => {
+                        if let Ok(mut guard) = session.lock().await {
+                            *guard = None;
+                        }
+                        while running.load(AtomicOrdering::SeqCst) {
+                            reconnect_attempt = reconnect_attempt.saturating_add(1);
+                            if !reconnect.allows_attempt(reconnect_attempt) {
+                                break;
+                            }
+
+                            runtime
+                                .sleep(core::time::Duration::from_millis(
+                                    reconnect.delay_ms_for_attempt(reconnect_attempt),
+                                ))
+                                .await;
+
+                            if !running.load(AtomicOrdering::SeqCst) {
+                                break;
+                            }
+
+                            match driver.ensure_connected_async().await {
+                                Ok(()) => {
+                                    let maybe_reconnected_session = {
+                                        let mut guard = match session.lock().await {
+                                            Ok(guard) => guard,
+                                            Err(_) => {
+                                                error =
+                                                    "failed to lock MQTT session after reconnect"
+                                                        .to_string();
+                                                continue;
+                                            }
+                                        };
+                                        guard.take()
+                                    };
+
+                                    let Some(mut reconnected_session) = maybe_reconnected_session else {
+                                        error =
+                                            "MQTT session missing after reconnect".to_string();
+                                        continue;
+                                    };
+
+                                    if let Err(recovery_error) = driver
+                                        .replay_recovery_state_on_session_async(
+                                            &mut reconnected_session,
+                                        )
+                                        .await
+                                    {
+                                        if let Ok(mut guard) = session.lock().await {
+                                            *guard = None;
+                                        }
+                                        error = recovery_error;
+                                        continue;
+                                    }
+
+                                    if let Ok(mut guard) = session.lock().await {
+                                        *guard = Some(reconnected_session);
+                                    }
+                                    reconnect_attempt = 0;
+                                    if let Ok(mut error_guard) = listener_error.lock().await {
+                                        *error_guard = None;
+                                    }
+                                    continue 'listen;
+                                }
+                                Err(connect_error) => {
+                                    error = connect_error;
+                                }
+                            }
+                        }
+                        if reconnect_attempt == 0 && running.load(AtomicOrdering::SeqCst) {
+                            continue;
+                        }
+                        if !running.load(AtomicOrdering::SeqCst) {
+                            break;
+                        }
+                        if let Ok(mut error_guard) = listener_error.lock().await {
+                            *error_guard = Some(error.clone());
+                        }
+                        broadcast_listener_status_to_subscribers(
+                            &status_subscribers,
+                            MqttListenerStatus::Failed(error),
+                        ).await;
+                        running.store(false, AtomicOrdering::SeqCst);
+                        break;
+                    }
                 }
-                running.store(false, AtomicOrdering::SeqCst);
-                let final_status = match listener_error.lock().await {
-                    Ok(error_guard) => match error_guard.clone() {
-                        Some(error) => MqttListenerStatus::Failed(error),
-                        None => MqttListenerStatus::Stopped,
-                    },
-                    Err(_) => MqttListenerStatus::Failed(
-                        "failed to lock MQTT listener error after listener exit".to_string(),
-                    ),
-                };
-                broadcast_listener_status_to_subscribers(&status_subscribers, final_status).await;
-            });
+            }
+            if let Ok(mut sender_guard) = listener_command_sender.lock().await {
+                *sender_guard = None;
+            }
+            running.store(false, AtomicOrdering::SeqCst);
+            let final_status = match listener_error.lock().await {
+                Ok(error_guard) => match error_guard.clone() {
+                    Some(error) => MqttListenerStatus::Failed(error),
+                    None => MqttListenerStatus::Stopped,
+                },
+                Err(_) => MqttListenerStatus::Failed(
+                    "failed to lock MQTT listener error after listener exit".to_string(),
+                ),
+            };
+            broadcast_listener_status_to_subscribers(&status_subscribers, final_status).await;
+        });
 
-            let mut handle_guard = self
-                .listener_handle
-                .lock()
-                .await
-                .map_err(|_| "failed to lock MQTT listener handle".to_string())?;
-            *handle_guard = Some(handle);
-            return Ok(());
-        }
-
-        #[cfg(not(feature = "std"))]
-        {
-            let _ = sink;
-            Err("MQTT runtime requires the \"std\" feature".to_string())
-        }
+        let mut handle_guard = self
+            .listener_handle
+            .lock()
+            .await
+            .map_err(|_| "failed to lock MQTT listener handle".to_string())?;
+        *handle_guard = Some(handle);
+        Ok(())
     }
 
     async fn stop_listening(&self) -> Result<(), Self::Error> {
-        {
-            return self.stop_listener();
-        }
-
-        #[cfg(not(feature = "std"))]
-        Err("MQTT runtime requires the \"std\" feature".to_string())
+        self.stop_listener_async().await
     }
 }
 

@@ -1,6 +1,11 @@
 extern crate alloc;
 
-use alloc::{borrow::Cow, format, string::ToString, vec::Vec};
+use alloc::{
+    borrow::Cow,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use ferredge_core::prelude::PayloadValue;
 use rmodbus::{

@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use alloc::{borrow::Cow, string::ToString, vec::Vec};
+use alloc::{borrow::Cow, string::ToString, vec, vec::Vec};
 
 use ferredge_bridge::{NativeOutbound, ProtocolEncoder, RegisterAccessAction};
 use ferredge_core::prelude::*;

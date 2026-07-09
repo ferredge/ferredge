@@ -1,6 +1,10 @@
-use std::{
-    borrow::Cow, cell::RefCell, collections::HashMap, string::String, time::Duration, vec::Vec,
+use alloc::{
+    borrow::Cow,
+    format,
+    string::{String, ToString},
+    vec::Vec,
 };
+use core::{cell::RefCell, time::Duration};
 
 use ferredge_bridge::{BridgeMessage, ProtocolDecoder, planner};
 use ferredge_core::prelude::RuntimeInstant as RuntimeInstantExt;
@@ -10,9 +14,6 @@ use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 use runtime_stack::StackSocket;
 
 use crate::convert::qos_from_delivery;
-#[cfg(feature = "tokio-runtime")]
-use crate::runtime_stack;
-#[cfg(feature = "async-std-runtime")]
 use crate::runtime_stack;
 use crate::types::{MqttPacketRequest, MqttWirePacket};
 use crate::{
@@ -43,8 +44,8 @@ pub(crate) struct PendingReplyRoute {
 #[derive(Debug)]
 pub struct MqttInboundDecoder {
     device_id: String,
-    pending_command_ids: RefCell<HashMap<u16, String>>,
-    pending_reply_routes: RefCell<HashMap<String, PendingReplyRoute>>,
+    pending_command_ids: RefCell<Map<u16, String>>,
+    pending_reply_routes: RefCell<Map<String, PendingReplyRoute>>,
 }
 
 /// Decoded inbound MQTT semantic message.
@@ -59,8 +60,8 @@ impl MqttInboundDecoder {
     pub fn new(device_id: impl Into<String>) -> Self {
         Self {
             device_id: device_id.into(),
-            pending_command_ids: RefCell::new(HashMap::new()),
-            pending_reply_routes: RefCell::new(HashMap::new()),
+            pending_command_ids: RefCell::new(Map::new()),
+            pending_reply_routes: RefCell::new(Map::new()),
         }
     }
 
@@ -217,8 +218,8 @@ impl TryFrom<MqttDecodedInbound> for BridgeMessage<'static> {
 
 #[allow(dead_code)]
 pub(crate) fn routed_message_from_packet(
-    pending_command_ids: &mut HashMap<u16, String>,
-    pending_reply_routes: &mut HashMap<String, PendingReplyRoute>,
+    pending_command_ids: &mut Map<u16, String>,
+    pending_reply_routes: &mut Map<String, PendingReplyRoute>,
     device_id: &str,
     packet: mqtt::packet::Packet,
 ) -> Option<RoutedMessage<'static>> {
@@ -1237,7 +1238,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
 }
 
 fn routed_reply_or_event_from_v5_publish(
-    pending_reply_routes: &mut HashMap<String, PendingReplyRoute>,
+    pending_reply_routes: &mut Map<String, PendingReplyRoute>,
     device_id: &str,
     packet: &mqtt::packet::v5_0::Publish,
 ) -> Option<RoutedMessage<'static>> {
@@ -1335,7 +1336,7 @@ fn payload_value_from_mqtt_bytes<'a>(
 }
 
 fn routed_result_from_v5_puback(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet: &mqtt::packet::v5_0::Puback,
 ) -> RoutedResult<'static> {
@@ -1367,7 +1368,7 @@ fn routed_result_from_v5_puback(
 }
 
 fn routed_result_from_v5_pubrec(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet: &mqtt::packet::v5_0::Pubrec,
 ) -> RoutedResult<'static> {
@@ -1399,7 +1400,7 @@ fn routed_result_from_v5_pubrec(
 }
 
 fn routed_result_from_v5_pubrel(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet: &mqtt::packet::v5_0::Pubrel,
 ) -> RoutedResult<'static> {
@@ -1431,7 +1432,7 @@ fn routed_result_from_v5_pubrel(
 }
 
 fn routed_result_from_v5_pubcomp(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet: &mqtt::packet::v5_0::Pubcomp,
 ) -> RoutedResult<'static> {
@@ -1463,7 +1464,7 @@ fn routed_result_from_v5_pubcomp(
 }
 
 fn routed_result_from_v5_suback(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet: &mqtt::packet::v5_0::Suback,
 ) -> RoutedResult<'static> {
@@ -1500,7 +1501,7 @@ fn routed_result_from_v5_suback(
 }
 
 fn routed_result_from_v5_unsuback(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet: &mqtt::packet::v5_0::Unsuback,
 ) -> RoutedResult<'static> {
@@ -1633,7 +1634,7 @@ fn mqtt_result_meta(
 }
 
 pub(crate) fn routed_result_from_packet_id(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet_id: u16,
     state: DeliveryState,
@@ -1651,7 +1652,7 @@ pub(crate) fn routed_result_from_packet_id(
 }
 
 fn routed_result_from_packet_id_with_transport(
-    pending_command_ids: &mut HashMap<u16, String>,
+    pending_command_ids: &mut Map<u16, String>,
     device_id: &str,
     packet_id: u16,
     state: DeliveryState,

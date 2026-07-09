@@ -1,6 +1,7 @@
 use alloc::{
     borrow::Cow,
     string::{String, ToString},
+    vec,
 };
 
 use ferredge_core::prelude::{
@@ -144,8 +145,8 @@ pub fn command_to_messaging(
                         .as_ref()
                         .and_then(|mqtt| mqtt.correlation_data.clone()),
                     topic_alias: mqtt.as_ref().and_then(|mqtt| mqtt.topic_alias),
-                    subscription_identifiers: alloc::vec::Vec::new(),
-                    reason_codes: alloc::vec::Vec::new(),
+                    subscription_identifiers: vec::Vec::new(),
+                    reason_codes: vec::Vec::new(),
                     reason_string: None,
                     durable_name: None,
                     shared_group: None,
@@ -199,7 +200,7 @@ pub fn command_to_messaging(
                         .and_then(|mqtt| mqtt.subscription_identifier)
                         .into_iter()
                         .collect(),
-                    reason_codes: alloc::vec::Vec::new(),
+                    reason_codes: vec::Vec::new(),
                     reason_string: None,
                     durable_name: durable_name.map(Cow::Owned),
                     shared_group: shared_group.map(Cow::Owned),

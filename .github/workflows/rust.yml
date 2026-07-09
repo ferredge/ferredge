@@ -53,56 +53,70 @@ jobs:
           mosquitto-clients \
           socat
 
-        arch="$(uname -m)"
-        case "$arch" in
-          x86_64|amd64)
-            modbusdriver_dir="x86_64-linux-gnu"
-            ;;
-          aarch64|arm64)
-            modbusdriver_dir="aarch64-linux-gnu"
-            ;;
-          armv7l)
-            modbusdriver_dir="arm-linux-gnueabihf"
-            ;;
-          armv6l)
-            modbusdriver_dir="armv6-rpi-linux-gnueabihf"
-            ;;
-          i686|i386)
-            modbusdriver_dir="i686-linux-gnu"
-            ;;
-          *)
-            echo "unsupported arch for diagslave: $arch" >&2
-            exit 1
-            ;;
-        esac
-
-        mkdir -p .github/tools/modbusdriver
-        if [ ! -x ".github/tools/modbusdriver/diagslave" ]; then
-          extract_dir="$(mktemp -d)"
-          curl -fsSL "https://www.modbusdriver.com/downloads/diagslave.tgz" -o /tmp/diagslave.tgz
-          tar -xzf /tmp/diagslave.tgz -C "${extract_dir}"
-          diagslave_path="$(find "${extract_dir}" -path "*/${modbusdriver_dir}/diagslave" -type f | head -n 1)"
-          if [ -z "${diagslave_path}" ]; then
-            echo "diagslave binary not found in archive" >&2
-            exit 1
-          fi
-          install -m 0755 "${diagslave_path}" .github/tools/modbusdriver/diagslave
-        fi
-
-        if [ ! -x ".github/tools/modbusdriver/modpoll" ]; then
-          extract_dir="$(mktemp -d)"
-          curl -fsSL "https://www.modbusdriver.com/downloads/modpoll.tgz" -o /tmp/modpoll.tgz
-          tar -xzf /tmp/modpoll.tgz -C "${extract_dir}"
-          modpoll_path="$(find "${extract_dir}" -path "*/${modbusdriver_dir}/modpoll" -type f | head -n 1)"
-          if [ -z "${modpoll_path}" ]; then
-            echo "modpoll binary not found in archive" >&2
-            exit 1
-          fi
-          install -m 0755 "${modpoll_path}" .github/tools/modbusdriver/modpoll
-        fi
-
-        sudo install -m 0755 .github/tools/modbusdriver/diagslave /usr/local/bin/diagslave
-        sudo install -m 0755 .github/tools/modbusdriver/modpoll /usr/local/bin/modpoll
+        ./scripts/install-modbusdriver.sh
 
     - name: Run integration tests
       run: cargo test --workspace --verbose --features integration
+
+  embedded:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      with:
+        toolchain: stable
+        override: true
+        target: thumbv7em-none-eabihf,thumbv7m-none-eabi
+
+    - uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+      with:
+        tool: cargo-nextest,just
+
+    - name: Cache modbusdriver tools
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.2.3
+      with:
+        path: .github/tools/modbusdriver
+        key: modbusdriver-${{ env.MODBUSDRIVER_CACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Install QEMU and harness services
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          qemu-system-arm \
+          socat \
+          mosquitto \
+          curl
+
+    # The embassy stack builds ferredge-core with the `local` feature, which is mutually
+    # exclusive with the tokio/async-std adapters, so these run per-package rather than
+    # as part of a workspace-wide feature build.
+    - name: Test ferredge-core with relaxed (local) bounds
+      run: cargo nextest run -p ferredge-core --features runtime,net,serial,sync,local
+
+    - name: Test embassy adapters on the host
+      run: cargo nextest run -p ferredge-runtime-embassy --features runtime,net,dns,serial,std
+
+    - name: Check embassy adapters for a no_std target
+      run: cargo check -p ferredge-runtime-embassy --features runtime,net,dns,serial --target thumbv7em-none-eabihf
+
+    - name: Check protocol crates on the embassy stack (host and no_std)
+      run: |
+        for crate in ferredge-proto-http ferredge-proto-modbus ferredge-proto-mqtt; do
+          cargo check -p "$crate" --no-default-features --features embassy-runtime
+          cargo check -p "$crate" --no-default-features --features embassy-runtime --target thumbv7em-none-eabihf
+        done
+
+    - name: Start the QEMU test harness (diagslave, mosquitto, http)
+      run: just up
+
+    - name: Run embassy adapters on bare metal under QEMU (in-memory I/O)
+      run: just run
+
+    - name: Run embassy adapters against the live harness services
+      timeout-minutes: 5
+      run: just test
+
+    - name: Stop the QEMU test harness
+      run: just down

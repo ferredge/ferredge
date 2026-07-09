@@ -1,6 +1,6 @@
 [package]
 name = "ferredge-runtime-embassy"
-description = "Embassy runtime adapter scaffold for ferredge core traits"
+description = "Embassy runtime, network, and serial adapters for ferredge core traits"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,9 +9,46 @@ rust-version.workspace = true
 
 [features]
 default = []
-runtime = ["ferredge-core/runtime"]
-net = ["ferredge-core/net"]
-serial = ["ferredge-core/serial"]
+runtime = [
+    "ferredge-core/local",
+    "ferredge-core/runtime",
+    "dep:embassy-executor",
+    "dep:embassy-futures",
+    "dep:embassy-sync",
+    "dep:embassy-time",
+]
+net = [
+    "ferredge-core/local",
+    "ferredge-core/net",
+    "dep:embassy-net",
+    "dep:embassy-time",
+]
+dns = ["net", "embassy-net/dns"]
+serial = [
+    "ferredge-core/local",
+    "ferredge-core/serial",
+    "ferredge-core/sync",
+    "dep:embassy-sync",
+    "dep:embedded-io-async",
+    "dep:dynosaur_derive",
+]
+std = ["ferredge-core/std", "embassy-time?/std"]
 
 [dependencies]
 ferredge-core = { workspace = true }
+dynosaur_derive = { workspace = true, optional = true }
+embassy-executor = { workspace = true, optional = true }
+embassy-futures = { workspace = true, optional = true }
+embassy-net = { workspace = true, optional = true }
+embassy-sync = { workspace = true, optional = true }
+embassy-time = { workspace = true, optional = true }
+embedded-io-async = { workspace = true, optional = true }
+
+[dev-dependencies]
+embassy-executor = { workspace = true, features = ["platform-std", "executor-thread"] }
+embassy-net-driver = { workspace = true }
+embassy-sync = { workspace = true }
+embassy-time = { workspace = true, features = ["std"] }
+critical-section = { workspace = true, features = ["std"] }
+heapless = { workspace = true }
+static_cell = { workspace = true }

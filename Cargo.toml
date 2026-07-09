@@ -34,15 +34,15 @@ ferredge-runtime-embassy = { path = "crates/ferredge-runtime-embassy" }
 ferredge-test-support = { path = "crates/ferredge-test-support" }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Error handling
-thiserror = "2"
+thiserror = { version = "2", default-features = false }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -55,4 +55,21 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "
 async-std = { version = "1", features = ["attributes"] }
 tokio-serial = "5.4.5"
 serialport = "4.8.1"
-rmodbus = "0.12.2"
+rmodbus = { version = "0.12.2", default-features = false, features = ["alloc"] }
+dynosaur_derive = "0.3"
+embassy-executor = "0.10"
+embassy-futures = "0.1"
+embassy-net = { version = "0.9", default-features = false, features = [
+    "tcp",
+    "udp",
+    "proto-ipv4",
+    "proto-ipv6",
+    "medium-ethernet",
+] }
+embassy-net-driver = "0.2"
+embassy-sync = "0.8"
+embassy-time = "0.5"
+embedded-io-async = "0.7"
+critical-section = "1"
+static_cell = "2"
+heapless = "0.9"

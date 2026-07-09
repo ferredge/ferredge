@@ -1,6 +1,8 @@
+use alloc::string::String;
 use core::future::Future;
 
 use crate::device::SerialPortConfig;
+use crate::maybe::{MaybeSend, MaybeSync};
 
 /// Error returned by abstract async serial operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -23,18 +25,22 @@ pub enum SerialError {
 }
 
 /// Async byte-stream serial port used by protocol adapters such as Modbus RTU or ASCII.
-pub trait AsyncSerialPort: Send + Sync + 'static {
+pub trait AsyncSerialPort: MaybeSend + MaybeSync + 'static {
     /// Reads bytes into the provided buffer and returns the number of bytes read.
-    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, SerialError>> + Send;
+    fn read(
+        &mut self,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<usize, SerialError>> + MaybeSend;
 
     /// Writes bytes from the provided buffer and returns the number of bytes written.
-    fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize, SerialError>> + Send;
+    fn write(&mut self, buf: &[u8])
+    -> impl Future<Output = Result<usize, SerialError>> + MaybeSend;
 
     /// Flushes buffered outbound bytes when the transport supports it.
-    fn flush(&mut self) -> impl Future<Output = Result<(), SerialError>> + Send;
+    fn flush(&mut self) -> impl Future<Output = Result<(), SerialError>> + MaybeSend;
 
     /// Closes the port gracefully when the transport supports it.
-    fn close(&mut self) -> impl Future<Output = Result<(), SerialError>> + Send;
+    fn close(&mut self) -> impl Future<Output = Result<(), SerialError>> + MaybeSend;
 }
 
 /// Writes the full buffer to one async serial port, retrying short writes until completion.
@@ -54,7 +60,7 @@ where
 }
 
 /// Async serial transport factory shared by protocol adapters.
-pub trait AsyncSerial: Clone + Send + Sync + 'static {
+pub trait AsyncSerial: Clone + MaybeSend + MaybeSync + 'static {
     /// Open serial port type returned by `open`.
     type Port: AsyncSerialPort;
 
@@ -62,14 +68,14 @@ pub trait AsyncSerial: Clone + Send + Sync + 'static {
     fn open(
         &self,
         config: &SerialPortConfig,
-    ) -> impl Future<Output = Result<Self::Port, SerialError>> + Send;
+    ) -> impl Future<Output = Result<Self::Port, SerialError>> + MaybeSend;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     extern crate alloc;
-    use alloc::{string::ToString, vec, vec::Vec};
+    use alloc::{boxed::Box, string::ToString, vec, vec::Vec};
     use core::{
         pin::Pin,
         task::{Context, Poll, Waker},

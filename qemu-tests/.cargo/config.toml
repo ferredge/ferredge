@@ -1,0 +1,6 @@
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+# Wires UART0/UART1 to the `just up` harness ptys when present, else stubs them.
+runner = "./run-qemu.sh"
