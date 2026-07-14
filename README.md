@@ -12,6 +12,7 @@ This project is planned to be a device and data agregator for edge devices and a
 - mqtt
 - http
 - modbus
+- zenoh
 - coap
 - bacnet
 - opcua
