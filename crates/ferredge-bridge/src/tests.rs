@@ -1,4 +1,4 @@
-use alloc::{string::ToString, vec, vec::Vec};
+use alloc::{string::ToString, vec};
 
 use ferredge_core::prelude::{
     Address, BrokerAddress, Command, CommandResult, Correlation, DeliveryGuarantee, DeviceProtocol,
@@ -6,28 +6,24 @@ use ferredge_core::prelude::{
 };
 
 use crate::{
-    BridgeFault, BridgeFaultCategory, BridgeMessage, BridgePayload, BridgePlannerError,
-    BridgeResult, BridgeRoute, BridgeTransportMeta, planner,
+    BridgeFault, BridgeFaultCategory, BridgeMessage, BridgeOutcome, BridgePlannerError,
+    BridgeRoute, BridgeTransportMeta, planner,
 };
 
 #[test]
 fn payload_roundtrip_preserves_binary_and_structure() {
-    let payload = PayloadValue::Map(
-        vec![
-            (
-                "text".to_string().into(),
-                PayloadValue::String("hello".to_string().into()),
-            ),
-            (
-                "bytes".to_string().into(),
-                PayloadValue::Bytes(vec![1, 2, 3].into()),
-            ),
-        ]
-        .into(),
-    );
+    let payload = PayloadValue::Map(vec![
+        (
+            "text".to_string().into(),
+            PayloadValue::String("hello".to_string().into()),
+        ),
+        (
+            "bytes".to_string().into(),
+            PayloadValue::Bytes(vec![1, 2, 3].into()),
+        ),
+    ]);
 
-    let bridge = BridgePayload::from(payload.clone());
-    let roundtrip = PayloadValue::from(bridge);
+    let roundtrip = payload.as_borrowed().into_owned();
 
     assert_eq!(roundtrip, payload);
 }
@@ -67,7 +63,7 @@ fn request_response_planner_preserves_correlation_and_resource() {
     );
     assert_eq!(
         message.payload,
-        Some(BridgePayload::Binary(vec![9, 1].into()))
+        Some(PayloadValue::Bytes(vec![9, 1].into()))
     );
 }
 
@@ -85,7 +81,7 @@ fn messaging_planner_preserves_topic_and_correlation_id() {
             payload: PayloadValue::String("hello".to_string().into()),
             options: ferredge_core::prelude::BrokerMessageOptions {
                 delivery: Some(DeliveryGuarantee::AtLeastOnce),
-                headers: Vec::new(),
+                headers: Default::default(),
                 reply_to: Some("topic/reply".to_string()),
                 correlation_id: Some("corr-1".to_string()),
                 protocol: None,
@@ -224,40 +220,37 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
         panic!("expected bridge result");
     };
     assert!(matches!(
-        progress,
-        BridgeResult::Progress {
-            command_id,
+        progress.outcome,
+        BridgeOutcome::Progress {
             state: ferredge_core::prelude::DeliveryState::Accepted,
-            correlation: Some(_),
-            ..
-        } if command_id == "cmd-progress"
+        }
     ));
+    assert_eq!(progress.meta.command_id, "cmd-progress");
+    assert!(progress.meta.correlation.is_some());
 
     let BridgeMessage::Result(success) = planner::routed_result_to_bridge(success) else {
         panic!("expected bridge result");
     };
+    assert_eq!(success.meta.command_id, "cmd-success");
     assert!(matches!(
-        success,
-        BridgeResult::Success {
-            command_id,
-            payload: Some(BridgePayload::Binary(bytes)),
-            ..
-        } if command_id == "cmd-success" && bytes == vec![4, 2]
+        success.outcome,
+        BridgeOutcome::Success {
+            payload: Some(PayloadValue::Bytes(bytes)),
+        } if bytes == vec![4, 2]
     ));
 
     let BridgeMessage::Result(rejected) = planner::routed_result_to_bridge(rejected) else {
         panic!("expected bridge result");
     };
-    match rejected {
-        BridgeResult::Failure {
-            command_id,
+    assert_eq!(rejected.meta.command_id, "cmd-rejected");
+    assert!(rejected.meta.correlation.is_some());
+    match rejected.outcome {
+        BridgeOutcome::Failure {
             state,
             error,
             fault,
-            correlation,
             ..
         } => {
-            assert_eq!(command_id, "cmd-rejected");
             assert_eq!(state, ferredge_core::prelude::DeliveryState::Rejected);
             assert_eq!(error.as_deref(), Some("denied"));
             assert_eq!(fault.category, BridgeFaultCategory::Rejected);
@@ -267,30 +260,28 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
                 fault.source.and_then(|source| source.protocol),
                 Some(DeviceProtocol::MQTT)
             );
-            assert!(correlation.is_some());
         }
-        other => panic!("expected failure bridge result, got {other:?}"),
+        other => panic!("expected failure bridge outcome, got {other:?}"),
     }
 
     let BridgeMessage::Result(timed_out) = planner::routed_result_to_bridge(timed_out) else {
         panic!("expected bridge result");
     };
-    match timed_out {
-        BridgeResult::Failure {
-            command_id,
+    assert_eq!(timed_out.meta.command_id, "cmd-timeout");
+    match timed_out.outcome {
+        BridgeOutcome::Failure {
             state,
             error,
             fault,
             ..
         } => {
-            assert_eq!(command_id, "cmd-timeout");
             assert_eq!(state, ferredge_core::prelude::DeliveryState::TimedOut);
             assert_eq!(error.as_deref(), Some("timed out"));
             assert_eq!(fault.category, BridgeFaultCategory::Timeout);
             assert_eq!(fault.detail.as_deref(), Some("timed out"));
             assert!(fault.retryable);
         }
-        other => panic!("expected failure bridge result, got {other:?}"),
+        other => panic!("expected failure bridge outcome, got {other:?}"),
     }
 }
 

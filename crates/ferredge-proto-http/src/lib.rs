@@ -10,9 +10,9 @@ use alloc::{
 };
 
 use ferredge_bridge::{
-    BridgeMessage, BridgeOp, BridgeOutbound, BridgePayload, BridgePlannerError, BridgeRoute,
-    BridgeTransportMeta, NativeOutbound, ProtocolDecoder, ProtocolEncoder, ProtocolPlanner,
-    RequestResponseAction, planner,
+    BridgeMessage, BridgeOp, BridgeOutbound, BridgePlannerError, BridgeRoute, BridgeTransportMeta,
+    NativeOutbound, ProtocolDecoder, ProtocolEncoder, ProtocolPlanner, RequestResponseAction,
+    planner,
 };
 use ferredge_core::prelude::*;
 
@@ -137,7 +137,7 @@ pub struct HttpCommandPlanner;
 pub struct HttpNativePlan<'a> {
     resource: Cow<'a, str>,
     action: RequestResponseAction,
-    payload: Option<BridgePayload<'a>>,
+    payload: Option<PayloadValue<'a>>,
     method: Option<Cow<'a, str>>,
     path: Option<Cow<'a, str>>,
     content_type: Option<Cow<'a, str>>,
@@ -149,7 +149,7 @@ impl HttpNativePlan<'_> {
         HttpNativePlan {
             resource: Cow::Owned(self.resource.into_owned()),
             action: self.action,
-            payload: self.payload.map(BridgePayload::into_owned),
+            payload: self.payload.map(PayloadValue::into_owned),
             method: self.method.map(|value| Cow::Owned(value.into_owned())),
             path: self.path.map(|value| Cow::Owned(value.into_owned())),
             content_type: self
@@ -257,7 +257,7 @@ impl ProtocolPlanner<NativeOutbound, HttpNativePlan<'static>> for HttpCommandPla
             } => (
                 resource.as_str(),
                 RequestResponseAction::Write,
-                Some(BridgePayload::from(payload.as_borrowed())),
+                Some(payload.as_borrowed()),
                 options,
             ),
             Intent::Invoke {
@@ -267,8 +267,7 @@ impl ProtocolPlanner<NativeOutbound, HttpNativePlan<'static>> for HttpCommandPla
             } => (
                 operation.as_str(),
                 RequestResponseAction::Invoke,
-                args.as_ref()
-                    .map(|payload| BridgePayload::from(payload.as_borrowed())),
+                args.as_ref().map(PayloadValue::as_borrowed),
                 options,
             ),
             _ => return Err(HttpCommandConversionError::UnsupportedIntent),
@@ -284,7 +283,12 @@ impl ProtocolPlanner<NativeOutbound, HttpNativePlan<'static>> for HttpCommandPla
             headers: options
                 .headers
                 .iter()
-                .map(|(key, value)| (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str())))
+                .map(|header| {
+                    (
+                        Cow::Borrowed(header.key.as_ref()),
+                        Cow::Borrowed(header.value.as_ref()),
+                    )
+                })
                 .collect(),
         }
         .into_owned())
@@ -331,12 +335,12 @@ impl ProtocolEncoder<NativeOutbound, HttpNativePlan<'static>, HttpRequest>
             RequestResponseAction::Read | RequestResponseAction::Invoke => planned
                 .payload
                 .as_ref()
-                .map(http_body_from_bridge_payload)
+                .map(http_body_from_payload)
                 .transpose()?,
             RequestResponseAction::Write => planned
                 .payload
                 .as_ref()
-                .map(http_body_from_bridge_payload)
+                .map(http_body_from_payload)
                 .transpose()?,
         };
         let mut method = resource_def.resource_attributes.method.clone();
@@ -411,12 +415,17 @@ where
             method: options.method.as_deref().map(Cow::Borrowed),
             path: options.path.as_deref().map(Cow::Borrowed),
             status_code: Some(self_.response.status_code),
-            headers: self_
-                .response
-                .headers
-                .iter()
-                .map(|(key, value)| (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str())))
-                .collect(),
+            headers: Headers(
+                self_
+                    .response
+                    .headers
+                    .iter()
+                    .map(|(key, value)| Header {
+                        key: Cow::Borrowed(key.as_str()),
+                        value: Cow::Borrowed(value.as_str()),
+                    })
+                    .collect(),
+            ),
         });
 
         Ok(RoutedMessage::Result(RoutedResult {
@@ -500,7 +509,7 @@ impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
                 .as_ref()
                 .map(|headers| {
                     headers
-                        .iter_http_headers()
+                        .iter()
                         .map(|header| (header.key.clone(), header.value.clone()))
                         .collect()
                 })
@@ -509,13 +518,13 @@ impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
     }
 }
 
-fn http_body_from_bridge_payload(
-    payload: &BridgePayload<'_>,
+fn http_body_from_payload(
+    payload: &PayloadValue<'_>,
 ) -> Result<Vec<u8>, HttpCommandConversionError> {
     match payload {
-        BridgePayload::Binary(bytes) => Ok(bytes.to_vec()),
-        BridgePayload::Text(value) => Ok(value.as_bytes().to_vec()),
-        BridgePayload::Empty => Ok(Vec::new()),
+        PayloadValue::Bytes(bytes) => Ok(bytes.to_vec()),
+        PayloadValue::String(value) => Ok(value.as_bytes().to_vec()),
+        PayloadValue::Null => Ok(Vec::new()),
         _ => Err(HttpCommandConversionError::InvalidPayload(
             "HTTP bodies currently support only string or bytes payloads".to_string(),
         )),
@@ -990,15 +999,12 @@ mod tests {
                         assert_eq!(meta.status_code, Some(200));
                         assert_eq!(
                             meta.headers,
-                            vec![
-                                (
-                                    "Content-Type".to_string().into(),
-                                    "text/plain".to_string().into()
-                                ),
-                                ("X-Test".to_string().into(), "ok".to_string().into()),
-                                ("Content-Length".to_string().into(), "2".to_string().into()),
-                                ("Connection".to_string().into(), "close".to_string().into()),
-                            ]
+                            Headers::from(vec![
+                                ("Content-Type".to_string(), "text/plain".to_string()),
+                                ("X-Test".to_string(), "ok".to_string()),
+                                ("Content-Length".to_string(), "2".to_string()),
+                                ("Connection".to_string(), "close".to_string()),
+                            ])
                         );
                     }
                     other => panic!("expected http transport, got {other:?}"),

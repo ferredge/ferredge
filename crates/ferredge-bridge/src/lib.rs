@@ -10,7 +10,6 @@ mod fault;
 mod message;
 mod meta;
 mod op;
-mod payload;
 pub mod planner;
 mod traits;
 
@@ -22,17 +21,17 @@ pub mod prelude {
     pub use crate::message::*;
     pub use crate::meta::*;
     pub use crate::op::*;
-    pub use crate::payload::*;
     pub use crate::traits::*;
+    pub use ferredge_core::prelude::{Correlation, Header, Headers, IntoOwned, PayloadValue};
 }
 
 pub use capability::*;
 pub use error::*;
 pub use fault::*;
+pub use ferredge_core::prelude::{Correlation, Header, Headers, IntoOwned, PayloadValue};
 pub use message::*;
 pub use meta::*;
 pub use op::*;
-pub use payload::*;
 pub use traits::*;
 
 #[cfg(test)]

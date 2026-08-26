@@ -1,10 +1,6 @@
-use alloc::{
-    borrow::Cow,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{borrow::Cow, vec::Vec};
 
-use ferredge_core::prelude::{Address, MqttRetainHandling};
+use ferredge_core::prelude::{IntoOwned, MqttRetainHandling};
 use serde::{Deserialize, Serialize};
 
 /// Typed addressed-access metadata used by addressed field/register planners and codecs.
@@ -42,179 +38,6 @@ pub enum BridgeRoute<'a> {
         /// Optional protocol-scoped node identifier such as a Modbus unit id.
         node_id: Option<u32>,
     },
-}
-
-/// Arbitrary protocol key/value metadata preserved by the bridge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BridgeHeader<'a> {
-    /// Header or property name.
-    pub key: Cow<'a, str>,
-    /// Header or property value.
-    pub value: Cow<'a, str>,
-}
-
-impl From<(String, String)> for BridgeHeader<'static> {
-    fn from((key, value): (String, String)) -> Self {
-        Self {
-            key: Cow::Owned(key),
-            value: Cow::Owned(value),
-        }
-    }
-}
-
-impl From<BridgeHeader<'static>> for (String, String) {
-    fn from(value: BridgeHeader<'static>) -> Self {
-        (value.key.into_owned(), value.value.into_owned())
-    }
-}
-
-/// Protocol-tagged arbitrary key/value metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BridgeHeaders<'a> {
-    /// Arbitrary HTTP headers preserved in arrival/order form.
-    Http(Vec<BridgeHeader<'a>>),
-    /// Arbitrary MQTT properties preserved in arrival/order form.
-    Mqtt(Vec<BridgeHeader<'a>>),
-}
-
-impl<'a> BridgeHeaders<'a> {
-    /// Builds HTTP headers from already-materialized `Cow` pairs.
-    pub fn http_cow(headers: Vec<(Cow<'a, str>, Cow<'a, str>)>) -> BridgeHeaders<'a> {
-        BridgeHeaders::Http(
-            headers
-                .into_iter()
-                .map(|(key, value)| BridgeHeader { key, value })
-                .collect(),
-        )
-    }
-
-    /// Builds MQTT properties from already-materialized `Cow` pairs.
-    pub fn mqtt_cow(headers: Vec<(Cow<'a, str>, Cow<'a, str>)>) -> BridgeHeaders<'a> {
-        BridgeHeaders::Mqtt(
-            headers
-                .into_iter()
-                .map(|(key, value)| BridgeHeader { key, value })
-                .collect(),
-        )
-    }
-
-    /// Builds owned HTTP headers from convenience `(String, String)` pairs.
-    pub fn http(headers: Vec<(String, String)>) -> BridgeHeaders<'static> {
-        BridgeHeaders::Http(headers.into_iter().map(BridgeHeader::from).collect())
-    }
-
-    /// Builds owned MQTT properties from convenience `(String, String)` pairs.
-    pub fn mqtt(headers: Vec<(String, String)>) -> BridgeHeaders<'static> {
-        BridgeHeaders::Mqtt(headers.into_iter().map(BridgeHeader::from).collect())
-    }
-
-    /// Builds borrowed HTTP headers for zero-copy bridge hot paths.
-    pub fn http_borrowed<I, K, V>(headers: I) -> BridgeHeaders<'a>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<Cow<'a, str>>,
-        V: Into<Cow<'a, str>>,
-    {
-        BridgeHeaders::Http(
-            headers
-                .into_iter()
-                .map(|(key, value)| BridgeHeader {
-                    key: key.into(),
-                    value: value.into(),
-                })
-                .collect(),
-        )
-    }
-
-    /// Builds borrowed MQTT properties for zero-copy bridge hot paths.
-    pub fn mqtt_borrowed<I, K, V>(headers: I) -> BridgeHeaders<'a>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<Cow<'a, str>>,
-        V: Into<Cow<'a, str>>,
-    {
-        BridgeHeaders::Mqtt(
-            headers
-                .into_iter()
-                .map(|(key, value)| BridgeHeader {
-                    key: key.into(),
-                    value: value.into(),
-                })
-                .collect(),
-        )
-    }
-
-    /// Iterates HTTP headers without cloning.
-    pub fn iter_http_headers(&self) -> impl Iterator<Item = &BridgeHeader<'a>> {
-        match self {
-            BridgeHeaders::Http(headers) => headers.iter(),
-            BridgeHeaders::Mqtt(_) => [].iter(),
-        }
-    }
-
-    /// Iterates MQTT properties without cloning.
-    pub fn iter_mqtt_headers(&self) -> impl Iterator<Item = &BridgeHeader<'a>> {
-        match self {
-            BridgeHeaders::Http(_) => [].iter(),
-            BridgeHeaders::Mqtt(headers) => headers.iter(),
-        }
-    }
-
-    /// Returns the underlying HTTP header slice when this is `Http`.
-    pub fn as_http(&self) -> Option<&[BridgeHeader<'a>]> {
-        match self {
-            BridgeHeaders::Http(headers) => Some(headers.as_slice()),
-            BridgeHeaders::Mqtt(_) => None,
-        }
-    }
-
-    /// Returns the underlying MQTT property slice when this is `Mqtt`.
-    pub fn as_mqtt(&self) -> Option<&[BridgeHeader<'a>]> {
-        match self {
-            BridgeHeaders::Http(_) => None,
-            BridgeHeaders::Mqtt(headers) => Some(headers.as_slice()),
-        }
-    }
-
-    /// Materializes owned `(String, String)` pairs for convenience boundaries.
-    pub fn to_owned_pairs(&self) -> Vec<(String, String)> {
-        match self {
-            BridgeHeaders::Http(headers) | BridgeHeaders::Mqtt(headers) => headers
-                .iter()
-                .map(|header| (header.key.to_string(), header.value.to_string()))
-                .collect(),
-        }
-    }
-
-    /// Materializes owned bridge headers for long-lived outbound planning.
-    pub fn into_owned(self) -> BridgeHeaders<'static> {
-        match self {
-            BridgeHeaders::Http(headers) => BridgeHeaders::Http(
-                headers
-                    .into_iter()
-                    .map(|header| BridgeHeader {
-                        key: Cow::Owned(header.key.into_owned()),
-                        value: Cow::Owned(header.value.into_owned()),
-                    })
-                    .collect(),
-            ),
-            BridgeHeaders::Mqtt(headers) => BridgeHeaders::Mqtt(
-                headers
-                    .into_iter()
-                    .map(|header| BridgeHeader {
-                        key: Cow::Owned(header.key.into_owned()),
-                        value: Cow::Owned(header.value.into_owned()),
-                    })
-                    .collect(),
-            ),
-        }
-    }
-}
-
-impl From<Vec<(String, String)>> for BridgeHeaders<'static> {
-    fn from(value: Vec<(String, String)>) -> Self {
-        BridgeHeaders::http(value)
-    }
 }
 
 /// Typed HTTP metadata preserved separately from arbitrary headers.
@@ -282,31 +105,30 @@ pub enum BridgeTransportMeta<'a> {
     Mqtt(MqttBridgeMeta<'a>),
 }
 
-/// Borrowable correlation metadata exposed on bridge commands/results.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BridgeCorrelation<'a> {
-    /// Correlation/request identifier.
-    pub request_id: Cow<'a, str>,
-    /// Optional logical reply destination.
-    pub reply_to: Option<Address<'a>>,
+impl BridgeRoute<'_> {
+    /// Materializes an owned bridge route for long-lived boundaries.
+    pub fn into_owned(self) -> BridgeRoute<'static> {
+        IntoOwned::into_owned(self)
+    }
 }
 
-impl BridgeRoute<'_> {
-    pub fn into_owned(self) -> BridgeRoute<'static> {
+impl IntoOwned for BridgeRoute<'_> {
+    type Owned = BridgeRoute<'static>;
+    fn into_owned(self) -> Self::Owned {
         match self {
             BridgeRoute::RequestResponse { resource, path } => BridgeRoute::RequestResponse {
-                resource: Cow::Owned(resource.into_owned()),
-                path: path.map(|value| Cow::Owned(value.into_owned())),
+                resource: IntoOwned::into_owned(resource),
+                path: path.into_owned(),
             },
             BridgeRoute::Messaging { topic } => BridgeRoute::Messaging {
-                topic: Cow::Owned(topic.into_owned()),
+                topic: IntoOwned::into_owned(topic),
             },
             BridgeRoute::AddressedAccess {
                 resource,
                 access,
                 node_id,
             } => BridgeRoute::AddressedAccess {
-                resource: Cow::Owned(resource.into_owned()),
+                resource: IntoOwned::into_owned(resource),
                 access,
                 node_id,
             },
@@ -315,55 +137,51 @@ impl BridgeRoute<'_> {
 }
 
 impl HttpBridgeMeta<'_> {
+    /// Materializes owned HTTP bridge metadata for long-lived boundaries.
     pub fn into_owned(self) -> HttpBridgeMeta<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for HttpBridgeMeta<'_> {
+    type Owned = HttpBridgeMeta<'static>;
+    fn into_owned(self) -> Self::Owned {
         HttpBridgeMeta {
-            method: self.method.map(|value| Cow::Owned(value.into_owned())),
-            path: self.path.map(|value| Cow::Owned(value.into_owned())),
+            method: self.method.into_owned(),
+            path: self.path.into_owned(),
             status_code: self.status_code,
-            content_type: self
-                .content_type
-                .map(|value| Cow::Owned(value.into_owned())),
+            content_type: self.content_type.into_owned(),
         }
     }
 }
 
 impl MqttBridgeMeta<'_> {
+    /// Materializes owned MQTT bridge metadata for long-lived boundaries.
     pub fn into_owned(self) -> MqttBridgeMeta<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for MqttBridgeMeta<'_> {
+    type Owned = MqttBridgeMeta<'static>;
+    fn into_owned(self) -> Self::Owned {
         MqttBridgeMeta {
             qos: self.qos,
             retain: self.retain,
             duplicate: self.duplicate,
             packet_id: self.packet_id,
-            content_type: self
-                .content_type
-                .map(|value| Cow::Owned(value.into_owned())),
-            payload_format: self
-                .payload_format
-                .map(|value| Cow::Owned(value.into_owned())),
+            content_type: self.content_type.into_owned(),
+            payload_format: self.payload_format.into_owned(),
             message_expiry_interval_secs: self.message_expiry_interval_secs,
-            response_topic: self
-                .response_topic
-                .map(|value| Cow::Owned(value.into_owned())),
-            correlation_data: self
-                .correlation_data
-                .map(|value| Cow::Owned(value.into_owned())),
+            response_topic: self.response_topic.into_owned(),
+            correlation_data: self.correlation_data.into_owned(),
             correlation_data_bytes: self.correlation_data_bytes,
             topic_alias: self.topic_alias,
             subscription_identifiers: self.subscription_identifiers,
-            reason_codes: self
-                .reason_codes
-                .into_iter()
-                .map(|value| Cow::Owned(value.into_owned()))
-                .collect(),
-            reason_string: self
-                .reason_string
-                .map(|value| Cow::Owned(value.into_owned())),
-            durable_name: self
-                .durable_name
-                .map(|value| Cow::Owned(value.into_owned())),
-            shared_group: self
-                .shared_group
-                .map(|value| Cow::Owned(value.into_owned())),
+            reason_codes: self.reason_codes.into_owned(),
+            reason_string: self.reason_string.into_owned(),
+            durable_name: self.durable_name.into_owned(),
+            shared_group: self.shared_group.into_owned(),
             no_local: self.no_local,
             retain_as_published: self.retain_as_published,
             retain_handling: self.retain_handling,
@@ -372,19 +190,18 @@ impl MqttBridgeMeta<'_> {
 }
 
 impl BridgeTransportMeta<'_> {
+    /// Materializes owned bridge transport metadata for long-lived boundaries.
     pub fn into_owned(self) -> BridgeTransportMeta<'static> {
-        match self {
-            BridgeTransportMeta::Http(meta) => BridgeTransportMeta::Http(meta.into_owned()),
-            BridgeTransportMeta::Mqtt(meta) => BridgeTransportMeta::Mqtt(meta.into_owned()),
-        }
+        IntoOwned::into_owned(self)
     }
 }
 
-impl BridgeCorrelation<'_> {
-    pub fn into_owned(self) -> BridgeCorrelation<'static> {
-        BridgeCorrelation {
-            request_id: Cow::Owned(self.request_id.into_owned()),
-            reply_to: self.reply_to.map(Address::into_owned),
+impl IntoOwned for BridgeTransportMeta<'_> {
+    type Owned = BridgeTransportMeta<'static>;
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            BridgeTransportMeta::Http(meta) => BridgeTransportMeta::Http(meta.into_owned()),
+            BridgeTransportMeta::Mqtt(meta) => BridgeTransportMeta::Mqtt(meta.into_owned()),
         }
     }
 }

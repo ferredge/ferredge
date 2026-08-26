@@ -471,14 +471,11 @@ fn bits_response_still_decodes_to_same_values() {
 
     assert_eq!(
         payload,
-        PayloadValue::List(
-            vec![
-                PayloadValue::Bool(false),
-                PayloadValue::Bool(false),
-                PayloadValue::Bool(false),
-            ]
-            .into(),
-        )
+        PayloadValue::List(vec![
+            PayloadValue::Bool(false),
+            PayloadValue::Bool(false),
+            PayloadValue::Bool(false),
+        ])
     );
 }
 
@@ -540,14 +537,11 @@ fn build_write_multiple_coils_request() {
     let request = driver
         .native_request(command_write(
             "coil_bits",
-            PayloadValue::List(
-                vec![
-                    PayloadValue::Bool(true),
-                    PayloadValue::Bool(false),
-                    PayloadValue::Bool(true),
-                ]
-                .into(),
-            ),
+            PayloadValue::List(vec![
+                PayloadValue::Bool(true),
+                PayloadValue::Bool(false),
+                PayloadValue::Bool(true),
+            ]),
         ))
         .unwrap();
 
@@ -674,7 +668,7 @@ fn invalid_holding_payload_is_rejected() {
     let error = driver
         .native_request(command_write(
             "holding_u16",
-            PayloadValue::List(vec![PayloadValue::U64(1), PayloadValue::U64(2)].into()),
+            PayloadValue::List(vec![PayloadValue::U64(1), PayloadValue::U64(2)]),
         ))
         .unwrap_err();
 

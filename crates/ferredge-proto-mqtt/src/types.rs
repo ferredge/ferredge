@@ -83,7 +83,7 @@ pub enum MqttNativePlan<'a> {
     Publish {
         command_id: Cow<'a, str>,
         topic: Cow<'a, str>,
-        payload: ferredge_bridge::BridgePayload<'a>,
+        payload: PayloadValue<'a>,
         delivery: Option<DeliveryGuarantee>,
         retain: bool,
         payload_format: Option<MqttPayloadFormat>,

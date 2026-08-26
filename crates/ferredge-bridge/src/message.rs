@@ -1,14 +1,15 @@
 use alloc::borrow::Cow;
 
-use ferredge_core::prelude::{DeliveryState, DeviceId, EndpointRef};
+use ferredge_core::prelude::{
+    Correlation, DeliveryState, DeviceId, EndpointRef, Headers, IntoOwned, PayloadValue,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     capability::BridgeCapability,
     fault::BridgeFault,
-    meta::{BridgeCorrelation, BridgeHeaders, BridgeRoute, BridgeTransportMeta},
+    meta::{BridgeRoute, BridgeTransportMeta},
     op::BridgeOp,
-    payload::BridgePayload,
 };
 
 /// Top-level bridge message envelope shared across protocols.
@@ -38,15 +39,15 @@ pub struct BridgeCommand<'a> {
     /// Semantic operation to perform.
     pub operation: BridgeOp,
     /// Optional payload carried by the command.
-    pub payload: Option<BridgePayload<'a>>,
+    pub payload: Option<PayloadValue<'a>>,
     /// Logical routing information required by the transport codec.
     pub route: BridgeRoute<'a>,
     /// Typed transport metadata preserved separately from arbitrary headers.
     pub transport: Option<BridgeTransportMeta<'a>>,
     /// Arbitrary protocol headers or properties.
-    pub headers: Option<BridgeHeaders<'a>>,
+    pub headers: Option<Headers<'a>>,
     /// Optional correlation metadata.
-    pub correlation: Option<BridgeCorrelation<'a>>,
+    pub correlation: Option<Correlation<'a>>,
 }
 
 /// Normalized inbound bridge event.
@@ -59,86 +60,68 @@ pub struct BridgeEvent<'a> {
     /// Semantic operation represented by the event.
     pub operation: BridgeOp,
     /// Event payload.
-    pub payload: BridgePayload<'a>,
+    pub payload: PayloadValue<'a>,
     /// Logical routing information preserved for the event.
     pub route: BridgeRoute<'a>,
     /// Typed transport metadata preserved separately from arbitrary headers.
     pub transport: Option<BridgeTransportMeta<'a>>,
     /// Arbitrary protocol headers or properties.
-    pub headers: Option<BridgeHeaders<'a>>,
+    pub headers: Option<Headers<'a>>,
     /// Optional correlation metadata.
-    pub correlation: Option<BridgeCorrelation<'a>>,
+    pub correlation: Option<Correlation<'a>>,
+}
+
+/// Shared context metadata carried by every bridge result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BridgeMessageMeta<'a> {
+    /// Source endpoint that produced the result.
+    pub source: EndpointRef,
+    /// Identifier of the command this result belongs to.
+    pub command_id: Cow<'a, str>,
+    /// Optional capability context for the result.
+    pub capability: Option<BridgeCapability>,
+    /// Optional operation context for the result.
+    pub operation: Option<BridgeOp>,
+    /// Optional logical route associated with the result.
+    pub route: Option<BridgeRoute<'a>>,
+    /// Optional typed transport metadata.
+    pub transport: Option<BridgeTransportMeta<'a>>,
+    /// Optional arbitrary headers or properties.
+    pub headers: Option<Headers<'a>>,
+    /// Optional correlation metadata.
+    pub correlation: Option<Correlation<'a>>,
 }
 
 /// Normalized bridge result or completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum BridgeResult<'a> {
+pub struct BridgeResult<'a> {
+    /// Shared result context metadata.
+    pub meta: BridgeMessageMeta<'a>,
+    /// Lifecycle outcome represented by this result.
+    pub outcome: BridgeOutcome<'a>,
+}
+
+/// Lifecycle outcome carried by a bridge result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BridgeOutcome<'a> {
     /// Delivery-progress update that has not completed yet.
     Progress {
-        /// Source endpoint that produced the result.
-        source: EndpointRef,
-        /// Identifier of the command this result belongs to.
-        command_id: Cow<'a, str>,
         /// Delivery state represented by this progress update.
         state: DeliveryState,
-        /// Optional capability context for the result.
-        capability: Option<BridgeCapability>,
-        /// Optional operation context for the result.
-        operation: Option<BridgeOp>,
-        /// Optional logical route associated with the result.
-        route: Option<BridgeRoute<'a>>,
-        /// Optional typed transport metadata.
-        transport: Option<BridgeTransportMeta<'a>>,
-        /// Optional arbitrary headers or properties.
-        headers: Option<BridgeHeaders<'a>>,
-        /// Optional correlation metadata.
-        correlation: Option<BridgeCorrelation<'a>>,
     },
     /// Successful completed command result.
     Success {
-        /// Source endpoint that produced the result.
-        source: EndpointRef,
-        /// Identifier of the command this result belongs to.
-        command_id: Cow<'a, str>,
-        /// Optional capability context for the result.
-        capability: Option<BridgeCapability>,
-        /// Optional operation context for the result.
-        operation: Option<BridgeOp>,
         /// Optional result payload.
-        payload: Option<BridgePayload<'a>>,
-        /// Optional logical route associated with the result.
-        route: Option<BridgeRoute<'a>>,
-        /// Optional typed transport metadata.
-        transport: Option<BridgeTransportMeta<'a>>,
-        /// Optional arbitrary headers or properties.
-        headers: Option<BridgeHeaders<'a>>,
-        /// Optional correlation metadata.
-        correlation: Option<BridgeCorrelation<'a>>,
+        payload: Option<PayloadValue<'a>>,
     },
     /// Failed command result with normalized fault details.
     Failure {
-        /// Source endpoint that produced the result.
-        source: EndpointRef,
-        /// Identifier of the command this result belongs to.
-        command_id: Cow<'a, str>,
         /// Failure state represented by this result.
         state: DeliveryState,
-        /// Optional capability context for the result.
-        capability: Option<BridgeCapability>,
-        /// Optional operation context for the result.
-        operation: Option<BridgeOp>,
         /// Optional result payload.
-        payload: Option<BridgePayload<'a>>,
+        payload: Option<PayloadValue<'a>>,
         /// Optional human-readable error detail.
         error: Option<Cow<'a, str>>,
-        /// Optional logical route associated with the result.
-        route: Option<BridgeRoute<'a>>,
-        /// Optional typed transport metadata.
-        transport: Option<BridgeTransportMeta<'a>>,
-        /// Optional arbitrary headers or properties.
-        headers: Option<BridgeHeaders<'a>>,
-        /// Optional correlation metadata.
-        correlation: Option<BridgeCorrelation<'a>>,
         /// Normalized fault metadata for the failure.
         fault: BridgeFault,
     },
@@ -152,19 +135,27 @@ pub struct BridgeFaultMessage<'a> {
     /// Optional related command identifier.
     pub command_id: Option<Cow<'a, str>>,
     /// Optional correlation metadata.
-    pub correlation: Option<BridgeCorrelation<'a>>,
+    pub correlation: Option<Correlation<'a>>,
     /// Optional route metadata associated with the fault.
     pub route: Option<BridgeRoute<'a>>,
     /// Optional typed transport metadata associated with the fault.
     pub transport: Option<BridgeTransportMeta<'a>>,
     /// Optional arbitrary headers or properties associated with the fault.
-    pub headers: Option<BridgeHeaders<'a>>,
+    pub headers: Option<Headers<'a>>,
     /// Fault payload.
     pub fault: crate::fault::BridgeFault,
 }
 
 impl BridgeMessage<'_> {
+    /// Materializes an owned bridge message for async boundaries.
     pub fn into_owned(self) -> BridgeMessage<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BridgeMessage<'_> {
+    type Owned = BridgeMessage<'static>;
+    fn into_owned(self) -> Self::Owned {
         match self {
             BridgeMessage::Command(command) => BridgeMessage::Command(command.into_owned()),
             BridgeMessage::Event(event) => BridgeMessage::Event(event.into_owned()),
@@ -175,107 +166,117 @@ impl BridgeMessage<'_> {
 }
 
 impl BridgeCommand<'_> {
+    /// Materializes an owned bridge command for async boundaries.
     pub fn into_owned(self) -> BridgeCommand<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BridgeCommand<'_> {
+    type Owned = BridgeCommand<'static>;
+    fn into_owned(self) -> Self::Owned {
         BridgeCommand {
-            id: Cow::Owned(self.id.into_owned()),
+            id: IntoOwned::into_owned(self.id),
             source_device_id: self.source_device_id,
             target_device_id: self.target_device_id,
             capability: self.capability,
             operation: self.operation,
-            payload: self.payload.map(BridgePayload::into_owned),
+            payload: self.payload.into_owned(),
             route: self.route.into_owned(),
-            transport: self.transport.map(BridgeTransportMeta::into_owned),
-            headers: self.headers.map(BridgeHeaders::into_owned),
-            correlation: self.correlation.map(BridgeCorrelation::into_owned),
+            transport: self.transport.into_owned(),
+            headers: self.headers.into_owned(),
+            correlation: self.correlation.into_owned(),
         }
     }
 }
 
 impl BridgeEvent<'_> {
+    /// Materializes an owned bridge event for async boundaries.
     pub fn into_owned(self) -> BridgeEvent<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BridgeEvent<'_> {
+    type Owned = BridgeEvent<'static>;
+    fn into_owned(self) -> Self::Owned {
         BridgeEvent {
             source: self.source,
             capability: self.capability,
             operation: self.operation,
             payload: self.payload.into_owned(),
             route: self.route.into_owned(),
-            transport: self.transport.map(BridgeTransportMeta::into_owned),
-            headers: self.headers.map(BridgeHeaders::into_owned),
-            correlation: self.correlation.map(BridgeCorrelation::into_owned),
+            transport: self.transport.into_owned(),
+            headers: self.headers.into_owned(),
+            correlation: self.correlation.into_owned(),
+        }
+    }
+}
+
+impl BridgeMessageMeta<'_> {
+    /// Materializes owned bridge result metadata for async boundaries.
+    pub fn into_owned(self) -> BridgeMessageMeta<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BridgeMessageMeta<'_> {
+    type Owned = BridgeMessageMeta<'static>;
+    fn into_owned(self) -> Self::Owned {
+        BridgeMessageMeta {
+            source: self.source,
+            command_id: IntoOwned::into_owned(self.command_id),
+            capability: self.capability,
+            operation: self.operation,
+            route: self.route.into_owned(),
+            transport: self.transport.into_owned(),
+            headers: self.headers.into_owned(),
+            correlation: self.correlation.into_owned(),
         }
     }
 }
 
 impl BridgeResult<'_> {
+    /// Materializes an owned bridge result for async boundaries.
     pub fn into_owned(self) -> BridgeResult<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BridgeResult<'_> {
+    type Owned = BridgeResult<'static>;
+    fn into_owned(self) -> Self::Owned {
+        BridgeResult {
+            meta: self.meta.into_owned(),
+            outcome: self.outcome.into_owned(),
+        }
+    }
+}
+
+impl BridgeOutcome<'_> {
+    /// Materializes an owned bridge outcome for async boundaries.
+    pub fn into_owned(self) -> BridgeOutcome<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BridgeOutcome<'_> {
+    type Owned = BridgeOutcome<'static>;
+    fn into_owned(self) -> Self::Owned {
         match self {
-            BridgeResult::Progress {
-                source,
-                command_id,
-                state,
-                capability,
-                operation,
-                route,
-                transport,
-                headers,
-                correlation,
-            } => BridgeResult::Progress {
-                source,
-                command_id: Cow::Owned(command_id.into_owned()),
-                state,
-                capability,
-                operation,
-                route: route.map(BridgeRoute::into_owned),
-                transport: transport.map(BridgeTransportMeta::into_owned),
-                headers: headers.map(BridgeHeaders::into_owned),
-                correlation: correlation.map(BridgeCorrelation::into_owned),
+            BridgeOutcome::Progress { state } => BridgeOutcome::Progress { state },
+            BridgeOutcome::Success { payload } => BridgeOutcome::Success {
+                payload: payload.into_owned(),
             },
-            BridgeResult::Success {
-                source,
-                command_id,
-                capability,
-                operation,
-                payload,
-                route,
-                transport,
-                headers,
-                correlation,
-            } => BridgeResult::Success {
-                source,
-                command_id: Cow::Owned(command_id.into_owned()),
-                capability,
-                operation,
-                payload: payload.map(BridgePayload::into_owned),
-                route: route.map(BridgeRoute::into_owned),
-                transport: transport.map(BridgeTransportMeta::into_owned),
-                headers: headers.map(BridgeHeaders::into_owned),
-                correlation: correlation.map(BridgeCorrelation::into_owned),
-            },
-            BridgeResult::Failure {
-                source,
-                command_id,
+            BridgeOutcome::Failure {
                 state,
-                capability,
-                operation,
                 payload,
                 error,
-                route,
-                transport,
-                headers,
-                correlation,
                 fault,
-            } => BridgeResult::Failure {
-                source,
-                command_id: Cow::Owned(command_id.into_owned()),
+            } => BridgeOutcome::Failure {
                 state,
-                capability,
-                operation,
-                payload: payload.map(BridgePayload::into_owned),
-                error: error.map(|value| Cow::Owned(value.into_owned())),
-                route: route.map(BridgeRoute::into_owned),
-                transport: transport.map(BridgeTransportMeta::into_owned),
-                headers: headers.map(BridgeHeaders::into_owned),
-                correlation: correlation.map(BridgeCorrelation::into_owned),
+                payload: payload.into_owned(),
+                error: error.into_owned(),
                 fault,
             },
         }
@@ -283,14 +284,22 @@ impl BridgeResult<'_> {
 }
 
 impl BridgeFaultMessage<'_> {
+    /// Materializes an owned bridge fault message for async boundaries.
     pub fn into_owned(self) -> BridgeFaultMessage<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BridgeFaultMessage<'_> {
+    type Owned = BridgeFaultMessage<'static>;
+    fn into_owned(self) -> Self::Owned {
         BridgeFaultMessage {
             source: self.source,
-            command_id: self.command_id.map(|value| Cow::Owned(value.into_owned())),
-            correlation: self.correlation.map(BridgeCorrelation::into_owned),
-            route: self.route.map(BridgeRoute::into_owned),
-            transport: self.transport.map(BridgeTransportMeta::into_owned),
-            headers: self.headers.map(BridgeHeaders::into_owned),
+            command_id: self.command_id.into_owned(),
+            correlation: self.correlation.into_owned(),
+            route: self.route.into_owned(),
+            transport: self.transport.into_owned(),
+            headers: self.headers.into_owned(),
             fault: self.fault,
         }
     }

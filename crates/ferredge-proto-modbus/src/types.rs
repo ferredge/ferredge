@@ -461,10 +461,7 @@ impl<'a> TryFrom<&'a BridgeMessage<'a>> for ModbusNativePlan<'a> {
         Ok(ModbusNativePlan {
             resource: resource.clone(),
             action: operation.action.clone(),
-            payload: command
-                .payload
-                .as_ref()
-                .map(payload_value_from_bridge_payload),
+            payload: command.payload.as_ref().map(PayloadValue::as_borrowed),
             register: access.clone(),
             unit_id: node_id.unwrap_or(1) as u8,
         })
@@ -485,49 +482,6 @@ impl ModbusResponse {
 
     pub fn into_payload(self) -> Result<PayloadValue<'static>, ModbusCommandConversionError> {
         self.payload().map(PayloadValue::into_owned)
-    }
-}
-
-fn payload_value_from_bridge_payload<'a>(
-    payload: &'a ferredge_bridge::BridgePayload<'a>,
-) -> PayloadValue<'a> {
-    match payload {
-        ferredge_bridge::BridgePayload::Empty => PayloadValue::Null,
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::Bool(value)) => {
-            PayloadValue::Bool(*value)
-        }
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::I64(value)) => {
-            PayloadValue::I64(*value)
-        }
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::U64(value)) => {
-            PayloadValue::U64(*value)
-        }
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::F64(value)) => {
-            PayloadValue::F64(*value)
-        }
-        ferredge_bridge::BridgePayload::Text(value) => {
-            PayloadValue::String(Cow::Borrowed(value.as_ref()))
-        }
-        ferredge_bridge::BridgePayload::Binary(value) => {
-            PayloadValue::Bytes(Cow::Borrowed(value.as_ref()))
-        }
-        ferredge_bridge::BridgePayload::Sequence(values) => PayloadValue::List(Cow::Owned(
-            values
-                .iter()
-                .map(payload_value_from_bridge_payload)
-                .collect(),
-        )),
-        ferredge_bridge::BridgePayload::Object(values) => PayloadValue::Map(Cow::Owned(
-            values
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        Cow::Borrowed(key.as_ref()),
-                        payload_value_from_bridge_payload(value),
-                    )
-                })
-                .collect(),
-        )),
     }
 }
 

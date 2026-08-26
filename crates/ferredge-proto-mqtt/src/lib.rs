@@ -1432,7 +1432,7 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
                 Ok(MqttNativePlan::Publish {
                     command_id: command.id.into(),
                     topic: topic.into(),
-                    payload: ferredge_bridge::BridgePayload::from(payload).into_owned(),
+                    payload: payload.into_owned(),
                     delivery: options.delivery,
                     retain: mqtt_options.retain,
                     payload_format: mqtt_options.payload_format,

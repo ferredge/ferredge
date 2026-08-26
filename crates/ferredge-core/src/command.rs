@@ -4,6 +4,8 @@ use alloc::{borrow::Cow, string::String, vec::Vec};
 use core::fmt;
 
 use crate::device::DeviceId;
+use crate::headers::Headers;
+use crate::owned::IntoOwned;
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for command lifecycle and correlation.
@@ -44,9 +46,16 @@ impl Correlation<'_> {
 
     /// Materializes an owned correlation for async or persistent boundaries.
     pub fn into_owned(self) -> Correlation<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for Correlation<'_> {
+    type Owned = Correlation<'static>;
+    fn into_owned(self) -> Self::Owned {
         Correlation {
-            request_id: Cow::Owned(self.request_id.into_owned()),
-            reply_to: self.reply_to.map(Address::into_owned),
+            request_id: IntoOwned::into_owned(self.request_id),
+            reply_to: self.reply_to.into_owned(),
         }
     }
 }
@@ -71,16 +80,23 @@ impl Address<'_> {
 
     /// Materializes an owned address for long-lived boundaries.
     pub fn into_owned(self) -> Address<'static> {
-        match self {
-            Self::Resource(value) => Address::Resource(Cow::Owned(value.into_owned())),
-            Self::Channel(value) => Address::Channel(Cow::Owned(value.into_owned())),
-        }
+        IntoOwned::into_owned(self)
     }
 
     /// Returns the underlying string slice for either address family.
     pub fn as_str(&self) -> &str {
         match self {
             Self::Resource(value) | Self::Channel(value) => value.as_ref(),
+        }
+    }
+}
+
+impl IntoOwned for Address<'_> {
+    type Owned = Address<'static>;
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Self::Resource(value) => Address::Resource(IntoOwned::into_owned(value)),
+            Self::Channel(value) => Address::Channel(IntoOwned::into_owned(value)),
         }
     }
 }
@@ -122,7 +138,7 @@ pub struct BrokerMessageOptions {
     /// Optional delivery guarantee requested by caller.
     pub delivery: Option<DeliveryGuarantee>,
     /// Optional message headers or attributes.
-    pub headers: Vec<(String, String)>,
+    pub headers: Headers<'static>,
     /// Optional logical reply channel.
     pub reply_to: Option<String>,
     /// Optional application-level correlation identifier.
@@ -135,7 +151,7 @@ pub struct BrokerMessageOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RequestOptions {
     /// Optional dynamic headers attached to the request.
-    pub headers: Vec<(String, String)>,
+    pub headers: Headers<'static>,
     /// Optional declared content type.
     pub content_type: Option<String>,
     /// Optional method override for transports that support it.
@@ -249,9 +265,9 @@ pub enum PayloadValue<'a> {
     /// Opaque binary payload.
     Bytes(Cow<'a, [u8]>),
     /// Ordered heterogeneous sequence payload.
-    List(Cow<'a, [PayloadValue<'a>]>),
+    List(Vec<PayloadValue<'a>>),
     /// Ordered object payload.
-    Map(Cow<'a, [(Cow<'a, str>, PayloadValue<'a>)]>),
+    Map(Vec<(Cow<'a, str>, PayloadValue<'a>)>),
 }
 
 impl PayloadValue<'_> {
@@ -265,42 +281,37 @@ impl PayloadValue<'_> {
             Self::F64(value) => PayloadValue::F64(*value),
             Self::String(value) => PayloadValue::String(Cow::Borrowed(value.as_ref())),
             Self::Bytes(value) => PayloadValue::Bytes(Cow::Borrowed(value.as_ref())),
-            Self::List(values) => PayloadValue::List(Cow::Owned(
-                values.iter().map(PayloadValue::as_borrowed).collect(),
-            )),
-            Self::Map(values) => PayloadValue::Map(Cow::Owned(
+            Self::List(values) => {
+                PayloadValue::List(values.iter().map(PayloadValue::as_borrowed).collect())
+            }
+            Self::Map(values) => PayloadValue::Map(
                 values
                     .iter()
                     .map(|(key, value)| (Cow::Borrowed(key.as_ref()), value.as_borrowed()))
                     .collect(),
-            )),
+            ),
         }
     }
 
     /// Materializes an owned payload for async or persistence boundaries.
     pub fn into_owned(self) -> PayloadValue<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for PayloadValue<'_> {
+    type Owned = PayloadValue<'static>;
+    fn into_owned(self) -> Self::Owned {
         match self {
             Self::Null => PayloadValue::Null,
             Self::Bool(value) => PayloadValue::Bool(value),
             Self::I64(value) => PayloadValue::I64(value),
             Self::U64(value) => PayloadValue::U64(value),
             Self::F64(value) => PayloadValue::F64(value),
-            Self::String(value) => PayloadValue::String(Cow::Owned(value.into_owned())),
-            Self::Bytes(value) => PayloadValue::Bytes(Cow::Owned(value.into_owned())),
-            Self::List(values) => PayloadValue::List(Cow::Owned(
-                values
-                    .into_owned()
-                    .into_iter()
-                    .map(PayloadValue::into_owned)
-                    .collect(),
-            )),
-            Self::Map(values) => PayloadValue::Map(Cow::Owned(
-                values
-                    .into_owned()
-                    .into_iter()
-                    .map(|(key, value)| (Cow::Owned(key.into_owned()), value.into_owned()))
-                    .collect(),
-            )),
+            Self::String(value) => PayloadValue::String(IntoOwned::into_owned(value)),
+            Self::Bytes(value) => PayloadValue::Bytes(IntoOwned::into_owned(value)),
+            Self::List(values) => PayloadValue::List(IntoOwned::into_owned(values)),
+            Self::Map(values) => PayloadValue::Map(IntoOwned::into_owned(values)),
         }
     }
 }
@@ -415,13 +426,20 @@ pub struct CommandResult<'a> {
 impl CommandResult<'_> {
     /// Materializes an owned command result for long-lived boundaries.
     pub fn into_owned(self) -> CommandResult<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for CommandResult<'_> {
+    type Owned = CommandResult<'static>;
+    fn into_owned(self) -> Self::Owned {
         CommandResult {
             command_id: self.command_id,
             device_id: self.device_id,
             state: self.state,
-            payload: self.payload.map(PayloadValue::into_owned),
-            error: self.error.map(|value| Cow::Owned(value.into_owned())),
-            correlation: self.correlation.map(Correlation::into_owned),
+            payload: self.payload.into_owned(),
+            error: self.error.into_owned(),
+            correlation: self.correlation.into_owned(),
         }
     }
 }

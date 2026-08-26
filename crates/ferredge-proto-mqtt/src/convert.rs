@@ -16,8 +16,8 @@ use alloc::{
 };
 
 use ferredge_bridge::{
-    BridgeHeaders, BridgeMessage, BridgeOp, BridgeOutbound, BridgePayload, BridgeTransportMeta,
-    MessagingAction, NativeOutbound, ProtocolEncoder,
+    BridgeMessage, BridgeOp, BridgeOutbound, BridgeTransportMeta, MessagingAction, NativeOutbound,
+    ProtocolEncoder,
 };
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
@@ -65,13 +65,12 @@ impl ProtocolEncoder<NativeOutbound, MqttNativePlan<'static>, MqttPacketRequest>
     }
 }
 
-fn mqtt_payload_bytes(payload: &BridgePayload) -> Result<Vec<u8>, MqttCommandConversionError> {
+fn mqtt_payload_bytes(payload: &PayloadValue) -> Result<Vec<u8>, MqttCommandConversionError> {
     match payload {
-        BridgePayload::Binary(bytes) => Ok(bytes.to_vec()),
-        BridgePayload::Text(value) => Ok(value.as_bytes().to_vec()),
-        BridgePayload::Empty => Ok(Vec::new()),
-        other => to_vec(&PayloadValue::from(other.clone()))
-            .map_err(MqttCommandConversionError::InvalidPayload),
+        PayloadValue::Bytes(bytes) => Ok(bytes.to_vec()),
+        PayloadValue::String(value) => Ok(value.as_bytes().to_vec()),
+        PayloadValue::Null => Ok(Vec::new()),
+        other => to_vec(other).map_err(MqttCommandConversionError::InvalidPayload),
     }
 }
 
@@ -346,7 +345,7 @@ struct ProjectedSubscriptionMetadata<'a> {
 
 fn project_publish_metadata<'a>(
     transport: Option<&'a BridgeTransportMeta<'a>>,
-    headers: Option<&'a BridgeHeaders<'a>>,
+    headers: Option<&'a Headers<'a>>,
 ) -> ProjectedHeaderRefs<'a> {
     let mut projected = ProjectedHeaderRefs {
         user_properties: Vec::new(),
@@ -367,25 +366,18 @@ fn project_publish_metadata<'a>(
         }
     }
     if let Some(headers) = headers {
-        match headers {
-            BridgeHeaders::Mqtt(headers) => projected.user_properties.extend(
-                headers
-                    .iter()
-                    .map(|header| (header.key.as_ref(), header.value.as_ref())),
-            ),
-            BridgeHeaders::Http(headers) => projected.user_properties.extend(
-                headers
-                    .iter()
-                    .map(|header| (header.key.as_ref(), header.value.as_ref())),
-            ),
-        }
+        projected.user_properties.extend(
+            headers
+                .iter()
+                .map(|header| (header.key.as_ref(), header.value.as_ref())),
+        );
     }
     projected
 }
 
 fn project_subscription_metadata<'a>(
     transport: Option<&'a BridgeTransportMeta<'a>>,
-    headers: Option<&'a BridgeHeaders<'a>>,
+    headers: Option<&'a Headers<'a>>,
 ) -> ProjectedSubscriptionMetadata<'a> {
     let mut projected = ProjectedSubscriptionMetadata {
         user_properties: Vec::new(),
@@ -406,18 +398,11 @@ fn project_subscription_metadata<'a>(
         }
     }
     if let Some(headers) = headers {
-        match headers {
-            BridgeHeaders::Mqtt(headers) => projected.user_properties.extend(
-                headers
-                    .iter()
-                    .map(|header| (header.key.as_ref(), header.value.as_ref())),
-            ),
-            BridgeHeaders::Http(headers) => projected.user_properties.extend(
-                headers
-                    .iter()
-                    .map(|header| (header.key.as_ref(), header.value.as_ref())),
-            ),
-        }
+        projected.user_properties.extend(
+            headers
+                .iter()
+                .map(|header| (header.key.as_ref(), header.value.as_ref())),
+        );
     }
     projected
 }

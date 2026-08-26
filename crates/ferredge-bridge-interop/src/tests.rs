@@ -11,7 +11,7 @@ use std::{
 };
 
 use ferredge_bridge::{
-    BridgeCapability, BridgeCommand, BridgeMessage, BridgeOp, BridgePayload, BridgeResult,
+    BridgeCapability, BridgeCommand, BridgeMessage, BridgeOp, BridgeOutcome, BridgeResult,
     BridgeRoute, BridgeTransportMeta, MessagingAction, MessagingCapability, MessagingOp,
     ProtocolEncoder, ProtocolPlanner, RequestResponseAction, RequestResponseOp, planner,
 };
@@ -430,7 +430,8 @@ fn http_write_command(payload: &str) -> Command {
                 headers: vec![
                     ("X-Request-Version".to_string(), "2026-05".to_string()),
                     ("X-Trace-Id".to_string(), "trace-http-17".to_string()),
-                ],
+                ]
+                .into(),
                 content_type: Some("text/plain".to_string()),
                 method: None,
                 path: None,
@@ -683,12 +684,12 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
             let headers = command.headers.as_ref().expect("http headers expected");
             assert!(
                 headers
-                    .iter_http_headers()
+                    .iter()
                     .any(|header| header.key == "X-Request-Version" && header.value == "2026-05")
             );
             assert!(
                 headers
-                    .iter_http_headers()
+                    .iter()
                     .any(|header| header.key == "X-Trace-Id" && header.value == "trace-http-17")
             );
         }
@@ -853,18 +854,17 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
             method: Some("POST".to_string().into()),
             path: Some("/interop/setpoint".to_string().into()),
             status_code: Some(http_response.status_code),
-            headers: http_response
-                .headers
-                .iter()
-                .map(|(key, value)| (key.clone().into(), value.clone().into()))
-                .collect::<Vec<_>>()
-                .into(),
+            headers: http_response.headers.clone().into(),
         })),
     };
     let http_result_bridge = planner::routed_result_to_bridge(http_result);
     let (result_transport, result_headers) = match &http_result_bridge {
-        BridgeMessage::Result(BridgeResult::Success {
-            transport, headers, ..
+        BridgeMessage::Result(BridgeResult {
+            meta:
+                ferredge_bridge::BridgeMessageMeta {
+                    transport, headers, ..
+                },
+            outcome: BridgeOutcome::Success { .. },
         }) => {
             let BridgeTransportMeta::Http(meta) =
                 transport.as_ref().expect("http result transport expected")
@@ -876,12 +876,12 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
             let headers = headers.as_ref().expect("http result headers expected");
             assert!(
                 headers
-                    .iter_http_headers()
+                    .iter()
                     .any(|header| header.key == "X-Response-Version" && header.value == "2026-05")
             );
             assert!(
                 headers
-                    .iter_http_headers()
+                    .iter()
                     .any(|header| header.key == "Content-Length" && header.value == "2")
             );
             (transport.clone(), headers.clone())
@@ -899,7 +899,7 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
         operation: BridgeOp::Messaging(MessagingOp {
             action: MessagingAction::Publish,
         }),
-        payload: Some(BridgePayload::Binary(b"41".to_vec().into())),
+        payload: Some(PayloadValue::Bytes(b"41".to_vec().into())),
         route: BridgeRoute::Messaging {
             topic: topic.into(),
         },
@@ -1143,7 +1143,10 @@ fn mqtt_v5_to_modbus_bridge_roundtrip() {
     let result_bridge = planner::routed_result_to_bridge(bridged_result);
     assert!(matches!(
         result_bridge,
-        BridgeMessage::Result(BridgeResult::Success { .. })
+        BridgeMessage::Result(BridgeResult {
+            outcome: BridgeOutcome::Success { .. },
+            ..
+        })
     ));
 
     block_on(publisher.stop()).expect("publisher should stop");
@@ -1232,7 +1235,10 @@ fn mqtt_v3_to_modbus_bridge_roundtrip() {
     let result_bridge = planner::routed_result_to_bridge(bridged_result);
     assert!(matches!(
         result_bridge,
-        BridgeMessage::Result(BridgeResult::Success { .. })
+        BridgeMessage::Result(BridgeResult {
+            outcome: BridgeOutcome::Success { .. },
+            ..
+        })
     ));
 }
 
@@ -1257,13 +1263,12 @@ fn http_to_modbus_bridge_roundtrip() {
     );
     let http_result_bridge = planner::routed_result_to_bridge(http_result);
     match &http_result_bridge {
-        BridgeMessage::Result(BridgeResult::Success {
-            command_id,
-            payload,
-            ..
+        BridgeMessage::Result(BridgeResult {
+            meta,
+            outcome: BridgeOutcome::Success { payload },
         }) => {
-            assert_eq!(command_id, "http-write-1");
-            assert_eq!(*payload, Some(BridgePayload::Binary(b"55".to_vec().into())));
+            assert_eq!(meta.command_id, "http-write-1");
+            assert_eq!(*payload, Some(PayloadValue::Bytes(b"55".to_vec().into())));
         }
         other => panic!("expected bridge result, got {other:?}"),
     }
@@ -1405,13 +1410,11 @@ fn rejected_routed_result_bridges_as_failure_outcome() {
     let result_bridge = planner::routed_result_to_bridge(rejected_result);
 
     match result_bridge {
-        BridgeMessage::Result(BridgeResult::Failure {
-            command_id,
-            error,
-            fault,
-            ..
+        BridgeMessage::Result(BridgeResult {
+            meta,
+            outcome: BridgeOutcome::Failure { error, fault, .. },
         }) => {
-            assert_eq!(command_id, "http-write-1");
+            assert_eq!(meta.command_id, "http-write-1");
             assert_eq!(error.as_deref(), Some("upstream rejected"));
             assert_eq!(
                 fault.category,

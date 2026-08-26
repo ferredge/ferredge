@@ -9,9 +9,8 @@ use std::{
 };
 
 use ferredge_bridge::{
-    BridgeCommand, BridgeHeaders, BridgeMessage, BridgeOp, BridgePayload, BridgeRoute,
-    BridgeTransportMeta, HttpBridgeMeta, MessagingAction, MessagingCapability, MessagingOp,
-    ProtocolEncoder, planner,
+    BridgeCommand, BridgeMessage, BridgeOp, BridgeRoute, BridgeTransportMeta, HttpBridgeMeta,
+    MessagingAction, MessagingCapability, MessagingOp, ProtocolEncoder, planner,
 };
 use ferredge_core::prelude::{
     Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
@@ -782,7 +781,7 @@ fn mqtt_v5_publish_projects_http_metadata_into_user_properties() {
         operation: BridgeOp::Messaging(MessagingOp {
             action: MessagingAction::Publish,
         }),
-        payload: Some(BridgePayload::Binary(b"ok".to_vec().into())),
+        payload: Some(PayloadValue::Bytes(b"ok".to_vec().into())),
         route: BridgeRoute::Messaging {
             topic: "interop/http".into(),
         },
@@ -792,7 +791,7 @@ fn mqtt_v5_publish_projects_http_metadata_into_user_properties() {
             status_code: Some(207),
             content_type: Some("text/plain".into()),
         })),
-        headers: Some(BridgeHeaders::http(vec![(
+        headers: Some(ferredge_core::prelude::Headers::from(vec![(
             "X-Request-Version".to_string(),
             "2026-05".to_string(),
         )])),

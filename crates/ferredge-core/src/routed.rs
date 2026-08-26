@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     command::{Address, Command, CommandResult, Correlation, PayloadValue},
     device::{DeviceId, DeviceProtocol},
+    headers::Headers,
+    owned::IntoOwned,
 };
 
 /// Identifies concrete source or target transport endpoint inside router graph.
@@ -33,25 +35,24 @@ pub struct HttpMeta<'a> {
     /// HTTP response status code when available.
     pub status_code: Option<u16>,
     /// Preserved HTTP headers associated with request or response.
-    pub headers: Cow<'a, [(Cow<'a, str>, Cow<'a, str>)]>,
+    pub headers: Headers<'a>,
 }
 
 impl HttpMeta<'_> {
     /// Materializes an owned HTTP metadata snapshot.
     pub fn into_owned(self) -> HttpMeta<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for HttpMeta<'_> {
+    type Owned = HttpMeta<'static>;
+    fn into_owned(self) -> Self::Owned {
         HttpMeta {
-            method: self.method.map(|value| Cow::Owned(value.into_owned())),
-            path: self.path.map(|value| Cow::Owned(value.into_owned())),
+            method: self.method.into_owned(),
+            path: self.path.into_owned(),
             status_code: self.status_code,
-            headers: Cow::Owned(
-                self.headers
-                    .into_owned()
-                    .into_iter()
-                    .map(|(key, value)| {
-                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
-                    })
-                    .collect(),
-            ),
+            headers: self.headers.into_owned(),
         }
     }
 }
@@ -96,49 +97,30 @@ pub struct MqttMeta<'a> {
 impl MqttMeta<'_> {
     /// Materializes an owned MQTT metadata snapshot.
     pub fn into_owned(self) -> MqttMeta<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for MqttMeta<'_> {
+    type Owned = MqttMeta<'static>;
+    fn into_owned(self) -> Self::Owned {
         MqttMeta {
-            topic: Cow::Owned(self.topic.into_owned()),
+            topic: IntoOwned::into_owned(self.topic),
             qos: self.qos,
             retain: self.retain,
             duplicate: self.duplicate,
             packet_id: self.packet_id,
-            content_type: self
-                .content_type
-                .map(|value| Cow::Owned(value.into_owned())),
-            payload_format: self
-                .payload_format
-                .map(|value| Cow::Owned(value.into_owned())),
+            content_type: self.content_type.into_owned(),
+            payload_format: self.payload_format.into_owned(),
             message_expiry_interval_secs: self.message_expiry_interval_secs,
-            response_topic: self
-                .response_topic
-                .map(|value| Cow::Owned(value.into_owned())),
-            correlation_data: self
-                .correlation_data
-                .map(|value| Cow::Owned(value.into_owned())),
-            correlation_data_bytes: self
-                .correlation_data_bytes
-                .map(|value| Cow::Owned(value.into_owned())),
+            response_topic: self.response_topic.into_owned(),
+            correlation_data: self.correlation_data.into_owned(),
+            correlation_data_bytes: self.correlation_data_bytes.into_owned(),
             topic_alias: self.topic_alias,
             subscription_identifiers: Cow::Owned(self.subscription_identifiers.into_owned()),
-            user_properties: Cow::Owned(
-                self.user_properties
-                    .into_owned()
-                    .into_iter()
-                    .map(|(key, value)| {
-                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
-                    })
-                    .collect(),
-            ),
-            reason_codes: Cow::Owned(
-                self.reason_codes
-                    .into_owned()
-                    .into_iter()
-                    .map(|value| Cow::Owned(value.into_owned()))
-                    .collect(),
-            ),
-            reason_string: self
-                .reason_string
-                .map(|value| Cow::Owned(value.into_owned())),
+            user_properties: Cow::Owned(IntoOwned::into_owned(self.user_properties.into_owned())),
+            reason_codes: Cow::Owned(IntoOwned::into_owned(self.reason_codes.into_owned())),
+            reason_string: self.reason_string.into_owned(),
         }
     }
 }
@@ -155,6 +137,13 @@ pub enum TransportMeta<'a> {
 impl TransportMeta<'_> {
     /// Materializes an owned transport metadata snapshot.
     pub fn into_owned(self) -> TransportMeta<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for TransportMeta<'_> {
+    type Owned = TransportMeta<'static>;
+    fn into_owned(self) -> Self::Owned {
         match self {
             Self::Http(meta) => TransportMeta::Http(meta.into_owned()),
             Self::Mqtt(meta) => TransportMeta::Mqtt(meta.into_owned()),
@@ -180,12 +169,19 @@ pub struct RoutedEvent<'a> {
 impl RoutedEvent<'_> {
     /// Materializes an owned routed event for queues or persistence.
     pub fn into_owned(self) -> RoutedEvent<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for RoutedEvent<'_> {
+    type Owned = RoutedEvent<'static>;
+    fn into_owned(self) -> Self::Owned {
         RoutedEvent {
             source: self.source,
             address: self.address.into_owned(),
             payload: self.payload.into_owned(),
-            correlation: self.correlation.map(Correlation::into_owned),
-            transport: self.transport.map(TransportMeta::into_owned),
+            correlation: IntoOwned::into_owned(self.correlation),
+            transport: IntoOwned::into_owned(self.transport),
         }
     }
 }
@@ -204,10 +200,17 @@ pub struct RoutedResult<'a> {
 impl RoutedResult<'_> {
     /// Materializes an owned routed result for queues or persistence.
     pub fn into_owned(self) -> RoutedResult<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for RoutedResult<'_> {
+    type Owned = RoutedResult<'static>;
+    fn into_owned(self) -> Self::Owned {
         RoutedResult {
             source: self.source,
             result: self.result.into_owned(),
-            transport: self.transport.map(TransportMeta::into_owned),
+            transport: IntoOwned::into_owned(self.transport),
         }
     }
 }
@@ -226,6 +229,13 @@ pub enum RoutedMessage<'a> {
 impl RoutedMessage<'_> {
     /// Materializes an owned routed message for async boundaries.
     pub fn into_owned(self) -> RoutedMessage<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for RoutedMessage<'_> {
+    type Owned = RoutedMessage<'static>;
+    fn into_owned(self) -> Self::Owned {
         match self {
             Self::Command(command) => RoutedMessage::Command(command),
             Self::Event(event) => RoutedMessage::Event(event.into_owned()),

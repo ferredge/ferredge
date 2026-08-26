@@ -232,14 +232,7 @@ fn expected_coil_read_payload(write_count: usize, read_count: u16) -> Vec<bool> 
 }
 
 fn payload_value_from_coils(coils: &[bool]) -> PayloadValue<'static> {
-    PayloadValue::List(
-        coils
-            .iter()
-            .copied()
-            .map(PayloadValue::Bool)
-            .collect::<Vec<_>>()
-            .into(),
-    )
+    PayloadValue::List(coils.iter().copied().map(PayloadValue::Bool).collect())
 }
 
 async fn assert_driver_coil_round_trip(
