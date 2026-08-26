@@ -9,13 +9,15 @@ use rmodbus::{
 };
 
 use crate::{
-    ModbusDriver, ModbusRequest, ModbusResponse, ModbusResponseDecoderContext,
+    ModbusAsciiEndpointConfig, ModbusClientOptions, ModbusDriver, ModbusEndpoint, ModbusRequest,
+    ModbusResponse, ModbusResponseDecoderContext, ModbusRtuEndpointConfig,
+    ModbusRtuOverTcpEndpointConfig, ModbusTcpEndpointConfig,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::{decode_ascii_wire_frame, decode_modbus_response},
 };
 use ferredge_bridge::ProtocolDecoder;
 
-fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
+fn make_driver(endpoint: ModbusEndpoint) -> ModbusDriver {
     let mut resources = Map::default();
     resources.insert(
         "holding_u16".to_string(),
@@ -205,16 +207,16 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
     })
 }
 
-fn tcp_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+fn tcp_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: 502,
         options: ModbusClientOptions::default(),
     })
 }
 
-fn rtu_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+fn rtu_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
         serial: SerialPortConfig {
             path: "/dev/ttyUSB0".to_string(),
             ..SerialPortConfig::default()
@@ -223,16 +225,16 @@ fn rtu_endpoint() -> DeviceEndpoint {
     })
 }
 
-fn rtu_over_tcp_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_rtu_over_tcp(ModbusRtuOverTcpEndpointConfig {
+fn rtu_over_tcp_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::RtuOverTcp(ModbusRtuOverTcpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: 502,
         options: ModbusClientOptions::default(),
     })
 }
 
-fn ascii_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
+fn ascii_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::Ascii(ModbusAsciiEndpointConfig {
         serial: SerialPortConfig {
             path: "/dev/ttyUSB0".to_string(),
             ..SerialPortConfig::default()

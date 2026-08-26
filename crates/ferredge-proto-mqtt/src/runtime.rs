@@ -14,6 +14,9 @@ use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 use runtime_stack::StackSocket;
 
 use crate::convert::qos_from_delivery;
+use crate::endpoint::{
+    MqttConnackProperties, MqttEndpointConfig, MqttProtocolVersion, MqttWillConfig,
+};
 use crate::meta::{MqttMeta, MqttPayloadFormat, mqtt_will_payload_format};
 use crate::runtime_stack;
 use crate::types::{MqttPacketRequest, MqttWirePacket};

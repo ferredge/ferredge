@@ -4,7 +4,7 @@
 use alloc::{string::ToString, vec::Vec};
 
 use ferredge_core::prelude::*;
-use ferredge_proto_http::{HttpDriver, HttpRequest};
+use ferredge_proto_http::{HttpDriver, HttpEndpointConfig, HttpRequest};
 use ferredge_runtime_embassy::{EmbassyNet, EmbassyRuntime};
 
 use super::HOST_ADDR;
@@ -15,9 +15,9 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
             id: "harness-http".to_string(),
             name: "http.server".to_string(),
             status: DeviceStatus::Online,
-            endpoint: DeviceEndpoint::Http(HttpEndpointConfig {
+            endpoint: HttpEndpointConfig {
                 url: alloc::format!("http://{HOST_ADDR}:48080"),
-            }),
+            },
             metadata: None,
             max_connections: Some(1),
             resources: Map::default(),

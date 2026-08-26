@@ -6,7 +6,10 @@ use alloc::{rc::Rc, string::ToString, vec, vec::Vec};
 use core::cell::RefCell;
 
 use ferredge_core::prelude::*;
-use ferredge_proto_mqtt::{MqttDriver, MqttListenerStatus};
+use ferredge_proto_mqtt::{
+    MqttConnectProperties, MqttDevice, MqttDriver, MqttEndpointConfig, MqttListenerStatus,
+    MqttProtocolVersion,
+};
 use ferredge_runtime_embassy::{EmbassyNet, EmbassyRuntime};
 
 use super::HOST_ADDR;
@@ -28,12 +31,12 @@ impl EventSink for CollectSink {
     }
 }
 
-fn mqtt_device(id: &str, client_id: &str) -> Device<ferredge_proto_mqtt::MqttResourceAttributes> {
+fn mqtt_device(id: &str, client_id: &str) -> MqttDevice {
     Device {
         id: id.to_string(),
         name: "mosquitto".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+        endpoint: MqttEndpointConfig {
             broker: alloc::format!("{HOST_ADDR}:41883"),
             client_id: client_id.to_string(),
             auth: None,
@@ -46,7 +49,7 @@ fn mqtt_device(id: &str, client_id: &str) -> Device<ferredge_proto_mqtt::MqttRes
             will: None,
             reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V5_0],
-        }),
+        },
         metadata: None,
         max_connections: Some(4),
         resources: Map::default(),
@@ -169,7 +172,10 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
     drop(events);
     log::debug!("subscriber received the published message");
 
-    publisher.stop().await.expect("publisher stop should succeed");
+    publisher
+        .stop()
+        .await
+        .expect("publisher stop should succeed");
     subscriber
         .stop()
         .await

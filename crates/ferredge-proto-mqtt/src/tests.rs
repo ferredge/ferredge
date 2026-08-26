@@ -16,8 +16,7 @@ use ferredge_bridge::{
 use ferredge_core::prelude::{
     Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerReconnectConfig, BrokerSubscriptionOptions, ChannelReceiver, Command, Correlation,
-    DeliveryGuarantee, Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent,
-    Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion, MqttWillConfig,
+    DeliveryGuarantee, Device, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
     PayloadValue, ProtocolId, PubSub, RequestOptions, Route, RoutedEvent, RoutedMessage,
     TransportMeta,
 };
@@ -26,8 +25,9 @@ use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
 use crate::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthResponse, MqttAuthStage, MqttBridgeCodec,
-    MqttDriver, MqttListenerStatus, MqttMessageOptions, MqttMeta, MqttPayloadFormat,
-    MqttRetainHandling, MqttSubscriptionOptions,
+    MqttConnectProperties, MqttDriver, MqttEndpointConfig, MqttListenerStatus, MqttMessageOptions,
+    MqttMeta, MqttPayloadFormat, MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions,
+    MqttWillConfig,
     runtime::{
         build_connect_packet, normalize_broker_addr, pending_reply_route_from_packet,
         routed_message_from_packet,
@@ -49,7 +49,7 @@ fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> 
         id: "mqtt-device-1".to_string(),
         name: "MQTT Device".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+        endpoint: MqttEndpointConfig {
             broker,
             client_id: "client-1".to_string(),
             auth: None,
@@ -62,7 +62,7 @@ fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> 
             will: None,
             reconnect: BrokerReconnectConfig::default(),
             supported_versions,
-        }),
+        },
         metadata: None,
         max_connections: Some(16),
         resources: Map::default(),
@@ -1669,7 +1669,7 @@ fn mqtt_listener_keeps_running_with_ping_response() {
         id: "mqtt-device-keepalive".to_string(),
         name: "MQTT Keepalive Device".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+        endpoint: MqttEndpointConfig {
             broker,
             client_id: "client-keepalive".to_string(),
             auth: None,
@@ -1682,7 +1682,7 @@ fn mqtt_listener_keeps_running_with_ping_response() {
             will: None,
             reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V5_0],
-        }),
+        },
         metadata: None,
         max_connections: Some(4),
         resources: Map::default(),
@@ -1912,10 +1912,9 @@ fn mqtt_connect_auth_roundtrip_uses_handler_response() {
 
     let mut driver = make_driver(format!("mqtt://{addr}"), vec![MqttProtocolVersion::V5_0]);
     let seen_challenges = Arc::new(Mutex::new(Vec::new()));
-    if let DeviceEndpoint::Mqtt(config) = &mut driver.dvc.endpoint {
-        config.connect_properties.authentication_method = Some("scram-sha-256".to_string());
-        config.connect_properties.authentication_data = Some(b"client-first".to_vec());
-    }
+    let config = &mut driver.dvc.endpoint;
+    config.connect_properties.authentication_method = Some("scram-sha-256".to_string());
+    config.connect_properties.authentication_data = Some(b"client-first".to_vec());
     {
         let seen_challenges = Arc::clone(&seen_challenges);
         driver
@@ -2055,9 +2054,8 @@ fn mqtt_listener_handles_reauthentication_auth_packets() {
 
     let mut driver = make_driver(format!("mqtt://{addr}"), vec![MqttProtocolVersion::V5_0]);
     let seen_challenges = Arc::new(Mutex::new(Vec::new()));
-    if let DeviceEndpoint::Mqtt(config) = &mut driver.dvc.endpoint {
-        config.connect_properties.authentication_method = Some("scram-sha-256".to_string());
-    }
+    driver.dvc.endpoint.connect_properties.authentication_method =
+        Some("scram-sha-256".to_string());
     {
         let seen_challenges = Arc::clone(&seen_challenges);
         driver

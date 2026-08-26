@@ -17,6 +17,7 @@ use ferredge_bridge::{
 use ferredge_core::prelude::*;
 
 mod convert;
+mod endpoint;
 mod meta;
 mod runtime;
 mod types;
@@ -77,6 +78,10 @@ use runtime::{
 };
 
 pub use convert::MqttBridgeCodec;
+pub use endpoint::{
+    MqttConnackProperties, MqttConnectProperties, MqttDevice, MqttEndpointConfig,
+    MqttProtocolVersion, MqttWillConfig,
+};
 pub use meta::{
     KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_DUPLICATE, KEY_DURABLE_NAME,
     KEY_MESSAGE_EXPIRY_INTERVAL_SECS, KEY_NO_LOCAL, KEY_PACKET_ID, KEY_PAYLOAD_FORMAT, KEY_QOS,
@@ -125,7 +130,7 @@ pub enum MqttListenerStatus {
 #[derive(Clone)]
 pub struct MqttDriver {
     /// Device metadata and broker configuration served by this driver.
-    pub dvc: Device<MqttResourceAttributes>,
+    pub dvc: MqttDevice,
     /// Live MQTT client session used by the runtime transport.
     session: Shared<RuntimeMutex<Option<MqttClientSession>>>,
     /// Last negotiated CONNACK capabilities and identifiers observed from broker.
@@ -167,16 +172,12 @@ impl MqttDriver {
     /// embassy stack has no ambient executor or network stack — construct with
     /// [`MqttDriver::with_stack`] there.
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-    pub fn new(dvc: Device<MqttResourceAttributes>) -> Self {
+    pub fn new(dvc: MqttDevice) -> Self {
         Self::with_stack(dvc, StackRuntime::default(), StackNet::default())
     }
 
     /// Creates a new MQTT driver from device metadata plus an explicit runtime stack.
-    pub fn with_stack(
-        dvc: Device<MqttResourceAttributes>,
-        runtime: StackRuntime,
-        net: StackNet,
-    ) -> Self {
+    pub fn with_stack(dvc: MqttDevice, runtime: StackRuntime, net: StackNet) -> Self {
         let runtime = Shared::new(runtime);
 
         Self {
@@ -258,10 +259,7 @@ impl MqttDriver {
             }
         }
 
-        let config = match &self.dvc.endpoint {
-            DeviceEndpoint::Mqtt(config) => config,
-            _ => return Err("device endpoint is not MQTT".to_string()),
-        };
+        let config = &self.dvc.endpoint;
 
         let mut stream = self
             .net
@@ -366,11 +364,8 @@ impl MqttDriver {
         self.runtime.block_on(self.negotiated_connack_async())
     }
 
-    fn reconnect_config(&self) -> Result<BrokerReconnectConfig, String> {
-        match &self.dvc.endpoint {
-            DeviceEndpoint::Mqtt(config) => Ok(config.reconnect.clone()),
-            _ => Err("device endpoint is not MQTT".to_string()),
-        }
+    fn reconnect_config(&self) -> BrokerReconnectConfig {
+        self.dvc.endpoint.reconnect.clone()
     }
 
     fn request_topic_key(request: &MqttPacketRequest) -> Option<String> {
@@ -417,7 +412,7 @@ impl MqttDriver {
     }
 
     async fn enqueue_recovery_request(&self, request: MqttPacketRequest) -> Result<(), String> {
-        let reconnect = self.reconnect_config()?;
+        let reconnect = self.reconnect_config();
         if !reconnect.queue_requests_while_disconnected {
             return Err("MQTT recovery queue is disabled".to_string());
         }
@@ -438,7 +433,7 @@ impl MqttDriver {
         &self,
         session: &mut MqttClientSession,
     ) -> Result<Vec<RoutedEvent<'static>>, String> {
-        let reconnect = self.reconnect_config()?;
+        let reconnect = self.reconnect_config();
         let result = async {
             let mut recovered_events = Vec::new();
             if reconnect.replay_subscriptions {
@@ -1073,7 +1068,7 @@ impl EventSource for MqttDriver {
         let device_id = self.dvc.id.clone();
         let driver = self.clone();
         let runtime = self.runtime.clone();
-        let reconnect = self.reconnect_config()?;
+        let reconnect = self.reconnect_config();
         let (command_tx, command_rx): (
             RuntimeSender<SessionCommand>,
             RuntimeReceiver<SessionCommand>,

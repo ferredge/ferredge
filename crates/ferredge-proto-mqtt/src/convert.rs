@@ -23,6 +23,7 @@ use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use serde_json::to_vec;
 
+use crate::endpoint::MqttProtocolVersion;
 use crate::meta::{
     KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_MESSAGE_EXPIRY_INTERVAL_SECS, KEY_NO_LOCAL,
     KEY_PAYLOAD_FORMAT, KEY_RESPONSE_TOPIC, KEY_RETAIN, KEY_RETAIN_AS_PUBLISHED,
@@ -40,7 +41,7 @@ pub struct MqttBridgeCodec<'a> {
 
 impl<'a> MqttBridgeCodec<'a> {
     /// Creates a codec bound to one MQTT device definition.
-    pub fn new(device: &'a Device<crate::types::MqttResourceAttributes>) -> Self {
+    pub fn new(device: &'a crate::endpoint::MqttDevice) -> Self {
         Self {
             value: MqttCommandRef { device },
         }
@@ -53,8 +54,7 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, MqttPacketRequest>
     type Error = MqttCommandConversionError;
 
     fn encode(&self, message: BridgeMessage<'static>) -> Result<MqttPacketRequest, Self::Error> {
-        let config = self.value.endpoint_config()?;
-        let version = config.preferred_protocol_version();
+        let version = self.value.device.endpoint.preferred_protocol_version();
         build_packet_request(packet_semantics_from_bridge(&message)?, version)
     }
 }
@@ -65,8 +65,7 @@ impl ProtocolEncoder<NativeOutbound, MqttNativePlan<'static>, MqttPacketRequest>
     type Error = MqttCommandConversionError;
 
     fn encode(&self, plan: MqttNativePlan<'static>) -> Result<MqttPacketRequest, Self::Error> {
-        let config = self.value.endpoint_config()?;
-        let version = config.preferred_protocol_version();
+        let version = self.value.device.endpoint.preferred_protocol_version();
         build_packet_request(packet_semantics_from_native_plan(&plan)?, version)
     }
 }

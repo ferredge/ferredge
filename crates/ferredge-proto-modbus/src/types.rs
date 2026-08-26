@@ -21,7 +21,7 @@ use crate::{StackNet, StackSerial};
 use crate::{
     StackRuntime,
     attributes::ModbusResourceAttributes,
-    convert::endpoint_options,
+    endpoint::ModbusDevice,
     transport::{ModbusTransport, StackTransport},
 };
 
@@ -115,7 +115,7 @@ pub(crate) enum ModbusValue<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ModbusCommandRef<'a> {
-    pub device: &'a Device<ModbusResourceAttributes>,
+    pub device: &'a ModbusDevice,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,18 +140,18 @@ impl ModbusNativePlan<'_> {
 }
 
 pub struct ModbusCommandPlanner<'a> {
-    device: &'a Device<ModbusResourceAttributes>,
+    device: &'a ModbusDevice,
 }
 
 /// Inbound Modbus response decoder bound to one originating command.
 pub struct ModbusResponseDecoderContext<'a> {
-    device: &'a Device<ModbusResourceAttributes>,
+    device: &'a ModbusDevice,
     command: &'a Command,
 }
 
 /// Decoded inbound Modbus response plus bound command context.
 pub struct ModbusDecodedResponse<'a, 'ctx> {
-    device: &'ctx Device<ModbusResourceAttributes>,
+    device: &'ctx ModbusDevice,
     command: &'ctx Command,
     response: &'a ModbusResponse,
 }
@@ -166,7 +166,7 @@ pub struct ModbusDecodedResponse<'a, 'ctx> {
 /// type-erased serial default.
 #[derive(Clone)]
 pub struct ModbusDriver<T: ModbusTransport = StackTransport> {
-    pub dvc: Device<ModbusResourceAttributes>,
+    pub dvc: ModbusDevice,
     pub(crate) runtime: StackRuntime,
     pub(crate) transport: T,
     pub(crate) persistent_session: Shared<RuntimeMutex<Option<T::Session>>>,
@@ -187,7 +187,7 @@ impl ModbusDriver {
     /// embassy stack has no ambient executor or network stack — construct with
     /// [`ModbusDriver::with_stack`] or [`ModbusDriver::with_transport`] there.
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-    pub fn new(dvc: Device<ModbusResourceAttributes>) -> Self {
+    pub fn new(dvc: ModbusDevice) -> Self {
         Self::with_stack(
             dvc,
             StackRuntime::default(),
@@ -204,12 +204,7 @@ where
 {
     /// Creates a new Modbus driver from device metadata plus an explicit runtime stack,
     /// serving every Modbus endpoint family through a [`StackTransport`].
-    pub fn with_stack(
-        dvc: Device<ModbusResourceAttributes>,
-        runtime: StackRuntime,
-        net: N,
-        serial: S,
-    ) -> Self {
+    pub fn with_stack(dvc: ModbusDevice, runtime: StackRuntime, net: N, serial: S) -> Self {
         Self::with_transport(dvc, runtime, StackTransport::new(net, serial))
     }
 }
@@ -217,11 +212,7 @@ where
 impl<T: ModbusTransport> ModbusDriver<T> {
     /// Creates a new Modbus driver from device metadata plus an explicit runtime and wire
     /// transport. The transport determines which endpoint families the driver can execute.
-    pub fn with_transport(
-        dvc: Device<ModbusResourceAttributes>,
-        runtime: StackRuntime,
-        transport: T,
-    ) -> Self {
+    pub fn with_transport(dvc: ModbusDevice, runtime: StackRuntime, transport: T) -> Self {
         Self {
             dvc,
             runtime: runtime.clone(),
@@ -262,13 +253,7 @@ impl<T: ModbusTransport> ModbusDriver<T> {
         let message = planner::command_to_register_access(
             command,
             register,
-            endpoint_options(&self.dvc.endpoint)
-                .ok_or_else(|| {
-                    ModbusCommandConversionError::InvalidResource(
-                        "missing Modbus endpoint options".to_string(),
-                    )
-                })?
-                .unit_id,
+            self.dvc.endpoint.options().unit_id,
         )?;
         crate::ModbusBridgeCodec::new(&self.dvc).encode_ref(ModbusNativePlan::try_from(&message)?)
     }
@@ -276,7 +261,7 @@ impl<T: ModbusTransport> ModbusDriver<T> {
 
 impl<'a> ModbusCommandPlanner<'a> {
     /// Creates an outbound planner bound to one Modbus device definition.
-    pub fn new(device: &'a Device<ModbusResourceAttributes>) -> Self {
+    pub fn new(device: &'a ModbusDevice) -> Self {
         Self { device }
     }
 
@@ -299,13 +284,7 @@ impl<'a> ModbusCommandPlanner<'a> {
             self.device.resources.get(resource).ok_or_else(|| {
                 ModbusCommandConversionError::UnknownResource(resource.to_string())
             })?;
-        let unit_id = endpoint_options(&self.device.endpoint)
-            .ok_or_else(|| {
-                ModbusCommandConversionError::InvalidResource(
-                    "missing Modbus endpoint options".to_string(),
-                )
-            })?
-            .unit_id;
+        let unit_id = self.device.endpoint.options().unit_id;
 
         Ok(ModbusNativePlan {
             resource: Cow::Borrowed(resource),
@@ -331,13 +310,7 @@ impl ProtocolPlanner<BridgeOutbound, BridgeMessage<'static>> for ModbusCommandPl
             _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
         };
 
-        let unit_id = endpoint_options(&self.device.endpoint)
-            .ok_or_else(|| {
-                ModbusCommandConversionError::InvalidResource(
-                    "missing Modbus endpoint options".to_string(),
-                )
-            })?
-            .unit_id;
+        let unit_id = self.device.endpoint.options().unit_id;
 
         planner::command_to_register_access(command, register, unit_id).map_err(Into::into)
     }
@@ -352,7 +325,7 @@ impl ProtocolPlanner<NativeOutbound, ModbusNativePlan<'static>> for ModbusComman
 }
 
 impl<'a> ModbusResponseDecoderContext<'a> {
-    pub fn new(device: &'a Device<ModbusResourceAttributes>, command: &'a Command) -> Self {
+    pub fn new(device: &'a ModbusDevice, command: &'a Command) -> Self {
         Self { device, command }
     }
 

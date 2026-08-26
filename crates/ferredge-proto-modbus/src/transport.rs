@@ -13,7 +13,7 @@ use rmodbus::ModbusProto;
 use crate::{
     ModbusDriver, ModbusRequest, ModbusResponse, StackNet, StackSerial,
     codec::{build_modbus_response, decode_ascii_wire_frame},
-    convert::endpoint_options,
+    endpoint::{ModbusEndpoint, ModbusReconnectConfig},
 };
 
 /// Use this to load the entire datagram into memory before processing,
@@ -42,7 +42,7 @@ pub trait ModbusTransport: Clone + MaybeSend + MaybeSync + 'static {
     /// replenishing `session` as the endpoint's persistence policy dictates.
     fn execute(
         &self,
-        endpoint: &DeviceEndpoint,
+        endpoint: &ModbusEndpoint,
         request: &ModbusRequest,
         session: &mut Option<Self::Session>,
     ) -> impl Future<Output = Result<Vec<u8>, String>> + MaybeSend;
@@ -88,18 +88,18 @@ impl<N: AsyncNet> ModbusTransport for TcpTransport<N> {
 
     async fn execute(
         &self,
-        endpoint: &DeviceEndpoint,
+        endpoint: &ModbusEndpoint,
         request: &ModbusRequest,
         session: &mut Option<Self::Session>,
     ) -> Result<Vec<u8>, String> {
         let (addr, port, persistent, label) = match endpoint {
-            DeviceEndpoint::ModbusTCP(config) => (
+            ModbusEndpoint::Tcp(config) => (
                 config.addr.as_str(),
                 config.port,
                 config.options.persistent_session,
                 "Modbus TCP",
             ),
-            DeviceEndpoint::ModbusRTUOverTCP(config) => (
+            ModbusEndpoint::RtuOverTcp(config) => (
                 config.addr.as_str(),
                 config.port,
                 config.options.persistent_session,
@@ -162,11 +162,11 @@ impl<N: AsyncDatagramNet> ModbusTransport for UdpTransport<N> {
 
     async fn execute(
         &self,
-        endpoint: &DeviceEndpoint,
+        endpoint: &ModbusEndpoint,
         request: &ModbusRequest,
         _session: &mut Option<Self::Session>,
     ) -> Result<Vec<u8>, String> {
-        let DeviceEndpoint::ModbusUDP(config) = endpoint else {
+        let ModbusEndpoint::Udp(config) = endpoint else {
             return Err("device endpoint is not Modbus UDP".to_string());
         };
 
@@ -214,18 +214,18 @@ impl<S: AsyncSerial> ModbusTransport for SerialTransport<S> {
 
     async fn execute(
         &self,
-        endpoint: &DeviceEndpoint,
+        endpoint: &ModbusEndpoint,
         request: &ModbusRequest,
         session: &mut Option<Self::Session>,
     ) -> Result<Vec<u8>, String> {
         let (config, persistent, label, is_ascii) = match endpoint {
-            DeviceEndpoint::ModbusRTU(config) => (
+            ModbusEndpoint::Rtu(config) => (
                 &config.serial,
                 config.options.persistent_session,
                 "Modbus RTU",
                 false,
             ),
-            DeviceEndpoint::ModbusASCII(config) => (
+            ModbusEndpoint::Ascii(config) => (
                 &config.serial,
                 config.options.persistent_session,
                 "Modbus ASCII",
@@ -319,12 +319,12 @@ where
 
     async fn execute(
         &self,
-        endpoint: &DeviceEndpoint,
+        endpoint: &ModbusEndpoint,
         request: &ModbusRequest,
         session: &mut Option<Self::Session>,
     ) -> Result<Vec<u8>, String> {
         match endpoint {
-            DeviceEndpoint::ModbusTCP(_) | DeviceEndpoint::ModbusRTUOverTCP(_) => {
+            ModbusEndpoint::Tcp(_) | ModbusEndpoint::RtuOverTcp(_) => {
                 let mut sub = match session.take() {
                     Some(StackSession::Tcp(socket)) => Some(socket),
                     Some(other) => {
@@ -337,8 +337,8 @@ where
                 *session = sub.map(StackSession::Tcp);
                 result
             }
-            DeviceEndpoint::ModbusUDP(_) => self.udp.execute(endpoint, request, &mut None).await,
-            DeviceEndpoint::ModbusRTU(_) | DeviceEndpoint::ModbusASCII(_) => {
+            ModbusEndpoint::Udp(_) => self.udp.execute(endpoint, request, &mut None).await,
+            ModbusEndpoint::Rtu(_) | ModbusEndpoint::Ascii(_) => {
                 let mut sub = match session.take() {
                     Some(StackSession::Serial(port)) => Some(port),
                     Some(other) => {
@@ -351,7 +351,6 @@ where
                 *session = sub.map(StackSession::Serial);
                 result
             }
-            _ => Err("device endpoint is not Modbus".to_string()),
         }
     }
 
@@ -391,9 +390,7 @@ impl<T: ModbusTransport> ModbusDriver<T> {
         &self,
         request: &ModbusRequest,
     ) -> Result<Vec<u8>, String> {
-        let options = endpoint_options(&self.dvc.endpoint)
-            .ok_or_else(|| "missing Modbus endpoint options".to_string())?;
-        let reconnect = &options.reconnect;
+        let reconnect = &self.dvc.endpoint.options().reconnect;
         let max_attempts = request_attempt_budget(reconnect, request.is_write);
         let mut last_error = None;
 

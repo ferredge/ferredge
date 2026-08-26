@@ -18,15 +18,17 @@ use ferredge_bridge::{
 };
 use ferredge_core::prelude::*;
 use ferredge_proto_http::{
-    HttpCommandPlanner, HttpDriver, HttpMeta, HttpNativePlan, HttpRequestEncoder,
-    attributes::HttpResourceAttributes,
+    HttpCommandPlanner, HttpDriver, HttpEndpointConfig, HttpMeta, HttpNativePlan,
+    HttpRequestEncoder, attributes::HttpResourceAttributes,
 };
 use ferredge_proto_modbus::{
-    ModbusBridgeCodec, ModbusCommandPlanner, ModbusDriver, ModbusNativePlan,
+    ModbusBridgeCodec, ModbusClientOptions, ModbusCommandPlanner, ModbusDriver, ModbusEndpoint,
+    ModbusNativePlan, ModbusTcpEndpointConfig,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
 };
 use ferredge_proto_mqtt::{
-    MqttBridgeCodec, MqttCommandPlanner, MqttDriver, MqttMessageOptions, MqttMeta, MqttWirePacket,
+    MqttBridgeCodec, MqttCommandPlanner, MqttConnectProperties, MqttDriver, MqttEndpointConfig,
+    MqttMessageOptions, MqttMeta, MqttProtocolVersion, MqttWirePacket,
 };
 use ferredge_test_support::{
     diagslave::DiagslaveGuard, mosquitto::MosquittoGuard, process::require_command,
@@ -309,7 +311,7 @@ fn make_http_driver(endpoint: String) -> HttpDriver {
         id: "http-interop-device".to_string(),
         name: "HTTP Interop Device".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::http(HttpEndpointConfig { url: endpoint }),
+        endpoint: HttpEndpointConfig { url: endpoint },
         metadata: None,
         max_connections: Some(1),
         resources,
@@ -327,7 +329,7 @@ fn make_mqtt_driver(
         id: device_id.to_string(),
         name: "MQTT Interop Device".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+        endpoint: MqttEndpointConfig {
             broker,
             client_id: client_id.to_string(),
             auth: None,
@@ -350,7 +352,7 @@ fn make_mqtt_driver(
                 max_queued_requests: 64,
             },
             supported_versions,
-        }),
+        },
         metadata: None,
         max_connections: Some(4),
         resources: Map::default(),
@@ -414,7 +416,7 @@ fn make_modbus_driver(port: u16) -> ModbusDriver {
         id: "modbus-interop-device".to_string(),
         name: "Modbus Interop Device".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+        endpoint: ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
             addr: "127.0.0.1".to_string(),
             port,
             options: ModbusClientOptions::default(),

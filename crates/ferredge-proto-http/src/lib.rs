@@ -16,9 +16,11 @@ use ferredge_bridge::{
 use ferredge_core::prelude::*;
 
 pub mod attributes;
+mod endpoint;
 mod handler;
 mod meta;
 
+pub use endpoint::{HttpDevice, HttpEndpointConfig};
 pub use meta::{HttpMeta, KEY_CONTENT_TYPE, KEY_METHOD, KEY_PATH, KEY_STATUS_CODE};
 #[cfg(any(
     all(feature = "tokio-runtime", feature = "async-std-runtime"),
@@ -102,7 +104,7 @@ pub enum HttpCommandConversionError {
 #[derive(Clone)]
 pub struct HttpDriver {
     /// Device metadata and resource map served by this driver.
-    pub dvc: Device<attributes::HttpResourceAttributes>,
+    pub dvc: HttpDevice,
     /// Selected runtime used by the live HTTP transport path.
     #[cfg(any(
         feature = "tokio-runtime",
@@ -128,7 +130,7 @@ impl core::fmt::Debug for HttpDriver {
 }
 
 pub struct HttpRequestEncoder<'a> {
-    device: &'a Device<attributes::HttpResourceAttributes>,
+    device: &'a HttpDevice,
 }
 
 /// Outbound planner for HTTP request/response semantics.
@@ -168,13 +170,13 @@ impl HttpNativePlan<'_> {
 
 /// Inbound HTTP response decoder bound to one originating command.
 pub struct HttpResponseDecoder<'a> {
-    device: &'a Device<attributes::HttpResourceAttributes>,
+    device: &'a HttpDevice,
     command: &'a Command,
 }
 
 /// Decoded inbound HTTP response plus bound command context.
 pub struct HttpDecodedResponse<'a, 'ctx> {
-    device: &'ctx Device<attributes::HttpResourceAttributes>,
+    device: &'ctx HttpDevice,
     command: &'ctx Command,
     response: &'a HttpResponse,
 }
@@ -186,16 +188,12 @@ impl HttpDriver {
     /// embassy stack has no ambient executor or network stack — construct with
     /// [`HttpDriver::with_stack`] there.
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-    pub fn new(dvc: Device<attributes::HttpResourceAttributes>) -> Self {
+    pub fn new(dvc: HttpDevice) -> Self {
         Self::with_stack(dvc, StackRuntime::default(), StackNet::default())
     }
 
     /// Creates a new HTTP driver from device metadata plus an explicit runtime stack.
-    pub fn with_stack(
-        dvc: Device<attributes::HttpResourceAttributes>,
-        runtime: StackRuntime,
-        net: StackNet,
-    ) -> Self {
+    pub fn with_stack(dvc: HttpDevice, runtime: StackRuntime, net: StackNet) -> Self {
         Self { dvc, runtime, net }
     }
 
@@ -298,10 +296,7 @@ impl ProtocolPlanner<NativeOutbound, HttpNativePlan<'static>> for HttpCommandPla
 }
 
 impl<'a> HttpResponseDecoder<'a> {
-    pub fn new(
-        device: &'a Device<attributes::HttpResourceAttributes>,
-        command: &'a Command,
-    ) -> Self {
+    pub fn new(device: &'a HttpDevice, command: &'a Command) -> Self {
         Self { device, command }
     }
 
@@ -315,7 +310,7 @@ impl<'a> HttpResponseDecoder<'a> {
 }
 
 impl<'a> HttpRequestEncoder<'a> {
-    pub fn new(device: &'a Device<attributes::HttpResourceAttributes>) -> Self {
+    pub fn new(device: &'a HttpDevice) -> Self {
         Self { device }
     }
 }
@@ -599,10 +594,7 @@ impl RequestResponse for HttpDriver {
     type Error = String;
 
     async fn execute(&self, request: Self::Request) -> Result<Self::Response, Self::Error> {
-        let endpoint = match &self.dvc.endpoint {
-            DeviceEndpoint::Http(config) => config.url.as_str(),
-            _ => return Err("device endpoint is not HTTP".to_string()),
-        };
+        let endpoint = self.dvc.endpoint.url.as_str();
 
         #[cfg(any(
             feature = "tokio-runtime",
@@ -626,8 +618,8 @@ mod tests {
     use super::*;
     use ferredge_bridge::ProtocolDecoder;
     use ferredge_core::prelude::{
-        BrokerAddress, BrokerChannelKind, BrokerMessageOptions, DeviceEndpoint,
-        DeviceResourceAccessPermission, DeviceStatus, HttpEndpointConfig, Intent, Map,
+        BrokerAddress, BrokerChannelKind, BrokerMessageOptions, DeviceResourceAccessPermission,
+        DeviceStatus, Intent, Map,
     };
     use std::{
         io::{Read, Write},
@@ -670,9 +662,9 @@ mod tests {
             id: "device-1".to_string(),
             name: "HTTP Device".to_string(),
             status: DeviceStatus::Online,
-            endpoint: DeviceEndpoint::http(HttpEndpointConfig {
+            endpoint: HttpEndpointConfig {
                 url: "127.0.0.1:8080".to_string(),
-            }),
+            },
             metadata: None,
             max_connections: Some(4),
             resources,
@@ -844,7 +836,7 @@ mod tests {
 
     fn make_http_driver_for_url(url: String) -> HttpDriver {
         let mut driver = make_driver();
-        driver.dvc.endpoint = DeviceEndpoint::http(HttpEndpointConfig { url });
+        driver.dvc.endpoint = HttpEndpointConfig { url };
         driver
     }
 

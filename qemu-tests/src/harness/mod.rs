@@ -51,7 +51,8 @@ async fn net_task(mut runner: embassy_net::Runner<'static, lan9118::Device>) -> 
 /// user-mode network stack (which assigns the guest 10.0.2.15).
 async fn net_up(spawner: Spawner) -> Stack<'static> {
     static STATE: StaticCell<lan9118::State> = StaticCell::new();
-    let (device, driver_runner) = lan9118::new(lan9118::LAN9118_BASE, STATE.init(lan9118::State::new()));
+    let (device, driver_runner) =
+        lan9118::new(lan9118::LAN9118_BASE, STATE.init(lan9118::State::new()));
     spawner.spawn(lan9118_task(driver_runner).expect("lan9118 task slot"));
 
     static RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();

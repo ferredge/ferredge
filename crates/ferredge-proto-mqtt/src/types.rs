@@ -8,6 +8,7 @@ use alloc::{string::String, vec::Vec};
 use ferredge_bridge::BridgePlannerError;
 use ferredge_core::prelude::*;
 
+use crate::endpoint::MqttDevice;
 use crate::meta::{MqttPayloadFormat, MqttRetainHandling};
 use mqtt_protocol_core::mqtt;
 use serde::{Deserialize, Serialize};
@@ -234,9 +235,6 @@ pub enum MqttCommandConversionError {
     /// Requested broker channel kind cannot be mapped to MQTT topic semantics.
     #[error("unsupported broker channel kind for MQTT topic mapping: {0:?}")]
     UnsupportedChannelKind(BrokerChannelKind),
-    /// Bound device endpoint is not configured for MQTT.
-    #[error("device endpoint is not MQTT")]
-    NonMqttEndpoint,
     /// MQTT 3.1.1 cannot represent selected publish options.
     #[error("MQTT 3.1.1 publish does not support MQTT v5 properties")]
     MqttV5PublishOptionsOnV3,
@@ -259,17 +257,7 @@ pub enum MqttCommandConversionError {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MqttCommandRef<'a> {
     /// Device-side broker configuration and metadata.
-    pub device: &'a Device<MqttResourceAttributes>,
-}
-
-impl MqttCommandRef<'_> {
-    /// Returns MQTT endpoint config from bound device.
-    pub fn endpoint_config(&self) -> Result<&MqttEndpointConfig, MqttCommandConversionError> {
-        match &self.device.endpoint {
-            DeviceEndpoint::Mqtt(config) => Ok(config),
-            _ => Err(MqttCommandConversionError::NonMqttEndpoint),
-        }
-    }
+    pub device: &'a MqttDevice,
 }
 
 /// Stage of MQTT v5 enhanced authentication exchange.

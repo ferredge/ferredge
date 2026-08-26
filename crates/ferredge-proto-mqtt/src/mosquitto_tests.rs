@@ -12,14 +12,14 @@ use ferredge_test_support::{
 use ferredge_core::prelude::{
     Address, BackoffStrategy, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerReconnectConfig, BrokerSubscriptionOptions, Command, Correlation, DeliveryGuarantee,
-    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
-    MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion, MqttWillConfig, PayloadValue,
-    PubSub, Route, RoutedEvent,
+    Device, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map, PayloadValue, PubSub,
+    Route, RoutedEvent,
 };
 
 use crate::{
-    MqttDriver, MqttListenerStatus, MqttMessageOptions, MqttMeta, MqttPayloadFormat,
-    MqttSubscriptionOptions, types::MqttPacketRequest,
+    MqttConnectProperties, MqttDriver, MqttEndpointConfig, MqttListenerStatus, MqttMessageOptions,
+    MqttMeta, MqttPayloadFormat, MqttProtocolVersion, MqttSubscriptionOptions, MqttWillConfig,
+    types::MqttPacketRequest,
 };
 
 const MOSQUITTO_START_TIMEOUT_SECS: u64 = 5;
@@ -78,7 +78,7 @@ fn make_driver_with_config(
         id: device_id,
         name: "MQTT Mosquitto Device".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+        endpoint: MqttEndpointConfig {
             broker,
             client_id,
             auth: None,
@@ -91,7 +91,7 @@ fn make_driver_with_config(
             will: None,
             reconnect,
             supported_versions: vec![MqttProtocolVersion::V5_0],
-        }),
+        },
         metadata: None,
         max_connections: Some(4),
         resources: Map::default(),
@@ -589,21 +589,19 @@ fn mosquitto_will_publishes_after_ungraceful_driver_drop() {
         "mqtt-will-publisher",
         "ferredge-mosquitto-will-publisher",
     );
-    if let DeviceEndpoint::Mqtt(config) = &mut driver.dvc.endpoint {
-        config.will = Some(MqttWillConfig {
-            topic: will_topic.to_string(),
-            payload: b"offline".to_vec(),
-            delivery: Some(DeliveryGuarantee::AtLeastOnce),
-            retain: true,
-            delay_interval_secs: Some(1),
-            payload_format: Some("utf8".to_string()),
-            message_expiry_interval_secs: Some(30),
-            content_type: Some("text/plain".to_string()),
-            response_topic: Some("ferredge/it/will/reply".to_string()),
-            correlation_data: Some(b"will-corr".to_vec()),
-            user_properties: vec![("source".to_string(), "ferredge".to_string())],
-        });
-    }
+    driver.dvc.endpoint.will = Some(MqttWillConfig {
+        topic: will_topic.to_string(),
+        payload: b"offline".to_vec(),
+        delivery: Some(DeliveryGuarantee::AtLeastOnce),
+        retain: true,
+        delay_interval_secs: Some(1),
+        payload_format: Some("utf8".to_string()),
+        message_expiry_interval_secs: Some(30),
+        content_type: Some("text/plain".to_string()),
+        response_topic: Some("ferredge/it/will/reply".to_string()),
+        correlation_data: Some(b"will-corr".to_vec()),
+        user_properties: vec![("source".to_string(), "ferredge".to_string())],
+    });
 
     block_on(driver.start()).expect("driver should connect with will configured");
     thread::sleep(Duration::from_millis(MOSQUITTO_SUBSCRIBER_STARTUP_MS));

@@ -8,7 +8,9 @@ use core::cell::RefCell;
 use embassy_executor::Spawner;
 use embassy_net::{Ipv4Address, Ipv4Cidr};
 use ferredge_core::prelude::*;
-use ferredge_proto_mqtt::{MqttDriver, MqttListenerStatus};
+use ferredge_proto_mqtt::{
+    MqttConnectProperties, MqttDriver, MqttEndpointConfig, MqttListenerStatus, MqttProtocolVersion,
+};
 use ferredge_runtime_embassy::EmbassyRuntime;
 
 use crate::fakes::{SharedWire, TestDriver, Wire, make_net};
@@ -43,7 +45,7 @@ pub async fn run(spawner: Spawner, runtime: &EmbassyRuntime) {
             id: "mqtt-device-1".to_string(),
             name: "MQTT Device".to_string(),
             status: DeviceStatus::Online,
-            endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+            endpoint: MqttEndpointConfig {
                 broker: "10.0.9.2:1883".to_string(),
                 client_id: "qemu-client".to_string(),
                 auth: None,
@@ -56,7 +58,7 @@ pub async fn run(spawner: Spawner, runtime: &EmbassyRuntime) {
                 will: None,
                 reconnect: BrokerReconnectConfig::default(),
                 supported_versions: vec![MqttProtocolVersion::V5_0],
-            }),
+            },
             metadata: None,
             max_connections: Some(4),
             resources: Map::default(),
