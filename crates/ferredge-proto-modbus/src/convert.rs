@@ -60,12 +60,12 @@ impl<'a> ModbusBridgeCodec<'a> {
     }
 }
 
-impl ProtocolEncoder<NativeOutbound, ModbusNativePlan<'static>, ModbusRequest>
+impl<'p> ProtocolEncoder<NativeOutbound, ModbusNativePlan<'p>, ModbusRequest>
     for ModbusBridgeCodec<'_>
 {
     type Error = ModbusCommandConversionError;
 
-    fn encode(&self, planned: ModbusNativePlan<'static>) -> Result<ModbusRequest, Self::Error> {
+    fn encode(&self, planned: ModbusNativePlan<'p>) -> Result<ModbusRequest, Self::Error> {
         self.encode_ref(planned)
     }
 }

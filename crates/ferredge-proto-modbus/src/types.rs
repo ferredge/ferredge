@@ -146,13 +146,13 @@ pub struct ModbusCommandPlanner<'a> {
 /// Inbound Modbus response decoder bound to one originating command.
 pub struct ModbusResponseDecoderContext<'a> {
     device: &'a ModbusDevice,
-    command: &'a Command,
+    command: &'a Command<'a>,
 }
 
 /// Decoded inbound Modbus response plus bound command context.
 pub struct ModbusDecodedResponse<'a, 'ctx> {
     device: &'ctx ModbusDevice,
-    command: &'ctx Command,
+    command: &'ctx Command<'ctx>,
     response: &'a ModbusResponse,
 }
 
@@ -221,14 +221,14 @@ impl<T: ModbusTransport> ModbusDriver<T> {
         }
     }
 
-    pub async fn execute_command(&self, command: Command) -> Result<ModbusResponse, String> {
+    pub async fn execute_command(&self, command: Command<'_>) -> Result<ModbusResponse, String> {
         let request = self.native_request(command).map_err(|e| e.to_string())?;
         self.execute(request).await
     }
 
     pub fn native_request(
         &self,
-        command: Command,
+        command: Command<'_>,
     ) -> Result<ModbusRequest, ModbusCommandConversionError> {
         let planner = ModbusCommandPlanner::new(&self.dvc);
         let codec = crate::ModbusBridgeCodec::new(&self.dvc);
@@ -238,12 +238,12 @@ impl<T: ModbusTransport> ModbusDriver<T> {
 
     pub fn bridge_request(
         &self,
-        command: Command,
+        command: Command<'_>,
     ) -> Result<ModbusRequest, ModbusCommandConversionError> {
         let register = match &command.intent {
             Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
-                let resource_def = self.dvc.resources.get(resource).ok_or_else(|| {
-                    ModbusCommandConversionError::UnknownResource(resource.clone())
+                let resource_def = self.dvc.resources.get(resource.as_ref()).ok_or_else(|| {
+                    ModbusCommandConversionError::UnknownResource(resource.to_string())
                 })?;
                 register_meta(&resource_def.resource_attributes)
             }
@@ -267,14 +267,14 @@ impl<'a> ModbusCommandPlanner<'a> {
 
     pub fn plan_ref<'b>(
         &self,
-        command: &'b Command,
+        command: &'b Command<'_>,
     ) -> Result<ModbusNativePlan<'b>, ModbusCommandConversionError> {
         let (resource, action, payload) = match &command.intent {
-            Intent::Read { resource, .. } => (resource.as_str(), RegisterAccessAction::Read, None),
+            Intent::Read { resource, .. } => (resource.as_ref(), RegisterAccessAction::Read, None),
             Intent::Write {
                 resource, payload, ..
             } => (
-                resource.as_str(),
+                resource.as_ref(),
                 RegisterAccessAction::Write,
                 Some(payload.as_borrowed()),
             ),
@@ -296,15 +296,20 @@ impl<'a> ModbusCommandPlanner<'a> {
     }
 }
 
-impl ProtocolPlanner<BridgeOutbound, BridgeMessage<'static>> for ModbusCommandPlanner<'_> {
+impl ProtocolPlanner<BridgeOutbound> for ModbusCommandPlanner<'_> {
     type Error = ModbusCommandConversionError;
+    type Planned<'a> = BridgeMessage<'a>;
 
-    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+    fn plan<'a>(&self, command: Command<'a>) -> Result<BridgeMessage<'a>, Self::Error> {
         let register = match &command.intent {
             Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
-                let resource_def = self.device.resources.get(resource).ok_or_else(|| {
-                    ModbusCommandConversionError::UnknownResource(resource.clone())
-                })?;
+                let resource_def =
+                    self.device
+                        .resources
+                        .get(resource.as_ref())
+                        .ok_or_else(|| {
+                            ModbusCommandConversionError::UnknownResource(resource.to_string())
+                        })?;
                 register_meta(&resource_def.resource_attributes)
             }
             _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
@@ -316,16 +321,37 @@ impl ProtocolPlanner<BridgeOutbound, BridgeMessage<'static>> for ModbusCommandPl
     }
 }
 
-impl ProtocolPlanner<NativeOutbound, ModbusNativePlan<'static>> for ModbusCommandPlanner<'_> {
+impl ProtocolPlanner<NativeOutbound> for ModbusCommandPlanner<'_> {
     type Error = ModbusCommandConversionError;
+    type Planned<'a> = ModbusNativePlan<'a>;
 
-    fn plan(&self, command: Command) -> Result<ModbusNativePlan<'static>, Self::Error> {
-        self.plan_ref(&command).map(ModbusNativePlan::into_owned)
+    fn plan<'a>(&self, command: Command<'a>) -> Result<ModbusNativePlan<'a>, Self::Error> {
+        let (resource, action, payload) = match command.intent {
+            Intent::Read { resource, .. } => (resource, RegisterAccessAction::Read, None),
+            Intent::Write {
+                resource, payload, ..
+            } => (resource, RegisterAccessAction::Write, Some(payload)),
+            _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
+        };
+        let resource_def = self
+            .device
+            .resources
+            .get(resource.as_ref())
+            .ok_or_else(|| ModbusCommandConversionError::UnknownResource(resource.to_string()))?;
+        let unit_id = self.device.endpoint.options().unit_id;
+
+        Ok(ModbusNativePlan {
+            register: register_meta(&resource_def.resource_attributes),
+            resource,
+            action,
+            payload,
+            unit_id,
+        })
     }
 }
 
 impl<'a> ModbusResponseDecoderContext<'a> {
-    pub fn new(device: &'a ModbusDevice, command: &'a Command) -> Self {
+    pub fn new(device: &'a ModbusDevice, command: &'a Command<'a>) -> Self {
         Self { device, command }
     }
 
@@ -359,7 +385,7 @@ where
     fn try_from(value: ModbusDecodedResponse<'a, 'ctx>) -> Result<Self, Self::Error> {
         let self_ = value;
         let resource = match &self_.command.intent {
-            Intent::Read { resource, .. } | Intent::Write { resource, .. } => resource.as_str(),
+            Intent::Read { resource, .. } | Intent::Write { resource, .. } => resource.as_ref(),
             _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
         };
 
@@ -369,8 +395,8 @@ where
                 protocol: ProtocolId::MODBUS,
             },
             result: CommandResult {
-                command_id: self_.command.id.clone(),
-                device_id: self_.device.id.clone(),
+                command_id: Cow::Borrowed(self_.command.id.as_ref()),
+                device_id: Cow::Borrowed(self_.device.id.as_str()),
                 state: DeliveryState::Completed,
                 payload: Some(self_.response.payload()?),
                 error: None,
@@ -386,7 +412,7 @@ where
             RoutedMessage::Result(mut result) => {
                 result.result.correlation = result.result.correlation.or_else(|| {
                     Some(Correlation {
-                        request_id: Cow::Borrowed(self_.command.id.as_str()),
+                        request_id: Cow::Borrowed(self_.command.id.as_ref()),
                         reply_to: Some(Address::Resource(Cow::Borrowed(resource))),
                     })
                 });

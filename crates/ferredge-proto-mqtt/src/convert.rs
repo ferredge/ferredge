@@ -48,23 +48,23 @@ impl<'a> MqttBridgeCodec<'a> {
     }
 }
 
-impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, MqttPacketRequest>
+impl<'p> ProtocolEncoder<BridgeOutbound, BridgeMessage<'p>, MqttPacketRequest>
     for MqttBridgeCodec<'_>
 {
     type Error = MqttCommandConversionError;
 
-    fn encode(&self, message: BridgeMessage<'static>) -> Result<MqttPacketRequest, Self::Error> {
+    fn encode(&self, message: BridgeMessage<'p>) -> Result<MqttPacketRequest, Self::Error> {
         let version = self.value.device.endpoint.preferred_protocol_version();
         build_packet_request(packet_semantics_from_bridge(&message)?, version)
     }
 }
 
-impl ProtocolEncoder<NativeOutbound, MqttNativePlan<'static>, MqttPacketRequest>
+impl<'p> ProtocolEncoder<NativeOutbound, MqttNativePlan<'p>, MqttPacketRequest>
     for MqttBridgeCodec<'_>
 {
     type Error = MqttCommandConversionError;
 
-    fn encode(&self, plan: MqttNativePlan<'static>) -> Result<MqttPacketRequest, Self::Error> {
+    fn encode(&self, plan: MqttNativePlan<'p>) -> Result<MqttPacketRequest, Self::Error> {
         let version = self.value.device.endpoint.preferred_protocol_version();
         build_packet_request(packet_semantics_from_native_plan(&plan)?, version)
     }
@@ -248,7 +248,7 @@ fn publish_view_from_native_plan<'a>(
         reply_to: reply_to.as_ref().and_then(channel_reply_to),
         response_topic: response_topic.as_deref(),
         correlation_id: correlation_id.as_deref().map(ToString::to_string),
-        correlation_data: correlation_data.clone(),
+        correlation_data: correlation_data.as_deref().map(<[u8]>::to_vec),
         projected_user_properties: user_properties
             .iter()
             .map(|(key, value)| (key.as_ref(), value.as_ref()))

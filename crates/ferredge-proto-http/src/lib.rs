@@ -171,13 +171,13 @@ impl HttpNativePlan<'_> {
 /// Inbound HTTP response decoder bound to one originating command.
 pub struct HttpResponseDecoder<'a> {
     device: &'a HttpDevice,
-    command: &'a Command,
+    command: &'a Command<'a>,
 }
 
 /// Decoded inbound HTTP response plus bound command context.
 pub struct HttpDecodedResponse<'a, 'ctx> {
     device: &'ctx HttpDevice,
-    command: &'ctx Command,
+    command: &'ctx Command<'ctx>,
     response: &'a HttpResponse,
 }
 
@@ -197,106 +197,91 @@ impl HttpDriver {
         Self { dvc, runtime, net }
     }
 
-    pub fn native_request(
+    pub fn native_request<'a>(
         &self,
-        command: Command,
+        command: Command<'a>,
     ) -> Result<HttpRequest, HttpCommandConversionError> {
         let planner = HttpCommandPlanner;
-        let plan = <HttpCommandPlanner as ProtocolPlanner<
-            NativeOutbound,
-            HttpNativePlan<'static>,
-        >>::plan(&planner, command)?;
+        let plan =
+            <HttpCommandPlanner as ProtocolPlanner<NativeOutbound>>::plan(&planner, command)?;
         <HttpRequestEncoder<'_> as ProtocolEncoder<
             NativeOutbound,
-            HttpNativePlan<'static>,
+            HttpNativePlan<'a>,
             HttpRequest,
         >>::encode(&HttpRequestEncoder { device: &self.dvc }, plan)
     }
 
-    pub fn bridge_request(
+    pub fn bridge_request<'a>(
         &self,
-        command: Command,
+        command: Command<'a>,
     ) -> Result<HttpRequest, HttpCommandConversionError> {
         let planner = HttpCommandPlanner;
-        let bridge = <HttpCommandPlanner as ProtocolPlanner<
-            BridgeOutbound,
-            BridgeMessage<'static>,
-        >>::plan(&planner, command)?;
+        let bridge =
+            <HttpCommandPlanner as ProtocolPlanner<BridgeOutbound>>::plan(&planner, command)?;
         let native = HttpNativePlan::try_from(&bridge)?;
         <HttpRequestEncoder<'_> as ProtocolEncoder<
             NativeOutbound,
-            HttpNativePlan<'static>,
+            HttpNativePlan<'_>,
             HttpRequest,
         >>::encode(&HttpRequestEncoder { device: &self.dvc }, native)
     }
 }
 
-impl ProtocolPlanner<BridgeOutbound, BridgeMessage<'static>> for HttpCommandPlanner {
+impl ProtocolPlanner<BridgeOutbound> for HttpCommandPlanner {
     type Error = BridgePlannerError;
+    type Planned<'a> = BridgeMessage<'a>;
 
-    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+    fn plan<'a>(&self, command: Command<'a>) -> Result<BridgeMessage<'a>, Self::Error> {
         planner::command_to_request_response(command)
     }
 }
 
-impl ProtocolPlanner<NativeOutbound, HttpNativePlan<'static>> for HttpCommandPlanner {
+impl ProtocolPlanner<NativeOutbound> for HttpCommandPlanner {
     type Error = HttpCommandConversionError;
+    type Planned<'a> = HttpNativePlan<'a>;
 
-    fn plan(&self, command: Command) -> Result<HttpNativePlan<'static>, Self::Error> {
-        let (resource, action, payload, options) = match &command.intent {
-            Intent::Read { resource, options } => (
-                resource.as_str(),
-                RequestResponseAction::Read,
-                None,
-                options,
-            ),
+    fn plan<'a>(&self, command: Command<'a>) -> Result<HttpNativePlan<'a>, Self::Error> {
+        let (resource, action, payload, options) = match command.intent {
+            Intent::Read { resource, options } => {
+                (resource, RequestResponseAction::Read, None, options)
+            }
             Intent::Write {
                 resource,
                 payload,
                 options,
             } => (
-                resource.as_str(),
+                resource,
                 RequestResponseAction::Write,
-                Some(payload.as_borrowed()),
+                Some(payload),
                 options,
             ),
             Intent::Invoke {
                 operation,
                 args,
                 options,
-            } => (
-                operation.as_str(),
-                RequestResponseAction::Invoke,
-                args.as_ref().map(PayloadValue::as_borrowed),
-                options,
-            ),
+            } => (operation, RequestResponseAction::Invoke, args, options),
             _ => return Err(HttpCommandConversionError::UnsupportedIntent),
         };
 
         Ok(HttpNativePlan {
-            resource: Cow::Borrowed(resource),
+            resource,
             action,
             payload,
-            method: options.method.as_deref().map(Cow::Borrowed),
-            path: options.path.as_deref().map(Cow::Borrowed),
-            content_type: options.content_type.as_deref().map(Cow::Borrowed),
+            method: options.method,
+            path: options.path,
+            content_type: options.content_type,
             headers: options
                 .headers
-                .iter()
-                .map(|header| {
-                    (
-                        Cow::Borrowed(header.key.as_ref()),
-                        Cow::Borrowed(header.value.as_ref()),
-                    )
-                })
+                .0
+                .into_iter()
+                .map(|header| (header.key, header.value))
                 .collect(),
-        }
-        .into_owned())
+        })
     }
 }
 
 impl<'a> HttpResponseDecoder<'a> {
-    pub fn new(device: &'a HttpDevice, command: &'a Command) -> Self {
+    pub fn new(device: &'a HttpDevice, command: &'a Command<'a>) -> Self {
         Self { device, command }
     }
 
@@ -315,12 +300,12 @@ impl<'a> HttpRequestEncoder<'a> {
     }
 }
 
-impl ProtocolEncoder<NativeOutbound, HttpNativePlan<'static>, HttpRequest>
+impl<'p> ProtocolEncoder<NativeOutbound, HttpNativePlan<'p>, HttpRequest>
     for HttpRequestEncoder<'_>
 {
     type Error = HttpCommandConversionError;
 
-    fn encode(&self, planned: HttpNativePlan<'static>) -> Result<HttpRequest, Self::Error> {
+    fn encode(&self, planned: HttpNativePlan<'p>) -> Result<HttpRequest, Self::Error> {
         let resource_def = self
             .device
             .resources
@@ -399,10 +384,10 @@ where
             Intent::Read { resource, options }
             | Intent::Write {
                 resource, options, ..
-            } => (resource.as_str(), options),
+            } => (resource.as_ref(), options),
             Intent::Invoke {
                 operation, options, ..
-            } => (operation.as_str(), options),
+            } => (operation.as_ref(), options),
             _ => return Err(HttpCommandConversionError::UnsupportedIntent),
         };
 
@@ -437,8 +422,8 @@ where
                 protocol: ProtocolId::HTTP,
             },
             result: CommandResult {
-                command_id: self_.command.id.clone(),
-                device_id: self_.device.id.clone(),
+                command_id: Cow::Borrowed(self_.command.id.as_ref()),
+                device_id: Cow::Borrowed(self_.device.id.as_str()),
                 state: if self_.response.status_code < 400 {
                     DeliveryState::Completed
                 } else {
@@ -454,7 +439,7 @@ where
                     .map(Correlation::as_borrowed)
                     .or_else(|| {
                         Some(Correlation {
-                            request_id: Cow::Borrowed(self_.command.id.as_str()),
+                            request_id: Cow::Borrowed(self_.command.id.as_ref()),
                             reply_to: Some(Address::Resource(Cow::Borrowed(resource))),
                         })
                     }),
@@ -497,12 +482,12 @@ impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
             .transport
             .as_ref()
             .filter(|transport| transport.protocol == ProtocolId::HTTP);
-        let method = operation.method.clone().map(Cow::Owned).or_else(|| {
+        let method = operation.method.clone().or_else(|| {
             http_capture
                 .and_then(|transport| transport.get_str(KEY_METHOD))
                 .map(|value| Cow::Owned(value.to_string()))
         });
-        let content_type = operation.content_type.clone().map(Cow::Owned).or_else(|| {
+        let content_type = operation.content_type.clone().or_else(|| {
             http_capture
                 .and_then(|transport| transport.get_str(KEY_CONTENT_TYPE))
                 .map(|value| Cow::Owned(value.to_string()))
@@ -676,11 +661,11 @@ mod tests {
     fn read_command_converts_to_http_request() {
         let driver = make_driver();
         let command = Command {
-            id: "cmd-1".to_string(),
+            id: "cmd-1".into(),
             source_device_id: None,
-            target_device_id: "device-1".to_string(),
+            target_device_id: "device-1".into(),
             intent: Intent::Read {
-                resource: "temp".to_string(),
+                resource: "temp".into(),
                 options: RequestOptions::default(),
             },
             correlation: None,
@@ -703,11 +688,11 @@ mod tests {
     fn write_command_converts_to_http_request_with_body() {
         let driver = make_driver();
         let command = Command {
-            id: "cmd-2".to_string(),
+            id: "cmd-2".into(),
             source_device_id: None,
-            target_device_id: "device-1".to_string(),
+            target_device_id: "device-1".into(),
             intent: Intent::Write {
-                resource: "setpoint".to_string(),
+                resource: "setpoint".into(),
                 payload: PayloadValue::String("42".to_string().into()),
                 options: RequestOptions::default(),
             },
@@ -727,12 +712,12 @@ mod tests {
     fn broker_send_intent_is_rejected_for_http() {
         let driver = make_driver();
         let command = Command {
-            id: "cmd-3".to_string(),
+            id: "cmd-3".into(),
             source_device_id: None,
-            target_device_id: "device-1".to_string(),
+            target_device_id: "device-1".into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: "sensors.temp".to_string(),
+                    name: "sensors.temp".into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::String("42".to_string().into()),
@@ -877,11 +862,11 @@ mod tests {
     fn native_read_command_converts_to_http_request() {
         let driver = make_driver();
         let command = Command {
-            id: "cmd-native-read".to_string(),
+            id: "cmd-native-read".into(),
             source_device_id: None,
-            target_device_id: "device-1".to_string(),
+            target_device_id: "device-1".into(),
             intent: Intent::Read {
-                resource: "temp".to_string(),
+                resource: "temp".into(),
                 options: RequestOptions::default(),
             },
             correlation: None,
@@ -904,11 +889,11 @@ mod tests {
     fn native_write_command_converts_to_http_request_with_body() {
         let driver = make_driver();
         let command = Command {
-            id: "cmd-native-write".to_string(),
+            id: "cmd-native-write".into(),
             source_device_id: None,
-            target_device_id: "device-1".to_string(),
+            target_device_id: "device-1".into(),
             intent: Intent::Write {
-                resource: "setpoint".to_string(),
+                resource: "setpoint".into(),
                 payload: PayloadValue::String("42".to_string().into()),
                 options: RequestOptions::default(),
             },
@@ -929,21 +914,21 @@ mod tests {
         let driver = make_driver();
         for command in [
             Command {
-                id: "cmd-parity-read".to_string(),
+                id: "cmd-parity-read".into(),
                 source_device_id: None,
-                target_device_id: "device-1".to_string(),
+                target_device_id: "device-1".into(),
                 intent: Intent::Read {
-                    resource: "temp".to_string(),
+                    resource: "temp".into(),
                     options: RequestOptions::default(),
                 },
                 correlation: None,
             },
             Command {
-                id: "cmd-parity-write".to_string(),
+                id: "cmd-parity-write".into(),
                 source_device_id: None,
-                target_device_id: "device-1".to_string(),
+                target_device_id: "device-1".into(),
                 intent: Intent::Write {
-                    resource: "setpoint".to_string(),
+                    resource: "setpoint".into(),
                     payload: PayloadValue::String("42".to_string().into()),
                     options: RequestOptions::default(),
                 },
@@ -959,11 +944,11 @@ mod tests {
     #[test]
     fn native_http_roundtrip_decodes_completed_routed_result() {
         let command = Command {
-            id: "cmd-roundtrip".to_string(),
+            id: "cmd-roundtrip".into(),
             source_device_id: None,
-            target_device_id: "device-1".to_string(),
+            target_device_id: "device-1".into(),
             intent: Intent::Read {
-                resource: "temp".to_string(),
+                resource: "temp".into(),
                 options: RequestOptions::default(),
             },
             correlation: None,
@@ -1026,11 +1011,11 @@ mod tests {
     #[test]
     fn native_http_roundtrip_decodes_rejected_routed_result() {
         let command = Command {
-            id: "cmd-roundtrip-reject".to_string(),
+            id: "cmd-roundtrip-reject".into(),
             source_device_id: None,
-            target_device_id: "device-1".to_string(),
+            target_device_id: "device-1".into(),
             intent: Intent::Read {
-                resource: "temp".to_string(),
+                resource: "temp".into(),
                 options: RequestOptions::default(),
             },
             correlation: None,

@@ -12,9 +12,9 @@ use std::{
 };
 
 use ferredge_bridge::{
-    BridgeCapability, BridgeCommand, BridgeMessage, BridgeOp, BridgeOutcome, BridgeResult,
-    MessagingAction, MessagingCapability, MessagingOp, ProtocolEncoder, ProtocolPlanner,
-    RequestResponseAction, planner,
+    BridgeCapability, BridgeCommand, BridgeMessage, BridgeOp, BridgeOutbound, BridgeOutcome,
+    BridgeResult, MessagingAction, MessagingCapability, MessagingOp, ProtocolEncoder,
+    ProtocolPlanner, RequestResponseAction, planner,
 };
 use ferredge_core::prelude::*;
 use ferredge_proto_http::{
@@ -430,11 +430,11 @@ fn make_modbus_driver(port: u16) -> ModbusDriver {
 
 fn http_write_command(payload: &str) -> Command {
     Command {
-        id: "http-write-1".to_string(),
-        source_device_id: Some("interop-source".to_string()),
-        target_device_id: "http-interop-device".to_string(),
+        id: "http-write-1".into(),
+        source_device_id: Some("interop-source".into()),
+        target_device_id: "http-interop-device".into(),
         intent: Intent::Write {
-            resource: "setpoint".to_string(),
+            resource: "setpoint".into(),
             payload: PayloadValue::String(payload.to_string().into()),
             options: RequestOptions {
                 headers: vec![
@@ -442,7 +442,7 @@ fn http_write_command(payload: &str) -> Command {
                     ("X-Trace-Id".to_string(), "trace-http-17".to_string()),
                 ]
                 .into(),
-                content_type: Some("text/plain".to_string()),
+                content_type: Some("text/plain".into()),
                 method: None,
                 path: None,
                 extensions: None,
@@ -459,15 +459,15 @@ fn mqtt_publish_command(
     target_device_id: &str,
     topic: &str,
     payload: PayloadValue<'static>,
-    options: BrokerMessageOptions,
-) -> Command {
+    options: BrokerMessageOptions<'static>,
+) -> Command<'static> {
     Command {
-        id: format!("mqtt-publish-{topic}"),
-        source_device_id: Some("interop-source".to_string()),
-        target_device_id: target_device_id.to_string(),
+        id: format!("mqtt-publish-{topic}").into(),
+        source_device_id: Some("interop-source".into()),
+        target_device_id: target_device_id.to_string().into(),
         intent: Intent::Send {
             channel: BrokerAddress {
-                name: topic.to_string(),
+                name: topic.to_string().into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload,
@@ -477,14 +477,14 @@ fn mqtt_publish_command(
     }
 }
 
-fn mqtt_subscribe_command(target_device_id: &str, topic: &str) -> Command {
+fn mqtt_subscribe_command(target_device_id: &str, topic: &str) -> Command<'static> {
     Command {
-        id: format!("mqtt-subscribe-{topic}"),
+        id: format!("mqtt-subscribe-{topic}").into(),
         source_device_id: None,
-        target_device_id: target_device_id.to_string(),
+        target_device_id: target_device_id.to_string().into(),
         intent: Intent::Subscribe {
             channel: BrokerAddress {
-                name: topic.to_string(),
+                name: topic.to_string().into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             options: BrokerSubscriptionOptions::default(),
@@ -493,7 +493,7 @@ fn mqtt_subscribe_command(target_device_id: &str, topic: &str) -> Command {
     }
 }
 
-fn modbus_write_command(value: u16) -> Command {
+fn modbus_write_command(value: u16) -> Command<'static> {
     modbus_write_resource_command(
         "modbus-write-1",
         "holding_u16",
@@ -505,13 +505,13 @@ fn modbus_write_resource_command(
     id: &str,
     resource: &str,
     payload: PayloadValue<'static>,
-) -> Command {
+) -> Command<'static> {
     Command {
-        id: id.to_string(),
-        source_device_id: Some("interop-source".to_string()),
-        target_device_id: "modbus-interop-device".to_string(),
+        id: id.to_string().into(),
+        source_device_id: Some("interop-source".into()),
+        target_device_id: "modbus-interop-device".into(),
         intent: Intent::Write {
-            resource: resource.to_string(),
+            resource: resource.to_string().into(),
             payload,
             options: RequestOptions::default(),
         },
@@ -522,17 +522,17 @@ fn modbus_write_resource_command(
     }
 }
 
-fn modbus_read_command() -> Command {
+fn modbus_read_command() -> Command<'static> {
     modbus_read_resource_command("modbus-read-1", "holding_u16")
 }
 
-fn modbus_read_resource_command(id: &str, resource: &str) -> Command {
+fn modbus_read_resource_command(id: &str, resource: &str) -> Command<'static> {
     Command {
-        id: id.to_string(),
-        source_device_id: Some("interop-source".to_string()),
-        target_device_id: "modbus-interop-device".to_string(),
+        id: id.to_string().into(),
+        source_device_id: Some("interop-source".into()),
+        target_device_id: "modbus-interop-device".into(),
         intent: Intent::Read {
-            resource: resource.to_string(),
+            resource: resource.to_string().into(),
             options: RequestOptions::default(),
         },
         correlation: Some(Correlation {
@@ -560,20 +560,22 @@ fn modbus_request_from_command(
     driver: &ModbusDriver,
     command: &Command,
 ) -> ferredge_proto_modbus::ModbusRequest {
-    let message = ModbusCommandPlanner::new(&driver.dvc)
-        .plan(command.clone())
-        .expect("modbus command should plan");
+    let message = ProtocolPlanner::<BridgeOutbound>::plan(
+        &ModbusCommandPlanner::new(&driver.dvc),
+        command.clone(),
+    )
+    .expect("modbus command should plan");
     match &command.intent {
         Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
             assert!(
-                driver.dvc.resources.contains_key(resource),
+                driver.dvc.resources.contains_key(resource.as_ref()),
                 "modbus resource should exist"
             );
         }
         other => panic!("expected modbus read/write command, got {other:?}"),
     };
     let native = ModbusNativePlan::try_from(&message).expect("modbus bridge should lower");
-    ProtocolEncoder::encode(&ModbusBridgeCodec::new(&driver.dvc), native.into_owned())
+    ProtocolEncoder::encode(&ModbusBridgeCodec::new(&driver.dvc), native)
         .expect("modbus command should encode")
 }
 
@@ -582,25 +584,25 @@ fn http_request_from_bridge(
     message: &BridgeMessage<'static>,
 ) -> ferredge_proto_http::HttpRequest {
     let native = HttpNativePlan::try_from(message).expect("http bridge should lower");
-    ProtocolEncoder::encode(&HttpRequestEncoder::new(&driver.dvc), native.into_owned())
+    ProtocolEncoder::encode(&HttpRequestEncoder::new(&driver.dvc), native)
         .expect("http bridge should encode")
 }
 
-fn http_message_from_command(command: Command) -> BridgeMessage<'static> {
-    HttpCommandPlanner
-        .plan(command)
+fn http_message_from_command(command: Command<'static>) -> BridgeMessage<'static> {
+    ProtocolPlanner::<BridgeOutbound>::plan(&HttpCommandPlanner, command)
         .expect("http command should plan")
 }
 
-fn mqtt_message_from_command(command: Command) -> BridgeMessage<'static> {
-    MqttCommandPlanner
-        .plan(command)
+fn mqtt_message_from_command(command: Command<'static>) -> BridgeMessage<'static> {
+    ProtocolPlanner::<BridgeOutbound>::plan(&MqttCommandPlanner, command)
         .expect("mqtt command should plan")
 }
 
-fn modbus_message_from_command(driver: &ModbusDriver, command: Command) -> BridgeMessage<'static> {
-    ModbusCommandPlanner::new(&driver.dvc)
-        .plan(command)
+fn modbus_message_from_command(
+    driver: &ModbusDriver,
+    command: Command<'static>,
+) -> BridgeMessage<'static> {
+    ProtocolPlanner::<BridgeOutbound>::plan(&ModbusCommandPlanner::new(&driver.dvc), command)
         .expect("modbus command should plan")
 }
 
@@ -633,8 +635,8 @@ fn routed_result(
     RoutedResult {
         source,
         result: CommandResult {
-            command_id: command_id.to_string(),
-            device_id: "interop-device".to_string(),
+            command_id: command_id.to_string().into(),
+            device_id: "interop-device".into(),
             state: DeliveryState::Completed,
             payload: Some(payload),
             error: None,
@@ -652,8 +654,8 @@ fn routed_rejected_result(
     RoutedResult {
         source,
         result: CommandResult {
-            command_id: command_id.to_string(),
-            device_id: "interop-device".to_string(),
+            command_id: command_id.to_string().into(),
+            device_id: "interop-device".into(),
             state: DeliveryState::Rejected,
             payload: None,
             error: Some(error.to_string().into()),
@@ -858,8 +860,8 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
     let http_result = RoutedResult {
         source: http_source_ref(),
         result: CommandResult {
-            command_id: "http-write-1".to_string(),
-            device_id: "http-interop-device".to_string(),
+            command_id: "http-write-1".into(),
+            device_id: "http-interop-device".into(),
             state: DeliveryState::Completed,
             payload: Some(
                 PayloadValue::from(parse_http_response_body(&http_response.body)).into_owned(),
@@ -920,8 +922,8 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
 
     let projected_message = BridgeMessage::Command(BridgeCommand {
         id: "http-result-mqtt-project".to_string().into(),
-        source_device_id: Some("http-interop-device".to_string()),
-        target_device_id: publisher.dvc.id.clone(),
+        source_device_id: Some("http-interop-device".into()),
+        target_device_id: publisher.dvc.id.clone().into(),
         capability: BridgeCapability::Messaging(MessagingCapability {
             binary_payloads: true,
         }),
@@ -1394,14 +1396,14 @@ fn bridge_to_modbus_input_register_write_fails_during_conversion() {
     let modbus_command =
         modbus_write_resource_command("modbus-input-write-1", "input_u16", PayloadValue::U64(7));
 
-    let message = ModbusCommandPlanner::new(&modbus_driver.dvc)
-        .plan(modbus_command)
-        .expect("modbus command should plan");
+    let message = ProtocolPlanner::<BridgeOutbound>::plan(
+        &ModbusCommandPlanner::new(&modbus_driver.dvc),
+        modbus_command,
+    )
+    .expect("modbus command should plan");
     let error = ProtocolEncoder::encode(
         &ModbusBridgeCodec::new(&modbus_driver.dvc),
-        ModbusNativePlan::try_from(&message)
-            .expect("modbus bridge should lower")
-            .into_owned(),
+        ModbusNativePlan::try_from(&message).expect("modbus bridge should lower"),
     )
     .unwrap_err();
 

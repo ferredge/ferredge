@@ -243,26 +243,26 @@ fn ascii_endpoint() -> ModbusEndpoint {
     })
 }
 
-fn command_read(resource: &str) -> Command {
+fn command_read<'a>(resource: &'a str) -> Command<'a> {
     Command {
-        id: "cmd-1".to_string(),
+        id: "cmd-1".into(),
         source_device_id: None,
-        target_device_id: "dvc-1".to_string(),
+        target_device_id: "dvc-1".into(),
         intent: Intent::Read {
-            resource: resource.to_string(),
+            resource: resource.into(),
             options: RequestOptions::default(),
         },
         correlation: None,
     }
 }
 
-fn command_write(resource: &str, payload: PayloadValue<'static>) -> Command {
+fn command_write<'a>(resource: &'a str, payload: PayloadValue<'static>) -> Command<'a> {
     Command {
-        id: "cmd-2".to_string(),
+        id: "cmd-2".into(),
         source_device_id: None,
-        target_device_id: "dvc-1".to_string(),
+        target_device_id: "dvc-1".into(),
         intent: Intent::Write {
-            resource: resource.to_string(),
+            resource: resource.into(),
             payload,
             options: RequestOptions::default(),
         },

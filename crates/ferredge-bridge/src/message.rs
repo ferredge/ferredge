@@ -1,8 +1,7 @@
 use alloc::borrow::Cow;
 
 use ferredge_core::prelude::{
-    Correlation, DeliveryState, DeviceId, EndpointRef, Headers, IntoOwned, PayloadValue, Route,
-    TransportMeta,
+    Correlation, DeliveryState, EndpointRef, Headers, IntoOwned, PayloadValue, Route, TransportMeta,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,13 +26,13 @@ pub struct BridgeCommand<'a> {
     /// Stable command identifier.
     pub id: Cow<'a, str>,
     /// Optional originating device.
-    pub source_device_id: Option<DeviceId>,
+    pub source_device_id: Option<Cow<'a, str>>,
     /// Target device receiving the command.
-    pub target_device_id: DeviceId,
+    pub target_device_id: Cow<'a, str>,
     /// Capability family required by the command.
     pub capability: BridgeCapability,
     /// Semantic operation to perform.
-    pub operation: BridgeOp,
+    pub operation: BridgeOp<'a>,
     /// Optional payload carried by the command.
     pub payload: Option<PayloadValue<'a>>,
     /// Logical routing information required by the transport codec.
@@ -54,7 +53,7 @@ pub struct BridgeEvent<'a> {
     /// Capability family associated with the event.
     pub capability: BridgeCapability,
     /// Semantic operation represented by the event.
-    pub operation: BridgeOp,
+    pub operation: BridgeOp<'a>,
     /// Event payload.
     pub payload: PayloadValue<'a>,
     /// Logical routing information preserved for the event.
@@ -77,7 +76,7 @@ pub struct BridgeMessageMeta<'a> {
     /// Optional capability context for the result.
     pub capability: Option<BridgeCapability>,
     /// Optional operation context for the result.
-    pub operation: Option<BridgeOp>,
+    pub operation: Option<BridgeOp<'a>>,
     /// Optional logical route associated with the result.
     pub route: Option<Route<'a>>,
     /// Optional typed transport metadata.
@@ -173,10 +172,10 @@ impl IntoOwned for BridgeCommand<'_> {
     fn into_owned(self) -> Self::Owned {
         BridgeCommand {
             id: IntoOwned::into_owned(self.id),
-            source_device_id: self.source_device_id,
-            target_device_id: self.target_device_id,
+            source_device_id: self.source_device_id.into_owned(),
+            target_device_id: IntoOwned::into_owned(self.target_device_id),
             capability: self.capability,
-            operation: self.operation,
+            operation: self.operation.into_owned(),
             payload: self.payload.into_owned(),
             route: self.route.into_owned(),
             transport: self.transport.into_owned(),
@@ -199,7 +198,7 @@ impl IntoOwned for BridgeEvent<'_> {
         BridgeEvent {
             source: self.source,
             capability: self.capability,
-            operation: self.operation,
+            operation: self.operation.into_owned(),
             payload: self.payload.into_owned(),
             route: self.route.into_owned(),
             transport: self.transport.into_owned(),
@@ -223,7 +222,7 @@ impl IntoOwned for BridgeMessageMeta<'_> {
             source: self.source,
             command_id: IntoOwned::into_owned(self.command_id),
             capability: self.capability,
-            operation: self.operation,
+            operation: self.operation.into_owned(),
             route: self.route.into_owned(),
             transport: self.transport.into_owned(),
             headers: self.headers.into_owned(),

@@ -247,7 +247,7 @@ pub struct DeviceMessageEndpoint {
     /// Human-readable endpoint name.
     pub name: String,
     /// Concrete broker address such as topic, queue, subject, or stream.
-    pub address: BrokerAddress,
+    pub address: BrokerAddress<'static>,
     /// Optional transport-agnostic broker metadata entries.
     pub metadata: Option<Map<String, String>>,
     /// Optional allowed operations for this broker endpoint.

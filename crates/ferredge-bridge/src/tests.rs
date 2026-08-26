@@ -31,11 +31,11 @@ fn payload_roundtrip_preserves_binary_and_structure() {
 #[test]
 fn request_response_planner_preserves_correlation_and_resource() {
     let command = Command {
-        id: "cmd-1".to_string(),
-        source_device_id: Some("src".to_string()),
-        target_device_id: "dst".to_string(),
+        id: "cmd-1".into(),
+        source_device_id: Some("src".into()),
+        target_device_id: "dst".into(),
         intent: Intent::Write {
-            resource: "setpoint".to_string(),
+            resource: "setpoint".into(),
             payload: PayloadValue::Bytes(vec![9, 1].into()),
             options: RequestOptions::default(),
         },
@@ -76,12 +76,12 @@ fn messaging_planner_preserves_topic_and_extension_capture() {
         MetaValue::Pairs(vec![("trace".to_string().into(), "abc".to_string().into())]),
     );
     let command = Command {
-        id: "cmd-2".to_string(),
+        id: "cmd-2".into(),
         source_device_id: None,
-        target_device_id: "mqtt".to_string(),
+        target_device_id: "mqtt".into(),
         intent: Intent::Send {
             channel: ferredge_core::prelude::BrokerAddress {
-                name: "topic/a".to_string(),
+                name: "topic/a".into(),
                 kind: None,
             },
             payload: PayloadValue::String("hello".to_string().into()),
@@ -119,12 +119,12 @@ fn messaging_planner_preserves_topic_and_extension_capture() {
 #[test]
 fn planners_reject_unsupported_intents() {
     let subscribe_command = Command {
-        id: "cmd-unsupported".to_string(),
+        id: "cmd-unsupported".into(),
         source_device_id: None,
-        target_device_id: "dst".to_string(),
+        target_device_id: "dst".into(),
         intent: Intent::Subscribe {
             channel: BrokerAddress {
-                name: "alerts".to_string(),
+                name: "alerts".into(),
                 kind: None,
             },
             options: Default::default(),
@@ -132,11 +132,11 @@ fn planners_reject_unsupported_intents() {
         correlation: None,
     };
     let read_command = Command {
-        id: "cmd-read-unsupported".to_string(),
+        id: "cmd-read-unsupported".into(),
         source_device_id: None,
-        target_device_id: "dst".to_string(),
+        target_device_id: "dst".into(),
         intent: Intent::Read {
-            resource: "temp".to_string(),
+            resource: "temp".into(),
             options: RequestOptions::default(),
         },
         correlation: None,
@@ -179,8 +179,8 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
     let progress = RoutedResult {
         source: source.clone(),
         result: CommandResult {
-            command_id: "cmd-progress".to_string(),
-            device_id: "mqtt-1".to_string(),
+            command_id: "cmd-progress".into(),
+            device_id: "mqtt-1".into(),
             state: ferredge_core::prelude::DeliveryState::Accepted,
             payload: None,
             error: None,
@@ -191,8 +191,8 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
     let success = RoutedResult {
         source: source.clone(),
         result: CommandResult {
-            command_id: "cmd-success".to_string(),
-            device_id: "mqtt-1".to_string(),
+            command_id: "cmd-success".into(),
+            device_id: "mqtt-1".into(),
             state: ferredge_core::prelude::DeliveryState::Completed,
             payload: Some(PayloadValue::Bytes(vec![4, 2].into())),
             error: None,
@@ -203,8 +203,8 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
     let rejected = RoutedResult {
         source: source.clone(),
         result: CommandResult {
-            command_id: "cmd-rejected".to_string(),
-            device_id: "mqtt-1".to_string(),
+            command_id: "cmd-rejected".into(),
+            device_id: "mqtt-1".into(),
             state: ferredge_core::prelude::DeliveryState::Rejected,
             payload: Some(PayloadValue::String("partial".to_string().into())),
             error: Some("denied".to_string().into()),
@@ -215,8 +215,8 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
     let timed_out = RoutedResult {
         source: source.clone(),
         result: CommandResult {
-            command_id: "cmd-timeout".to_string(),
-            device_id: "mqtt-1".to_string(),
+            command_id: "cmd-timeout".into(),
+            device_id: "mqtt-1".into(),
             state: ferredge_core::prelude::DeliveryState::TimedOut,
             payload: None,
             error: Some("timed out".to_string().into()),

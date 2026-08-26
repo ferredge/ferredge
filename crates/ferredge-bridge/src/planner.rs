@@ -14,9 +14,9 @@ use crate::{
 };
 
 /// Plans a core command into a request/response bridge command.
-pub fn command_to_request_response(
-    command: Command,
-) -> Result<BridgeMessage<'static>, BridgePlannerError> {
+pub fn command_to_request_response<'a>(
+    command: Command<'a>,
+) -> Result<BridgeMessage<'a>, BridgePlannerError> {
     let Command {
         id,
         source_device_id,
@@ -55,7 +55,7 @@ pub fn command_to_request_response(
     let (transport, headers) = capture_with_headers(extensions, headers);
 
     Ok(BridgeMessage::Command(BridgeCommand {
-        id: Cow::Owned(id),
+        id,
         source_device_id,
         target_device_id,
         capability: BridgeCapability::RequestResponse(RequestResponseCapability {
@@ -67,10 +67,7 @@ pub fn command_to_request_response(
             content_type,
         }),
         payload,
-        route: Route::RequestResponse {
-            resource: Cow::Owned(resource),
-            path: path.map(Cow::Owned),
-        },
+        route: Route::RequestResponse { resource, path },
         transport,
         headers,
         correlation,
@@ -78,9 +75,9 @@ pub fn command_to_request_response(
 }
 
 /// Plans a core command into a messaging bridge command.
-pub fn command_to_messaging(
-    command: Command,
-) -> Result<BridgeMessage<'static>, BridgePlannerError> {
+pub fn command_to_messaging<'a>(
+    command: Command<'a>,
+) -> Result<BridgeMessage<'a>, BridgePlannerError> {
     let Command {
         id,
         source_device_id,
@@ -101,7 +98,7 @@ pub fn command_to_messaging(
             } = options;
             let (transport, headers) = capture_with_headers(extensions, headers);
             Ok(BridgeMessage::Command(BridgeCommand {
-                id: Cow::Owned(id),
+                id,
                 source_device_id,
                 target_device_id,
                 capability: BridgeCapability::Messaging(MessagingCapability {
@@ -115,7 +112,7 @@ pub fn command_to_messaging(
                 }),
                 payload: Some(payload),
                 route: Route::Messaging {
-                    topic: Cow::Owned(channel.name),
+                    topic: channel.name,
                 },
                 transport,
                 headers,
@@ -131,7 +128,7 @@ pub fn command_to_messaging(
             } = options;
             let (transport, headers) = capture_with_headers(extensions, Headers::default());
             Ok(BridgeMessage::Command(BridgeCommand {
-                id: Cow::Owned(id),
+                id,
                 source_device_id,
                 target_device_id,
                 capability: BridgeCapability::Messaging(MessagingCapability {
@@ -145,7 +142,7 @@ pub fn command_to_messaging(
                 }),
                 payload: None,
                 route: Route::Messaging {
-                    topic: Cow::Owned(channel.name),
+                    topic: channel.name,
                 },
                 transport,
                 headers,
@@ -153,7 +150,7 @@ pub fn command_to_messaging(
             }))
         }
         Intent::Unsubscribe { channel } => Ok(BridgeMessage::Command(BridgeCommand {
-            id: Cow::Owned(id),
+            id,
             source_device_id,
             target_device_id,
             capability: BridgeCapability::Messaging(MessagingCapability {
@@ -167,7 +164,7 @@ pub fn command_to_messaging(
             }),
             payload: None,
             route: Route::Messaging {
-                topic: Cow::Owned(channel.name),
+                topic: channel.name,
             },
             transport: None,
             headers: None,
@@ -178,11 +175,11 @@ pub fn command_to_messaging(
 }
 
 /// Plans a core command into a register-access bridge command.
-pub fn command_to_register_access(
-    command: Command,
+pub fn command_to_register_access<'a>(
+    command: Command<'a>,
     register: AddressedAccessMeta,
     unit_id: u8,
-) -> Result<BridgeMessage<'static>, BridgePlannerError> {
+) -> Result<BridgeMessage<'a>, BridgePlannerError> {
     let Command {
         id,
         source_device_id,
@@ -192,10 +189,10 @@ pub fn command_to_register_access(
     } = command;
     match intent {
         Intent::Read { resource, .. } => Ok(bridge_register_command(
-            Cow::Owned(id),
+            id,
             source_device_id,
             target_device_id,
-            Cow::Owned(resource),
+            resource,
             register,
             unit_id,
             RegisterAccessAction::Read,
@@ -205,10 +202,10 @@ pub fn command_to_register_access(
         Intent::Write {
             resource, payload, ..
         } => Ok(bridge_register_command(
-            Cow::Owned(id),
+            id,
             source_device_id,
             target_device_id,
-            Cow::Owned(resource),
+            resource,
             register,
             unit_id,
             RegisterAccessAction::Write,
@@ -255,7 +252,7 @@ pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a
     let protocol = source.protocol.clone();
     let meta = BridgeMessageMeta {
         source,
-        command_id: Cow::Owned(command_id),
+        command_id,
         capability: None,
         operation: None,
         route: None,
@@ -329,8 +326,8 @@ pub fn routed_event_to_bridge<'a>(event: RoutedEvent<'a>) -> BridgeMessage<'a> {
 
 fn bridge_register_command<'a>(
     id: Cow<'a, str>,
-    source_device_id: Option<alloc::string::String>,
-    target_device_id: alloc::string::String,
+    source_device_id: Option<Cow<'a, str>>,
+    target_device_id: Cow<'a, str>,
     resource: Cow<'a, str>,
     register: AddressedAccessMeta,
     unit_id: u8,
@@ -375,10 +372,10 @@ fn split_capture_headers<'a>(
 }
 
 /// Merges capture-carried header pairs into the envelope header set.
-fn capture_with_headers(
-    transport: Option<TransportMeta<'static>>,
-    mut headers: Headers<'static>,
-) -> (Option<TransportMeta<'static>>, Option<Headers<'static>>) {
+fn capture_with_headers<'a>(
+    transport: Option<TransportMeta<'a>>,
+    mut headers: Headers<'a>,
+) -> (Option<TransportMeta<'a>>, Option<Headers<'a>>) {
     let (transport, capture_headers) = split_capture_headers(transport);
     if let Some(capture_headers) = capture_headers {
         headers.0.extend(capture_headers.0);

@@ -125,12 +125,12 @@ impl EventSink for RecordingSink {
 fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
     driver
         .native_packet_request(Command {
-            id: id.to_string(),
+            id: id.into(),
             source_device_id: None,
-            target_device_id: driver.dvc.id.clone(),
+            target_device_id: driver.dvc.id.clone().into(),
             intent: Intent::Subscribe {
                 channel: BrokerAddress {
-                    name: topic.to_string(),
+                    name: topic.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 options: BrokerSubscriptionOptions::default(),
@@ -143,12 +143,12 @@ fn subscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketReq
 fn unsubscribe_packet(driver: &MqttDriver, id: &str, topic: &str) -> MqttPacketRequest {
     driver
         .native_packet_request(Command {
-            id: id.to_string(),
+            id: id.into(),
             source_device_id: None,
-            target_device_id: driver.dvc.id.clone(),
+            target_device_id: driver.dvc.id.clone().into(),
             intent: Intent::Unsubscribe {
                 channel: BrokerAddress {
-                    name: topic.to_string(),
+                    name: topic.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
             },
@@ -166,12 +166,12 @@ fn publish_packet(
 ) -> MqttPacketRequest {
     driver
         .native_packet_request(Command {
-            id: id.to_string(),
+            id: id.into(),
             source_device_id: None,
-            target_device_id: driver.dvc.id.clone(),
+            target_device_id: driver.dvc.id.clone().into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: topic.to_string(),
+                    name: topic.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::from(payload).into_owned(),
@@ -192,12 +192,12 @@ fn publish_packet_with_correlation(
 ) -> MqttPacketRequest {
     driver
         .native_packet_request(Command {
-            id: id.to_string(),
+            id: id.into(),
             source_device_id: None,
-            target_device_id: driver.dvc.id.clone(),
+            target_device_id: driver.dvc.id.clone().into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: topic.to_string(),
+                    name: topic.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::from(payload).into_owned(),
@@ -817,12 +817,12 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
         driver.subscribe(
             driver
                 .bridge_packet_request(Command {
-                    id: "subopts-sub".to_string(),
+                    id: "subopts-sub".into(),
                     source_device_id: None,
-                    target_device_id: driver.dvc.id.clone(),
+                    target_device_id: driver.dvc.id.clone().into(),
                     intent: Intent::Subscribe {
                         channel: BrokerAddress {
-                            name: topic.to_string(),
+                            name: topic.into(),
                             kind: Some(BrokerChannelKind::Topic),
                         },
                         options: BrokerSubscriptionOptions {
@@ -924,16 +924,16 @@ fn mosquitto_shared_subscriptions_load_balance() {
             driver.subscribe(
                 driver
                     .bridge_packet_request(Command {
-                        id: sub_id.to_string(),
+                        id: sub_id.into(),
                         source_device_id: None,
-                        target_device_id: driver.dvc.id.clone(),
+                        target_device_id: driver.dvc.id.clone().into(),
                         intent: Intent::Subscribe {
                             channel: BrokerAddress {
-                                name: topic.to_string(),
+                                name: topic.into(),
                                 kind: Some(BrokerChannelKind::Topic),
                             },
                             options: BrokerSubscriptionOptions {
-                                shared_group: Some("workers".to_string()),
+                                shared_group: Some("workers".into()),
                                 ..BrokerSubscriptionOptions::default()
                             },
                         },

@@ -387,12 +387,12 @@ fn mqtt_send_prefers_v5_packet_when_available() {
         vec![MqttProtocolVersion::V3_1_1, MqttProtocolVersion::V5_0],
     );
     let command = ferredge_core::prelude::Command {
-        id: "cmd-1".to_string(),
+        id: "cmd-1".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Send {
             channel: BrokerAddress {
-                name: "sensors/temp".to_string(),
+                name: "sensors/temp".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"42".to_vec().into()),
@@ -417,12 +417,12 @@ fn mqtt_send_falls_back_to_v3_when_v5_not_available() {
         vec![MqttProtocolVersion::V3_1_1],
     );
     let command = ferredge_core::prelude::Command {
-        id: "cmd-2".to_string(),
+        id: "cmd-2".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Send {
             channel: BrokerAddress {
-                name: "sensors/temp".to_string(),
+                name: "sensors/temp".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"42".to_vec().into()),
@@ -442,12 +442,12 @@ fn mqtt_native_and_bridge_packet_requests_match_for_supported_commands() {
     let driver = make_default_driver();
     for command in [
         Command {
-            id: "cmd-native-send".to_string(),
+            id: "cmd-native-send".into(),
             source_device_id: None,
-            target_device_id: "mqtt-device-1".to_string(),
+            target_device_id: "mqtt-device-1".into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: "sensors/temp".to_string(),
+                    name: "sensors/temp".into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::Bytes(b"42".to_vec().into()),
@@ -456,12 +456,12 @@ fn mqtt_native_and_bridge_packet_requests_match_for_supported_commands() {
             correlation: None,
         },
         Command {
-            id: "cmd-native-sub".to_string(),
+            id: "cmd-native-sub".into(),
             source_device_id: None,
-            target_device_id: "mqtt-device-1".to_string(),
+            target_device_id: "mqtt-device-1".into(),
             intent: Intent::Subscribe {
                 channel: BrokerAddress {
-                    name: "alerts/#".to_string(),
+                    name: "alerts/#".into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 options: BrokerSubscriptionOptions::default(),
@@ -469,12 +469,12 @@ fn mqtt_native_and_bridge_packet_requests_match_for_supported_commands() {
             correlation: None,
         },
         Command {
-            id: "cmd-native-unsub".to_string(),
+            id: "cmd-native-unsub".into(),
             source_device_id: None,
-            target_device_id: "mqtt-device-1".to_string(),
+            target_device_id: "mqtt-device-1".into(),
             intent: Intent::Unsubscribe {
                 channel: BrokerAddress {
-                    name: "alerts/#".to_string(),
+                    name: "alerts/#".into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
             },
@@ -491,18 +491,18 @@ fn mqtt_native_and_bridge_packet_requests_match_for_supported_commands() {
 fn mqtt_subscribe_builds_version_specific_packet() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
-        id: "cmd-3".to_string(),
+        id: "cmd-3".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Subscribe {
             channel: BrokerAddress {
-                name: "alerts/#".to_string(),
+                name: "alerts/#".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             options: BrokerSubscriptionOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                durable_name: Some("durable-a".to_string()),
-                shared_group: Some("shared-a".to_string()),
+                durable_name: Some("durable-a".into()),
+                shared_group: Some("shared-a".into()),
                 extensions: Some(
                     MqttSubscriptionOptions {
                         no_local: true,
@@ -555,16 +555,16 @@ fn mqtt_v3_rejects_shared_subscriptions() {
         vec![MqttProtocolVersion::V3_1_1],
     );
     let command = ferredge_core::prelude::Command {
-        id: "cmd-v3-shared-sub".to_string(),
+        id: "cmd-v3-shared-sub".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Subscribe {
             channel: BrokerAddress {
-                name: "alerts/#".to_string(),
+                name: "alerts/#".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             options: BrokerSubscriptionOptions {
-                shared_group: Some("shared-a".to_string()),
+                shared_group: Some("shared-a".into()),
                 ..BrokerSubscriptionOptions::default()
             },
         },
@@ -587,12 +587,12 @@ fn mqtt_v3_rejects_v5_publish_options_on_native_path() {
         vec![MqttProtocolVersion::V3_1_1],
     );
     let command = Command {
-        id: "cmd-v3-publish-options".to_string(),
+        id: "cmd-v3-publish-options".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: Intent::Send {
             channel: BrokerAddress {
-                name: "state/device".to_string(),
+                name: "state/device".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"online".to_vec().into()),
@@ -623,12 +623,12 @@ fn mqtt_v3_rejects_v5_publish_options_on_native_path() {
 fn mqtt_v5_publish_maps_retain_alias_and_expiry_properties() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
-        id: "cmd-retain-1".to_string(),
+        id: "cmd-retain-1".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Send {
             channel: BrokerAddress {
-                name: "state/device".to_string(),
+                name: "state/device".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"online".to_vec().into()),
@@ -688,12 +688,12 @@ fn normalize_broker_addr_adds_default_port_for_bracketed_ipv6() {
 fn mqtt_unsubscribe_v5_includes_command_id_user_property() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
-        id: "cmd-unsub-1".to_string(),
+        id: "cmd-unsub-1".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Unsubscribe {
             channel: BrokerAddress {
-                name: "alerts/#".to_string(),
+                name: "alerts/#".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
         },
@@ -723,12 +723,12 @@ fn mqtt_unsubscribe_v5_includes_command_id_user_property() {
 fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
-        id: "cmd-4".to_string(),
+        id: "cmd-4".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Send {
             channel: BrokerAddress {
-                name: "rpc/request".to_string(),
+                name: "rpc/request".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
@@ -790,8 +790,8 @@ fn mqtt_v5_publish_ignores_foreign_transport_capture() {
     http_capture.set("status-code", ferredge_core::prelude::MetaValue::U64(207));
     let message = BridgeMessage::Command(BridgeCommand {
         id: "bridge-http-1".to_string().into(),
-        source_device_id: Some("http-device-1".to_string()),
-        target_device_id: "mqtt-device-1".to_string(),
+        source_device_id: Some("http-device-1".into()),
+        target_device_id: "mqtt-device-1".into(),
         capability: ferredge_bridge::BridgeCapability::Messaging(MessagingCapability {
             binary_payloads: true,
         }),
@@ -845,12 +845,12 @@ fn mqtt_v5_publish_ignores_foreign_transport_capture() {
 fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
-        id: "cmd-implicit-corr".to_string(),
+        id: "cmd-implicit-corr".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Send {
             channel: BrokerAddress {
-                name: "rpc/request".to_string(),
+                name: "rpc/request".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
@@ -889,12 +889,12 @@ fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
 fn mqtt_v5_publish_registers_pending_reply_route() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
-        id: "cmd-route-1".to_string(),
+        id: "cmd-route-1".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Send {
             channel: BrokerAddress {
-                name: "rpc/request".to_string(),
+                name: "rpc/request".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
@@ -920,12 +920,12 @@ fn mqtt_v5_publish_registers_pending_reply_route() {
 fn mqtt_v5_publish_registers_pending_reply_route_from_command_id_fallback() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
-        id: "cmd-route-fallback".to_string(),
+        id: "cmd-route-fallback".into(),
         source_device_id: None,
-        target_device_id: "mqtt-device-1".to_string(),
+        target_device_id: "mqtt-device-1".into(),
         intent: ferredge_core::prelude::Intent::Send {
             channel: BrokerAddress {
-                name: "rpc/request".to_string(),
+                name: "rpc/request".into(),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
@@ -1495,11 +1495,11 @@ fn mqtt_listener_reports_failed_when_sink_rejects_event() {
 fn bridge_can_translate_http_command_into_mqtt_publish() {
     let mqtt = make_default_driver();
     let command = Command {
-        id: "http-read-1".to_string(),
-        source_device_id: Some("http-device-1".to_string()),
-        target_device_id: "http-device-1".to_string(),
+        id: "http-read-1".into(),
+        source_device_id: Some("http-device-1".into()),
+        target_device_id: "http-device-1".into(),
         intent: Intent::Read {
-            resource: "temp".to_string(),
+            resource: "temp".into(),
             options: RequestOptions::default(),
         },
         correlation: None,
@@ -1507,12 +1507,12 @@ fn bridge_can_translate_http_command_into_mqtt_publish() {
 
     let mapped_command = match &command.intent {
         Intent::Read { resource, .. } => Command {
-            id: format!("{}-mqtt", command.id),
+            id: format!("{}-mqtt", command.id).into(),
             source_device_id: Some(command.target_device_id.clone()),
-            target_device_id: "mqtt-device-1".to_string(),
+            target_device_id: "mqtt-device-1".into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: format!("requests/{resource}"),
+                    name: format!("requests/{resource}").into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::Bytes(Vec::new().into()),
@@ -1711,12 +1711,12 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
     let subscribe_packet = packet_request(
         &driver,
         &Command {
-            id: "same-driver-sub".to_string(),
+            id: "same-driver-sub".into(),
             source_device_id: None,
-            target_device_id: driver.dvc.id.clone(),
+            target_device_id: driver.dvc.id.clone().into(),
             intent: Intent::Subscribe {
                 channel: BrokerAddress {
-                    name: "ferredge/control".to_string(),
+                    name: "ferredge/control".into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 options: BrokerSubscriptionOptions::default(),
@@ -1728,12 +1728,12 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
     let unsubscribe_packet = packet_request(
         &driver,
         &Command {
-            id: "same-driver-unsub".to_string(),
+            id: "same-driver-unsub".into(),
             source_device_id: None,
-            target_device_id: driver.dvc.id.clone(),
+            target_device_id: driver.dvc.id.clone().into(),
             intent: Intent::Unsubscribe {
                 channel: BrokerAddress {
-                    name: "ferredge/control".to_string(),
+                    name: "ferredge/control".into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
             },
@@ -1744,12 +1744,12 @@ fn mqtt_same_driver_can_listen_and_control_subscriptions() {
     let publish_packet = packet_request(
         &driver,
         &Command {
-            id: "same-driver-pub".to_string(),
+            id: "same-driver-pub".into(),
             source_device_id: None,
-            target_device_id: driver.dvc.id.clone(),
+            target_device_id: driver.dvc.id.clone().into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: "ferredge/control".to_string(),
+                    name: "ferredge/control".into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::Bytes(b"same-driver".to_vec().into()),

@@ -99,12 +99,12 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
 
     let subscribe = subscriber
         .native_packet_request(Command {
-            id: "harness-subscribe-1".to_string(),
+            id: "harness-subscribe-1".into(),
             source_device_id: None,
-            target_device_id: "harness-mqtt-sub".to_string(),
+            target_device_id: "harness-mqtt-sub".into(),
             intent: Intent::Subscribe {
                 channel: BrokerAddress {
-                    name: TOPIC.to_string(),
+                    name: TOPIC.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 options: BrokerSubscriptionOptions::default(),
@@ -125,12 +125,12 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
         .expect("mosquitto should accept the publisher connection");
     let publish = publisher
         .native_packet_request(Command {
-            id: "harness-publish-1".to_string(),
+            id: "harness-publish-1".into(),
             source_device_id: None,
-            target_device_id: "harness-mqtt-pub".to_string(),
+            target_device_id: "harness-mqtt-pub".into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: TOPIC.to_string(),
+                    name: TOPIC.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::from(PAYLOAD).into_owned(),
@@ -161,7 +161,7 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
     let events = received.0.borrow();
     let event = events
         .iter()
-        .find(|event| matches!(&event.address, Address::Channel(topic) if topic == TOPIC))
+        .find(|event| matches!(&event.route, Route::Messaging { topic } if topic == TOPIC))
         .expect("received event should target the subscribed topic");
     assert_eq!(
         event.payload,

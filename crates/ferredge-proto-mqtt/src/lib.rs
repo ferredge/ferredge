@@ -197,29 +197,29 @@ impl MqttDriver {
         }
     }
 
-    pub fn bridge_packet_request(
+    pub fn bridge_packet_request<'a>(
         &self,
-        command: Command,
+        command: Command<'a>,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
         let message = planner_message_for_command(command)?;
         <MqttBridgeCodec<'_> as ProtocolEncoder<
             BridgeOutbound,
-            BridgeMessage<'static>,
+            BridgeMessage<'a>,
             MqttPacketRequest,
         >>::encode(&MqttBridgeCodec::new(&self.dvc), message)
     }
 
-    pub fn native_packet_request(
+    pub fn native_packet_request<'a>(
         &self,
-        command: Command,
+        command: Command<'a>,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-        let plan = <MqttCommandPlanner as ProtocolPlanner<
-            NativeOutbound,
-            MqttNativePlan<'static>,
-        >>::plan(&MqttCommandPlanner, command)?;
+        let plan = <MqttCommandPlanner as ProtocolPlanner<NativeOutbound>>::plan(
+            &MqttCommandPlanner,
+            command,
+        )?;
         <MqttBridgeCodec<'_> as ProtocolEncoder<
             NativeOutbound,
-            MqttNativePlan<'static>,
+            MqttNativePlan<'a>,
             MqttPacketRequest,
         >>::encode(&MqttBridgeCodec::new(&self.dvc), plan)
     }
@@ -1394,12 +1394,9 @@ impl EventSource for MqttDriver {
     }
 }
 
-fn split_mqtt_extensions(
-    extensions: Option<TransportMeta<'static>>,
-) -> (
-    MqttMeta<'static>,
-    Vec<(Cow<'static, str>, Cow<'static, str>)>,
-) {
+fn split_mqtt_extensions<'a>(
+    extensions: Option<TransportMeta<'a>>,
+) -> (MqttMeta<'a>, Vec<(Cow<'a, str>, Cow<'a, str>)>) {
     match extensions {
         Some(mut meta) => {
             let user_properties = match meta.take(META_KEY_HEADERS) {
@@ -1415,9 +1412,9 @@ fn split_mqtt_extensions(
     }
 }
 
-fn planner_message_for_command(
-    command: Command,
-) -> Result<ferredge_bridge::BridgeMessage<'static>, MqttCommandConversionError> {
+fn planner_message_for_command<'a>(
+    command: Command<'a>,
+) -> Result<ferredge_bridge::BridgeMessage<'a>, MqttCommandConversionError> {
     match &command.intent {
         Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
             planner::command_to_messaging(command).map_err(Into::into)
@@ -1426,20 +1423,20 @@ fn planner_message_for_command(
     }
 }
 
-impl ProtocolPlanner<ferredge_bridge::BridgeOutbound, BridgeMessage<'static>>
-    for MqttCommandPlanner
-{
+impl ProtocolPlanner<ferredge_bridge::BridgeOutbound> for MqttCommandPlanner {
     type Error = MqttCommandConversionError;
+    type Planned<'a> = BridgeMessage<'a>;
 
-    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+    fn plan<'a>(&self, command: Command<'a>) -> Result<BridgeMessage<'a>, Self::Error> {
         planner_message_for_command(command)
     }
 }
 
-impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPlanner {
+impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
     type Error = MqttCommandConversionError;
+    type Planned<'a> = MqttNativePlan<'a>;
 
-    fn plan(&self, command: Command) -> Result<MqttNativePlan<'static>, Self::Error> {
+    fn plan<'a>(&self, command: Command<'a>) -> Result<MqttNativePlan<'a>, Self::Error> {
         let correlation = command.correlation;
         match command.intent {
             Intent::Send {
@@ -1460,9 +1457,9 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
                     }
                 };
                 Ok(MqttNativePlan::Publish {
-                    command_id: command.id.into(),
-                    topic: topic.into(),
-                    payload: payload.into_owned(),
+                    command_id: command.id,
+                    topic,
+                    payload,
                     delivery,
                     retain: mqtt_view.retain,
                     payload_format: mqtt_view.payload_format,
@@ -1480,7 +1477,7 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
                         .and_then(|correlation| correlation.reply_to.clone()),
                     response_topic: mqtt_view.response_topic,
                     correlation_id: correlation.map(|correlation| correlation.request_id),
-                    correlation_data: mqtt_view.correlation_data.map(Cow::into_owned),
+                    correlation_data: mqtt_view.correlation_data,
                 })
             }
             Intent::Subscribe { channel, options } => {
@@ -1498,11 +1495,11 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
                     }
                 };
                 Ok(MqttNativePlan::Subscribe {
-                    command_id: command.id.into(),
-                    topic: topic.into(),
+                    command_id: command.id,
+                    topic,
                     delivery,
-                    durable_name: durable_name.map(Into::into),
-                    shared_group: shared_group.map(Into::into),
+                    durable_name,
+                    shared_group,
                     no_local: mqtt_view.no_local,
                     retain_as_published: mqtt_view.retain_as_published,
                     retain_handling: mqtt_view.retain_handling,
@@ -1518,8 +1515,8 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
                     }
                 };
                 Ok(MqttNativePlan::Unsubscribe {
-                    command_id: command.id.into(),
-                    topic: topic.into(),
+                    command_id: command.id,
+                    topic,
                 })
             }
             _ => Err(MqttCommandConversionError::UnsupportedIntent),

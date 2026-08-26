@@ -25,7 +25,7 @@ pub struct MqttPublishRequest {
     /// Original routed command identifier.
     pub command_id: String,
     /// Broker channel derived from routed command.
-    pub channel: BrokerAddress,
+    pub channel: BrokerAddress<'static>,
     /// Raw message payload.
     pub payload: Vec<u8>,
     /// Delivery guarantee requested by routed command.
@@ -60,7 +60,7 @@ pub struct MqttSubscriptionRequest {
     /// Original routed command identifier.
     pub command_id: String,
     /// Broker channel to subscribe to.
-    pub channel: BrokerAddress,
+    pub channel: BrokerAddress<'static>,
     /// Delivery guarantee requested by routed command.
     pub delivery: Option<DeliveryGuarantee>,
     /// Optional durable name for brokers that support it.
@@ -98,7 +98,7 @@ pub enum MqttNativePlan<'a> {
         reply_to: Option<Address<'a>>,
         response_topic: Option<Cow<'a, str>>,
         correlation_id: Option<Cow<'a, str>>,
-        correlation_data: Option<Vec<u8>>,
+        correlation_data: Option<Cow<'a, [u8]>>,
     },
     Subscribe {
         command_id: Cow<'a, str>,
@@ -162,7 +162,7 @@ impl MqttNativePlan<'_> {
                 reply_to: reply_to.map(Address::into_owned),
                 response_topic: response_topic.map(|value| Cow::Owned(value.into_owned())),
                 correlation_id: correlation_id.map(|value| Cow::Owned(value.into_owned())),
-                correlation_data,
+                correlation_data: correlation_data.map(|value| Cow::Owned(value.into_owned())),
             },
             MqttNativePlan::Subscribe {
                 command_id,

@@ -100,6 +100,7 @@ impl ProtocolDecoder<mqtt::packet::Packet> for MqttInboundDecoder {
                 &self.device_id,
                 packet,
             ),
+            // Owned boundary: decoded events outlive the borrowed publish packet.
             mqtt::packet::Packet::V3_1_1Publish(packet) => Some(RoutedMessage::Event(
                 routed_event_from_v3_publish(&self.device_id, packet).into_owned(),
             )),
@@ -611,6 +612,7 @@ pub(crate) async fn handle_connection_events_async(
                 }
                 let decoded = session.inbound_decoder.decode(&packet)?;
                 if let Ok(message) = RoutedMessage::try_from(decoded) {
+                    // Owned boundary: the routed queue outlives the borrowed inbound packet.
                     routed.push(message.into_owned());
                 }
             }
@@ -1271,11 +1273,12 @@ fn routed_reply_or_event_from_v5_publish(
     if let Some(correlation_key) = correlation_key
         && let Some(route) = pending_reply_routes.remove(&correlation_key)
     {
+        // Owned boundary: the reply result outlives the borrowed publish packet.
         return Some(RoutedMessage::Result(RoutedResult {
             source: mqtt_source(device_id),
             result: CommandResult {
-                command_id: route.command_id.clone(),
-                device_id: device_id.to_string(),
+                command_id: route.command_id.clone().into(),
+                device_id: device_id.to_string().into(),
                 state: DeliveryState::Completed,
                 payload: Some(
                     payload_value_from_mqtt_bytes(
@@ -1294,6 +1297,7 @@ fn routed_reply_or_event_from_v5_publish(
         }));
     }
 
+    // Owned boundary: decoded events outlive the borrowed publish packet.
     Some(RoutedMessage::Event(
         routed_event_from_v5_publish(device_id, packet).into_owned(),
     ))
@@ -1568,8 +1572,8 @@ fn routed_result_from_v5_disconnect(
     RoutedResult {
         source: mqtt_source(device_id),
         result: CommandResult {
-            command_id: "__mqtt_disconnect__".to_string(),
-            device_id: device_id.to_string(),
+            command_id: "__mqtt_disconnect__".into(),
+            device_id: device_id.to_string().into(),
             state: state.clone(),
             payload: None,
             error: if state == DeliveryState::Rejected {
@@ -1603,8 +1607,8 @@ fn routed_result_from_v5_auth(
     RoutedResult {
         source: mqtt_source(device_id),
         result: CommandResult {
-            command_id: "__mqtt_auth__".to_string(),
-            device_id: device_id.to_string(),
+            command_id: "__mqtt_auth__".into(),
+            device_id: device_id.to_string().into(),
             state: state.clone(),
             payload: None,
             error: if state == DeliveryState::Rejected {
@@ -1676,8 +1680,8 @@ fn routed_result_from_packet_id_with_transport(
     RoutedResult {
         source: mqtt_source(device_id),
         result: CommandResult {
-            command_id,
-            device_id: device_id.to_string(),
+            command_id: command_id.into(),
+            device_id: device_id.to_string().into(),
             state,
             payload: None,
             error,

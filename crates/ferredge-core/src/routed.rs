@@ -87,7 +87,7 @@ impl IntoOwned for RoutedResult<'_> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RoutedMessage<'a> {
     /// Routed command envelope.
-    Command(Command),
+    Command(Command<'a>),
     /// Routed event envelope.
     Event(RoutedEvent<'a>),
     /// Routed result envelope.
@@ -105,7 +105,7 @@ impl IntoOwned for RoutedMessage<'_> {
     type Owned = RoutedMessage<'static>;
     fn into_owned(self) -> Self::Owned {
         match self {
-            Self::Command(command) => RoutedMessage::Command(command),
+            Self::Command(command) => RoutedMessage::Command(command.into_owned()),
             Self::Event(event) => RoutedMessage::Event(event.into_owned()),
             Self::Result(result) => RoutedMessage::Result(result.into_owned()),
         }
