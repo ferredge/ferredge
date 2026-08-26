@@ -831,11 +831,13 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
             meta.correlation_data.as_deref(),
             Some(&b"corr-http-mqtt-v5"[..])
         );
-        assert!(
+        assert_eq!(
             transport
-                .get_pairs(META_KEY_HEADERS)
+                .headers
+                .as_ref()
                 .expect("mqtt user properties expected")
-                .contains(&("x-origin".to_string().into(), "http".to_string().into()))
+                .get("x-origin"),
+            Some("http")
         );
     }
 
@@ -877,16 +879,13 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
                 content_type: Some("text/plain".to_string().into()),
             }
             .into_transport_meta();
-            capture.set(
-                META_KEY_HEADERS,
-                MetaValue::Pairs(
-                    http_response
-                        .headers
-                        .iter()
-                        .map(|(key, value)| (Cow::Owned(key.clone()), Cow::Owned(value.clone())))
-                        .collect(),
-                ),
-            );
+            capture.headers = Some(Headers::from(
+                http_response
+                    .headers
+                    .iter()
+                    .map(|(key, value)| (Cow::Owned(key.clone()), Cow::Owned(value.clone())))
+                    .collect::<Vec<(Cow<'_, str>, Cow<'_, str>)>>(),
+            ));
             capture
         }),
     };
@@ -1128,11 +1127,13 @@ fn mqtt_v5_to_modbus_bridge_roundtrip() {
         let transport = event.transport.as_ref().expect("mqtt transport capture");
         let meta = MqttMeta::view(transport).expect("mqtt view over mqtt capture");
         assert_eq!(meta.content_type.as_deref(), Some("text/plain"));
-        assert!(
+        assert_eq!(
             transport
-                .get_pairs(META_KEY_HEADERS)
+                .headers
+                .as_ref()
                 .expect("mqtt user properties expected")
-                .contains(&("x-origin".to_string().into(), "mqtt-v5".to_string().into()))
+                .get("x-origin"),
+            Some("mqtt-v5")
         );
     }
     let mqtt_bridge = planner::routed_event_to_bridge(event);

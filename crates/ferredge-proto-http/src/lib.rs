@@ -401,19 +401,16 @@ where
         }
         .into_transport_meta();
         if !self_.response.headers.is_empty() {
-            transport.set(
-                META_KEY_HEADERS,
-                MetaValue::Pairs(
-                    self_
-                        .response
-                        .headers
-                        .iter()
-                        .map(|(key, value)| {
-                            (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str()))
-                        })
-                        .collect(),
-                ),
-            );
+            transport.headers = Some(Headers::from(
+                self_
+                    .response
+                    .headers
+                    .iter()
+                    .map(|(key, value)| {
+                        (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str()))
+                    })
+                    .collect::<Vec<_>>(),
+            ));
         }
 
         Ok(RoutedMessage::Result(RoutedResult {
@@ -993,15 +990,13 @@ mod tests {
                 assert_eq!(view.status_code, Some(200));
                 assert_eq!(view.content_type.as_deref(), Some("text/plain"));
                 assert_eq!(
-                    transport.get_pairs(META_KEY_HEADERS),
-                    Some(
-                        &[
-                            (Cow::Borrowed("Content-Type"), Cow::Borrowed("text/plain")),
-                            (Cow::Borrowed("X-Test"), Cow::Borrowed("ok")),
-                            (Cow::Borrowed("Content-Length"), Cow::Borrowed("2")),
-                            (Cow::Borrowed("Connection"), Cow::Borrowed("close")),
-                        ][..]
-                    )
+                    transport.headers,
+                    Some(Headers::from(vec![
+                        (Cow::Borrowed("Content-Type"), Cow::Borrowed("text/plain")),
+                        (Cow::Borrowed("X-Test"), Cow::Borrowed("ok")),
+                        (Cow::Borrowed("Content-Length"), Cow::Borrowed("2")),
+                        (Cow::Borrowed("Connection"), Cow::Borrowed("close")),
+                    ]))
                 );
             }
             other => panic!("expected routed result, got {other:?}"),

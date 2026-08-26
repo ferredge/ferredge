@@ -2,7 +2,7 @@ extern crate alloc;
 
 use alloc::borrow::Cow;
 
-use ferredge_core::prelude::{IntoOwned, MetaValue, ProtocolId, TransportMeta};
+use ferredge_core::prelude::{IntoOwned, MetaValue, ProtocolId, ProtocolMeta, TransportMeta};
 use serde::{Deserialize, Serialize};
 
 /// Capture key for the HTTP request method.
@@ -27,9 +27,11 @@ pub struct HttpMeta<'a> {
     pub content_type: Option<Cow<'a, str>>,
 }
 
-impl<'a> HttpMeta<'a> {
+impl<'a> ProtocolMeta<'a> for HttpMeta<'a> {
+    const PROTOCOL: ProtocolId = ProtocolId::HTTP;
+
     /// Encodes this typed view as an open HTTP transport capture without copying values.
-    pub fn into_transport_meta(self) -> TransportMeta<'a> {
+    fn into_transport_meta(self) -> TransportMeta<'a> {
         let mut meta = TransportMeta::new(ProtocolId::HTTP);
         if let Some(method) = self.method {
             meta.set(KEY_METHOD, MetaValue::Str(method));
@@ -47,13 +49,12 @@ impl<'a> HttpMeta<'a> {
     }
 
     /// Decodes an HTTP transport capture into a typed view by move.
-    pub fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
+    fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
         if meta.protocol != ProtocolId::HTTP {
             return None;
         }
-        let mut meta = meta;
         let mut view = HttpMeta::default();
-        for (key, value) in meta.entries.drain(..) {
+        for (key, value) in meta.into_entries() {
             match (key.as_ref(), value) {
                 (KEY_METHOD, MetaValue::Str(value)) => view.method = Some(value),
                 (KEY_PATH, MetaValue::Str(value)) => view.path = Some(value),
@@ -68,7 +69,7 @@ impl<'a> HttpMeta<'a> {
     }
 
     /// Borrows an HTTP transport capture as a typed view without consuming it.
-    pub fn view(meta: &'a TransportMeta<'a>) -> Option<HttpMeta<'a>> {
+    fn view(meta: &'a TransportMeta<'a>) -> Option<HttpMeta<'a>> {
         if meta.protocol != ProtocolId::HTTP {
             return None;
         }
@@ -79,7 +80,9 @@ impl<'a> HttpMeta<'a> {
             content_type: meta.get_str(KEY_CONTENT_TYPE).map(Cow::Borrowed),
         })
     }
+}
 
+impl HttpMeta<'_> {
     /// Materializes an owned typed view for long-lived boundaries.
     pub fn into_owned(self) -> HttpMeta<'static> {
         IntoOwned::into_owned(self)

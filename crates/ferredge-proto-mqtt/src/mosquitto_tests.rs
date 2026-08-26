@@ -12,8 +12,8 @@ use ferredge_test_support::{
 use ferredge_core::prelude::{
     Address, BackoffStrategy, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerReconnectConfig, BrokerSubscriptionOptions, Command, Correlation, DeliveryGuarantee,
-    Device, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map, PayloadValue, PubSub,
-    Route, RoutedEvent,
+    Device, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map, PayloadValue,
+    ProtocolMeta, PubSub, Route, RoutedEvent,
 };
 
 use crate::{
@@ -543,14 +543,11 @@ fn mosquitto_v5_complex_property_roundtrip() {
     assert_eq!(meta.response_topic.as_deref(), Some("ferredge/it/reply"));
     assert_eq!(meta.correlation_data.as_deref(), Some(&b"corr-v5-123"[..]));
     let user_properties = transport
-        .get_pairs(ferredge_core::prelude::META_KEY_HEADERS)
+        .headers
+        .as_ref()
         .expect("mqtt user properties expected");
-    assert!(
-        user_properties.contains(&("x-trace".to_string().into(), "trace-123".to_string().into()))
-    );
-    assert!(
-        user_properties.contains(&("x-origin".to_string().into(), "ferredge".to_string().into()))
-    );
+    assert_eq!(user_properties.get("x-trace"), Some("trace-123"));
+    assert_eq!(user_properties.get("x-origin"), Some("ferredge"));
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
     block_on(subscriber.stop()).expect("subscriber should stop cleanly");

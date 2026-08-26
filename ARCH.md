@@ -64,7 +64,7 @@ envelope and vocabulary on top. There are no duplicate leaf definitions.
 | `Correlation<'a>`, `Address<'a>` | `core/src/command.rs` | Reply correlation; `Address` survives as the type of `Correlation.reply_to` |
 | `Header<'a>`, `Headers<'a>` | `core/src/headers.rs` | Ordered protocol header/property pairs |
 | `Route<'a>`, `AddressedAccessMeta` | `core/src/route.rs` | Lossless logical route: `RequestResponse` / `Messaging` / `AddressedAccess` |
-| `ProtocolId`, `MetaValue<'a>`, `TransportMeta<'a>`, `META_KEY_HEADERS` | `core/src/meta.rs` | Open transport metadata (next section) |
+| `ProtocolId`, `MetaValue<'a>`, `TransportMeta<'a>`, `ProtocolMeta` | `core/src/meta.rs` | Open transport metadata (next section) |
 | `IntoOwned` | `core/src/owned.rs` | Borrowed-to-owned conversion trait |
 | `Command<'a>`, `Intent<'a>`, `CommandResult<'a>`, option structs | `core/src/command.rs` | Protocol-neutral command layer |
 | `RoutedEvent<'a>`, `RoutedResult<'a>`, `RoutedMessage<'a>`, `EndpointRef` | `core/src/routed.rs` | Normalized inbound envelopes |
@@ -161,11 +161,16 @@ request), `PubSub` (publish / subscribe / unsubscribe), `EventSource`
 ```rust
 pub struct TransportMeta<'a> {
     pub protocol: ProtocolId,
-    pub entries: Vec<(Cow<'static, str>, MetaValue<'a>)>,
+    pub headers: Option<Headers<'a>>,
+    entries: Vec<(Cow<'static, str>, MetaValue<'a>)>,
 }
 ```
 
-with `get`/`set`/`take` plus typed accessors (`get_str`, `get_u64`, ...).
+`headers` carries wire-level name/value pairs (HTTP headers, MQTT v5 user
+properties) first-class. `entries` is private: it is an extension SPI
+reached through `new`/`get`/`set`/`take` plus typed accessors (`get_str`,
+`get_u64`, ...) and a consuming `into_entries()` — protocol crates expose
+typed view structs over it, and application code should use those views.
 `MetaValue<'a>` covers scalars, `Str`/`Bytes` Cows, lists, and `Pairs`
 (name/value strings). `ProtocolId` is a `Cow<'static, str>` newtype with
 `const` identities for the built-ins (`ProtocolId::MQTT`, `::HTTP`,
@@ -179,28 +184,30 @@ entire pipeline per protocol and make cross-protocol bridging — the whole
 point — impossible to express in one message type. `dyn Any` would lose
 `no_std`-friendly serialization, equality, and lossless pass-through.
 
-### Typed views
+### Typed views (`ProtocolMeta`)
 
 Raw string-keyed captures are for transport; protocol crates own ergonomic
-typed views over them, all following the same pattern (`HttpMeta<'a>` in
-`proto-http/src/meta.rs`, `MqttMeta<'a>` in `proto-mqtt/src/meta.rs`):
+typed views over them, formalized by the `ProtocolMeta<'a>` trait in
+`core/src/meta.rs` (`HttpMeta<'a>` in `proto-http/src/meta.rs`,
+`MqttMeta<'a>` in `proto-mqtt/src/meta.rs`):
 
 - documented `pub const KEY_*: &str` capture keys,
+- `const PROTOCOL: ProtocolId` — the protocol identity the view projects,
 - `into_transport_meta(self) -> TransportMeta<'a>` — encode by move, zero-copy,
 - `from_transport_meta(meta: TransportMeta<'a>) -> Option<Self>` — decode by
   move (returns `None` if `meta.protocol` doesn't match),
 - `view(meta: &'a TransportMeta<'a>) -> Option<Self>` — borrowing view
   without consuming the capture.
 
-### Header flow (`META_KEY_HEADERS`)
+### Header flow
 
 Wire-level name/value headers (HTTP headers, MQTT v5 user properties) ride
-the capture as `MetaValue::Pairs` under the well-known key
-`META_KEY_HEADERS` when produced by drivers or option builders. The bridge
-planner (`split_capture_headers` in `bridge/src/planner.rs`) splits that
-entry out of the capture and promotes it to the envelope-level
-`Headers<'a>` field, so bridge consumers see headers uniformly regardless
-of source protocol, while the rest of the capture passes through losslessly.
+the capture's first-class `headers: Option<Headers<'a>>` field when produced
+by drivers or option builders. The bridge planner (`split_capture_headers`
+in `bridge/src/planner.rs`) moves that field out of the capture and promotes
+it to the envelope-level `Headers<'a>` field, so bridge consumers see
+headers uniformly regardless of source protocol, while the rest of the
+capture passes through losslessly.
 
 ## Zero-copy and ownership
 
@@ -310,9 +317,9 @@ impl DeviceResourceAttributes for CoapResourceAttributes {}
 
 ### 3. Typed metadata view
 
-Document each capture key as a `pub const`, and implement the three-method
-view pattern over `TransportMeta` (see `MqttMeta`/`HttpMeta` for the
-reference implementations):
+Document each capture key as a `pub const`, and implement the core
+`ProtocolMeta<'a>` trait over `TransportMeta` (see `MqttMeta`/`HttpMeta`
+for the reference implementations):
 
 ```rust
 // ferredge-proto-coap/src/meta.rs
@@ -330,9 +337,11 @@ pub struct CoapMeta<'a> {
     pub token: Option<Cow<'a, [u8]>>,
 }
 
-impl<'a> CoapMeta<'a> {
+impl<'a> ProtocolMeta<'a> for CoapMeta<'a> {
+    const PROTOCOL: ProtocolId = ProtocolId::COAP;
+
     /// Encode by move — zero-copy.
-    pub fn into_transport_meta(self) -> TransportMeta<'a> {
+    fn into_transport_meta(self) -> TransportMeta<'a> {
         let mut meta = TransportMeta::new(ProtocolId::COAP);
         if let Some(token) = self.token {
             meta.set(KEY_TOKEN, MetaValue::Bytes(token));
@@ -342,16 +351,16 @@ impl<'a> CoapMeta<'a> {
     }
 
     /// Decode by move; `None` if the capture belongs to another protocol.
-    pub fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
+    fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
         if meta.protocol != ProtocolId::COAP {
             return None;
         }
-        // drain meta.entries into typed fields ...
+        // match meta.into_entries() into typed fields ...
         unimplemented!()
     }
 
     /// Borrowing view without consuming the capture.
-    pub fn view(meta: &'a TransportMeta<'a>) -> Option<CoapMeta<'a>> {
+    fn view(meta: &'a TransportMeta<'a>) -> Option<CoapMeta<'a>> {
         if meta.protocol != ProtocolId::COAP {
             return None;
         }
@@ -364,7 +373,7 @@ impl<'a> CoapMeta<'a> {
 ```
 
 If CoAP carries name/value properties that should surface as envelope
-headers, store them as `MetaValue::Pairs` under `META_KEY_HEADERS`; the
+headers, store them in the capture's first-class `headers` field; the
 bridge planner promotes them automatically.
 
 ### 4. Planner, encoder, decoder

@@ -251,6 +251,9 @@ pub enum MqttCommandConversionError {
     Bridge(#[from] BridgePlannerError),
     #[error("bridge message does not describe an MQTT packet request")]
     InvalidBridgeMessage,
+    /// Options carried a transport capture for a different protocol.
+    #[error("options extensions capture belongs to protocol {0}, not MQTT")]
+    ForeignExtensions(ProtocolId),
 }
 
 /// Borrowed view carrying enough context to convert routed command into MQTT packets.

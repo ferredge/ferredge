@@ -1394,21 +1394,34 @@ impl EventSource for MqttDriver {
     }
 }
 
+/// MQTT v5 user-property pairs split away from an extensions capture.
+type MqttUserProperties<'a> = Vec<(Cow<'a, str>, Cow<'a, str>)>;
+
 fn split_mqtt_extensions<'a>(
     extensions: Option<TransportMeta<'a>>,
-) -> (MqttMeta<'a>, Vec<(Cow<'a, str>, Cow<'a, str>)>) {
+) -> Result<(MqttMeta<'a>, MqttUserProperties<'a>), MqttCommandConversionError> {
     match extensions {
         Some(mut meta) => {
-            let user_properties = match meta.take(META_KEY_HEADERS) {
-                Some(MetaValue::Pairs(pairs)) => pairs,
-                _ => Vec::new(),
-            };
-            (
+            if meta.protocol != ProtocolId::MQTT {
+                return Err(MqttCommandConversionError::ForeignExtensions(meta.protocol));
+            }
+            let user_properties = meta
+                .headers
+                .take()
+                .map(|headers| {
+                    headers
+                        .0
+                        .into_iter()
+                        .map(|header| (header.key, header.value))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok((
                 MqttMeta::from_transport_meta(meta).unwrap_or_default(),
                 user_properties,
-            )
+            ))
         }
-        None => (MqttMeta::default(), Vec::new()),
+        None => Ok((MqttMeta::default(), Vec::new())),
     }
 }
 
@@ -1449,7 +1462,7 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
                     headers,
                     extensions,
                 } = options;
-                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions);
+                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions)?;
                 let topic = match channel.kind {
                     Some(BrokerChannelKind::Topic) | None => channel.name,
                     Some(kind) => {
@@ -1487,7 +1500,7 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
                     shared_group,
                     extensions,
                 } = options;
-                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions);
+                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions)?;
                 let topic = match channel.kind {
                     Some(BrokerChannelKind::Topic) | None => channel.name,
                     Some(kind) => {

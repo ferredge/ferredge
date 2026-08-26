@@ -5,10 +5,8 @@ use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::headers::Headers;
 use crate::owned::IntoOwned;
-
-/// Well-known capture key holding transport name/value header pairs.
-pub const META_KEY_HEADERS: &str = "headers";
 
 /// Open protocol identifier shared by routing, capture, and fault metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -112,8 +110,10 @@ impl IntoOwned for MetaValue<'_> {
 pub struct TransportMeta<'a> {
     /// Protocol whose adapter produced or consumes this capture.
     pub protocol: ProtocolId,
-    /// Ordered key/value metadata entries preserved losslessly.
-    pub entries: Vec<(Cow<'static, str>, MetaValue<'a>)>,
+    /// Wire-level name/value header pairs carried alongside the capture.
+    pub headers: Option<Headers<'a>>,
+    /// Extension SPI: raw entries behind the typed protocol views; application code should use those views.
+    entries: Vec<(Cow<'static, str>, MetaValue<'a>)>,
 }
 
 impl<'a> TransportMeta<'a> {
@@ -121,8 +121,14 @@ impl<'a> TransportMeta<'a> {
     pub fn new(protocol: ProtocolId) -> Self {
         Self {
             protocol,
+            headers: None,
             entries: Vec::new(),
         }
+    }
+
+    /// Consumes the capture, yielding its raw entries for typed decoding.
+    pub fn into_entries(self) -> Vec<(Cow<'static, str>, MetaValue<'a>)> {
+        self.entries
     }
 
     /// Returns the value stored under the given key, if any.
@@ -223,6 +229,7 @@ impl<'a> TransportMeta<'a> {
     pub fn as_borrowed(&self) -> TransportMeta<'_> {
         TransportMeta {
             protocol: self.protocol.clone(),
+            headers: self.headers.as_ref().map(Headers::as_borrowed),
             entries: self
                 .entries
                 .iter()
@@ -242,6 +249,7 @@ impl IntoOwned for TransportMeta<'_> {
     fn into_owned(self) -> Self::Owned {
         TransportMeta {
             protocol: self.protocol,
+            headers: self.headers.map(IntoOwned::into_owned),
             entries: self
                 .entries
                 .into_iter()
@@ -249,4 +257,16 @@ impl IntoOwned for TransportMeta<'_> {
                 .collect(),
         }
     }
+}
+
+/// Typed protocol view over one transport metadata capture.
+pub trait ProtocolMeta<'a>: Sized {
+    /// Protocol identity this view projects.
+    const PROTOCOL: ProtocolId;
+    /// Moves this view into a transport capture (zero-copy: Cows move).
+    fn into_transport_meta(self) -> TransportMeta<'a>;
+    /// Moves a capture into this view when the protocol matches.
+    fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self>;
+    /// Borrows this view from a capture when the protocol matches.
+    fn view(meta: &'a TransportMeta<'a>) -> Option<Self>;
 }

@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::{borrow::Cow, string::String, vec::Vec};
 
 use ferredge_core::prelude::{
-    DeliveryGuarantee, IntoOwned, META_KEY_HEADERS, MetaValue, ProtocolId, TransportMeta,
+    DeliveryGuarantee, Headers, IntoOwned, MetaValue, ProtocolId, ProtocolMeta, TransportMeta,
 };
 use serde::{Deserialize, Serialize};
 
@@ -158,15 +158,7 @@ impl MqttMessageOptions {
             meta.set(KEY_TOPIC_ALIAS, MetaValue::U64(u64::from(topic_alias)));
         }
         if !self.user_properties.is_empty() {
-            meta.set(
-                META_KEY_HEADERS,
-                MetaValue::Pairs(
-                    self.user_properties
-                        .into_iter()
-                        .map(|(key, value)| (Cow::Owned(key), Cow::Owned(value)))
-                        .collect(),
-                ),
-            );
+            meta.headers = Some(Headers::from(self.user_properties));
         }
         if let Some(response_topic) = self.response_topic {
             meta.set(KEY_RESPONSE_TOPIC, MetaValue::Str(response_topic.into()));
@@ -219,15 +211,7 @@ impl MqttSubscriptionOptions {
             );
         }
         if !self.user_properties.is_empty() {
-            meta.set(
-                META_KEY_HEADERS,
-                MetaValue::Pairs(
-                    self.user_properties
-                        .into_iter()
-                        .map(|(key, value)| (Cow::Owned(key), Cow::Owned(value)))
-                        .collect(),
-                ),
-            );
+            meta.headers = Some(Headers::from(self.user_properties));
         }
         meta
     }
@@ -276,9 +260,11 @@ pub struct MqttMeta<'a> {
     pub retain_handling: Option<MqttRetainHandling>,
 }
 
-impl<'a> MqttMeta<'a> {
+impl<'a> ProtocolMeta<'a> for MqttMeta<'a> {
+    const PROTOCOL: ProtocolId = ProtocolId::MQTT;
+
     /// Encodes this typed view as an open MQTT transport capture without copying values.
-    pub fn into_transport_meta(self) -> TransportMeta<'a> {
+    fn into_transport_meta(self) -> TransportMeta<'a> {
         let mut meta = TransportMeta::new(ProtocolId::MQTT);
         if let Some(topic) = self.topic {
             meta.set(KEY_TOPIC, MetaValue::Str(topic));
@@ -358,13 +344,12 @@ impl<'a> MqttMeta<'a> {
     }
 
     /// Decodes an MQTT transport capture into a typed view by move.
-    pub fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
+    fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
         if meta.protocol != ProtocolId::MQTT {
             return None;
         }
-        let mut meta = meta;
         let mut view = MqttMeta::default();
-        for (key, value) in meta.entries.drain(..) {
+        for (key, value) in meta.into_entries() {
             match (key.as_ref(), value) {
                 (KEY_TOPIC, MetaValue::Str(value)) => view.topic = Some(value),
                 (KEY_QOS, MetaValue::U64(value)) => view.qos = Some(value as u8),
@@ -405,7 +390,7 @@ impl<'a> MqttMeta<'a> {
     }
 
     /// Borrows an MQTT transport capture as a typed view without consuming it.
-    pub fn view(meta: &'a TransportMeta<'a>) -> Option<MqttMeta<'a>> {
+    fn view(meta: &'a TransportMeta<'a>) -> Option<MqttMeta<'a>> {
         if meta.protocol != ProtocolId::MQTT {
             return None;
         }
@@ -448,7 +433,9 @@ impl<'a> MqttMeta<'a> {
                 .and_then(retain_handling_from_code),
         })
     }
+}
 
+impl MqttMeta<'_> {
     /// Materializes an owned typed view for long-lived boundaries.
     pub fn into_owned(self) -> MqttMeta<'static> {
         IntoOwned::into_owned(self)

@@ -71,10 +71,10 @@ fn request_response_planner_preserves_correlation_and_resource() {
 fn messaging_planner_preserves_topic_and_extension_capture() {
     let mut extensions = TransportMeta::new(ProtocolId::MQTT);
     extensions.set("response-topic", MetaValue::Str("topic/reply".into()));
-    extensions.set(
-        ferredge_core::prelude::META_KEY_HEADERS,
-        MetaValue::Pairs(vec![("trace".to_string().into(), "abc".to_string().into())]),
-    );
+    extensions.headers = Some(ferredge_core::prelude::Headers::from(vec![(
+        "trace".to_string(),
+        "abc".to_string(),
+    )]));
     let command = Command {
         id: "cmd-2".into(),
         source_device_id: None,
@@ -105,11 +105,7 @@ fn messaging_planner_preserves_topic_and_extension_capture() {
     let transport = message.transport.expect("mqtt transport expected");
     assert_eq!(transport.protocol, ProtocolId::MQTT);
     assert_eq!(transport.get_str("response-topic"), Some("topic/reply"));
-    assert!(
-        transport
-            .get(ferredge_core::prelude::META_KEY_HEADERS)
-            .is_none()
-    );
+    assert!(transport.headers.is_none());
     let headers = message
         .headers
         .expect("capture headers become envelope headers");

@@ -17,8 +17,8 @@ use ferredge_core::prelude::{
     Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
     BrokerReconnectConfig, BrokerSubscriptionOptions, ChannelReceiver, Command, Correlation,
     DeliveryGuarantee, Device, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
-    PayloadValue, ProtocolId, PubSub, RequestOptions, Route, RoutedEvent, RoutedMessage,
-    TransportMeta,
+    PayloadValue, ProtocolId, ProtocolMeta, PubSub, RequestOptions, Route, RoutedEvent,
+    RoutedMessage, TransportMeta,
 };
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
@@ -620,6 +620,37 @@ fn mqtt_v3_rejects_v5_publish_options_on_native_path() {
 }
 
 #[test]
+fn send_command_with_foreign_extensions_capture_is_rejected() {
+    let driver = make_default_driver();
+    let command = Command {
+        id: "cmd-foreign-extensions".into(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".into(),
+        intent: Intent::Send {
+            channel: BrokerAddress {
+                name: "state/device".into(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: PayloadValue::Bytes(b"online".to_vec().into()),
+            options: BrokerMessageOptions {
+                extensions: Some(TransportMeta::new(ProtocolId::HTTP)),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    let error = driver
+        .native_packet_request(command)
+        .expect_err("foreign-protocol extensions capture should be rejected");
+    assert!(matches!(
+        error,
+        crate::types::MqttCommandConversionError::ForeignExtensions(protocol)
+            if protocol == ProtocolId::HTTP
+    ));
+}
+
+#[test]
 fn mqtt_v5_publish_maps_retain_alias_and_expiry_properties() {
     let driver = make_default_driver();
     let command = ferredge_core::prelude::Command {
@@ -1013,8 +1044,11 @@ fn inbound_publish_packet_converts_to_routed_event() {
             assert_eq!(meta.correlation_data.as_deref(), Some(&b"corr-42"[..]));
             assert_eq!(meta.subscription_identifiers, vec![7]);
             assert_eq!(
-                transport.get_pairs(ferredge_core::prelude::META_KEY_HEADERS),
-                Some(&[("source".into(), "broker-a".into())][..])
+                transport.headers,
+                Some(ferredge_core::prelude::Headers::from(vec![(
+                    Cow::Borrowed("source"),
+                    Cow::Borrowed("broker-a")
+                )]))
             );
         }
         other => panic!("expected routed event, got {other:?}"),

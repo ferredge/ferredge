@@ -2,8 +2,7 @@ use alloc::{borrow::Cow, string::ToString};
 
 use ferredge_core::prelude::{
     AddressedAccessMeta, Command, CommandResult, Correlation, DeliveryState, EndpointRef, Headers,
-    Intent, META_KEY_HEADERS, MetaValue, PayloadValue, Route, RoutedEvent, RoutedResult,
-    TransportMeta,
+    Intent, PayloadValue, Route, RoutedEvent, RoutedResult, TransportMeta,
 };
 
 use crate::{
@@ -355,16 +354,13 @@ fn bridge_register_command<'a>(
     })
 }
 
-/// Splits the well-known headers capture entry away from the passthrough capture.
+/// Splits the capture-carried headers away from the passthrough capture.
 fn split_capture_headers<'a>(
     transport: Option<TransportMeta<'a>>,
 ) -> (Option<TransportMeta<'a>>, Option<Headers<'a>>) {
     match transport {
         Some(mut meta) => {
-            let headers = match meta.take(META_KEY_HEADERS) {
-                Some(MetaValue::Pairs(pairs)) if !pairs.is_empty() => Some(Headers::from(pairs)),
-                _ => None,
-            };
+            let headers = meta.headers.take().filter(|headers| !headers.is_empty());
             (Some(meta), headers)
         }
         None => (None, None),

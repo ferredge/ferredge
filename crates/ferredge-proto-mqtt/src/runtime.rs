@@ -1123,7 +1123,7 @@ fn mqtt_meta_from_v5_publish(
     }
     .into_transport_meta();
     if !user_properties.is_empty() {
-        meta.set(META_KEY_HEADERS, MetaValue::Pairs(user_properties));
+        meta.headers = Some(Headers::from(user_properties));
     }
     meta
 }
@@ -1237,7 +1237,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
     }
     .into_transport_meta();
     if !user_properties.is_empty() {
-        transport.set(META_KEY_HEADERS, MetaValue::Pairs(user_properties));
+        transport.headers = Some(Headers::from(user_properties));
     }
     RoutedEvent {
         source: mqtt_source(device_id),
