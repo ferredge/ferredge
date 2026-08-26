@@ -393,7 +393,7 @@ where
         Ok(RoutedMessage::Result(RoutedResult {
             source: EndpointRef {
                 device_id: self_.device.id.clone(),
-                protocol: DeviceProtocol::Modbus,
+                protocol: ProtocolId::MODBUS,
             },
             result: CommandResult {
                 command_id: self_.command.id.clone(),
@@ -449,7 +449,7 @@ impl<'a> TryFrom<&'a BridgeMessage<'a>> for ModbusNativePlan<'a> {
         let BridgeOp::RegisterAccess(operation) = &command.operation else {
             return Err(ModbusCommandConversionError::InvalidBridgeMessage);
         };
-        let ferredge_bridge::BridgeRoute::AddressedAccess {
+        let Route::AddressedAccess {
             resource,
             access,
             node_id,

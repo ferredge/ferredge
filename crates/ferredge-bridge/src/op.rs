@@ -1,3 +1,6 @@
+use alloc::string::String;
+
+use ferredge_core::prelude::DeliveryGuarantee;
 use serde::{Deserialize, Serialize};
 
 /// Semantic operation family represented by a bridge message.
@@ -16,6 +19,10 @@ pub enum BridgeOp {
 pub struct RequestResponseOp {
     /// Concrete request/response action.
     pub action: RequestResponseAction,
+    /// Optional transport-neutral method override such as an HTTP verb.
+    pub method: Option<String>,
+    /// Optional declared request content type.
+    pub content_type: Option<String>,
 }
 
 /// Concrete request/response action.
@@ -34,6 +41,12 @@ pub enum RequestResponseAction {
 pub struct MessagingOp {
     /// Concrete messaging action.
     pub action: MessagingAction,
+    /// Optional delivery guarantee requested for the operation.
+    pub delivery: Option<DeliveryGuarantee>,
+    /// Optional durable consumer or subscription name.
+    pub durable_name: Option<String>,
+    /// Optional shared consumer group identifier.
+    pub shared_group: Option<String>,
 }
 
 /// Concrete messaging action.

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     future::Future,
     io::{Read, Write},
@@ -9,24 +10,24 @@ use std::{
 };
 
 use ferredge_bridge::{
-    BridgeCommand, BridgeMessage, BridgeOp, BridgeRoute, BridgeTransportMeta, HttpBridgeMeta,
-    MessagingAction, MessagingCapability, MessagingOp, ProtocolEncoder, planner,
+    BridgeCommand, BridgeMessage, BridgeOp, MessagingAction, MessagingCapability, MessagingOp,
+    ProtocolEncoder, planner,
 };
 use ferredge_core::prelude::{
     Address, AsyncRuntime, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
-    BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
-    BrokerSubscriptionProtocolOptions, ChannelReceiver, Command, Correlation, DeliveryGuarantee,
-    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
-    MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat,
-    MqttProtocolVersion, MqttRetainHandling, MqttSubscriptionOptions, MqttWillConfig, PayloadValue,
-    PubSub, RequestOptions, RoutedEvent, RoutedMessage, TransportMeta,
+    BrokerReconnectConfig, BrokerSubscriptionOptions, ChannelReceiver, Command, Correlation,
+    DeliveryGuarantee, Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent,
+    Lifecycle, Map, MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion, MqttWillConfig,
+    PayloadValue, ProtocolId, PubSub, RequestOptions, Route, RoutedEvent, RoutedMessage,
+    TransportMeta,
 };
 use mqtt_protocol_core::mqtt;
 use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 
 use crate::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthResponse, MqttAuthStage, MqttBridgeCodec,
-    MqttDriver, MqttListenerStatus,
+    MqttDriver, MqttListenerStatus, MqttMessageOptions, MqttMeta, MqttPayloadFormat,
+    MqttRetainHandling, MqttSubscriptionOptions,
     runtime::{
         build_connect_packet, normalize_broker_addr, pending_reply_route_from_packet,
         routed_message_from_packet,
@@ -502,16 +503,16 @@ fn mqtt_subscribe_builds_version_specific_packet() {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
                 durable_name: Some("durable-a".to_string()),
                 shared_group: Some("shared-a".to_string()),
-                protocol: Some(BrokerSubscriptionProtocolOptions::Mqtt(
+                extensions: Some(
                     MqttSubscriptionOptions {
                         no_local: true,
                         retain_as_published: true,
                         retain_handling: Some(MqttRetainHandling::DoNotSendRetained),
                         subscription_identifier: Some(7),
                         ..MqttSubscriptionOptions::default()
-                    },
-                )),
-                ..BrokerSubscriptionOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
             },
         },
         correlation: None,
@@ -596,10 +597,13 @@ fn mqtt_v3_rejects_v5_publish_options_on_native_path() {
             },
             payload: PayloadValue::Bytes(b"online".to_vec().into()),
             options: BrokerMessageOptions {
-                protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
-                    content_type: Some("text/plain".to_string()),
-                    ..MqttMessageOptions::default()
-                })),
+                extensions: Some(
+                    MqttMessageOptions {
+                        content_type: Some("text/plain".to_string()),
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
                 ..BrokerMessageOptions::default()
             },
         },
@@ -630,13 +634,16 @@ fn mqtt_v5_publish_maps_retain_alias_and_expiry_properties() {
             payload: PayloadValue::Bytes(b"online".to_vec().into()),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
-                    retain: true,
-                    payload_format: Some(MqttPayloadFormat::Utf8),
-                    message_expiry_interval_secs: Some(30),
-                    topic_alias: Some(4),
-                    ..MqttMessageOptions::default()
-                })),
+                extensions: Some(
+                    MqttMessageOptions {
+                        retain: true,
+                        payload_format: Some(MqttPayloadFormat::Utf8),
+                        message_expiry_interval_secs: Some(30),
+                        topic_alias: Some(4),
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
                 ..BrokerMessageOptions::default()
             },
         },
@@ -727,16 +734,20 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                reply_to: Some("rpc/reply".to_string()),
-                correlation_id: Some("corr-123".to_string()),
-                protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
-                    content_type: Some("application/json".to_string()),
-                    ..MqttMessageOptions::default()
-                })),
+                extensions: Some(
+                    MqttMessageOptions {
+                        content_type: Some("application/json".to_string()),
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
                 ..BrokerMessageOptions::default()
             },
         },
-        correlation: None,
+        correlation: Some(Correlation {
+            request_id: "corr-123".to_string().into(),
+            reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
+        }),
     };
 
     let packet = packet_request(&driver, &command);
@@ -769,8 +780,14 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
 }
 
 #[test]
-fn mqtt_v5_publish_projects_http_metadata_into_user_properties() {
+fn mqtt_v5_publish_ignores_foreign_transport_capture() {
     let driver = make_default_driver();
+    let mut http_capture = TransportMeta::new(ProtocolId::HTTP);
+    http_capture.set(
+        "method",
+        ferredge_core::prelude::MetaValue::Str("POST".into()),
+    );
+    http_capture.set("status-code", ferredge_core::prelude::MetaValue::U64(207));
     let message = BridgeMessage::Command(BridgeCommand {
         id: "bridge-http-1".to_string().into(),
         source_device_id: Some("http-device-1".to_string()),
@@ -780,17 +797,15 @@ fn mqtt_v5_publish_projects_http_metadata_into_user_properties() {
         }),
         operation: BridgeOp::Messaging(MessagingOp {
             action: MessagingAction::Publish,
+            delivery: None,
+            durable_name: None,
+            shared_group: None,
         }),
         payload: Some(PayloadValue::Bytes(b"ok".to_vec().into())),
-        route: BridgeRoute::Messaging {
+        route: Route::Messaging {
             topic: "interop/http".into(),
         },
-        transport: Some(BridgeTransportMeta::Http(HttpBridgeMeta {
-            method: Some("POST".into()),
-            path: Some("/api/result".into()),
-            status_code: Some(207),
-            content_type: Some("text/plain".into()),
-        })),
+        transport: Some(http_capture),
         headers: Some(ferredge_core::prelude::Headers::from(vec![(
             "X-Request-Version".to_string(),
             "2026-05".to_string(),
@@ -802,30 +817,24 @@ fn mqtt_v5_publish_projects_http_metadata_into_user_properties() {
 
     match packet.packet {
         MqttWirePacket::V5Publish(packet) => {
-            let mut saw_content_type = false;
-            let mut saw_status = false;
-            let mut saw_method = false;
-            let mut saw_path = false;
             let mut saw_header = false;
             for prop in packet.props() {
                 match prop {
-                    mqtt::packet::Property::ContentType(prop) => {
-                        saw_content_type = prop.val() == "text/plain";
+                    mqtt::packet::Property::ContentType(_) => {
+                        panic!("foreign capture must not project a content type");
                     }
-                    mqtt::packet::Property::UserProperty(prop) => match prop.key() {
-                        "ferredge-http-status-code" => saw_status = prop.val() == "207",
-                        "ferredge-http-method" => saw_method = prop.val() == "POST",
-                        "ferredge-http-path" => saw_path = prop.val() == "/api/result",
-                        "X-Request-Version" => saw_header = prop.val() == "2026-05",
-                        _ => {}
-                    },
+                    mqtt::packet::Property::UserProperty(prop) => {
+                        assert!(
+                            !prop.key().starts_with("ferredge-http-"),
+                            "http smuggling user properties must not be emitted"
+                        );
+                        if prop.key() == "X-Request-Version" {
+                            saw_header = prop.val() == "2026-05";
+                        }
+                    }
                     _ => {}
                 }
             }
-            assert!(saw_content_type);
-            assert!(saw_status);
-            assert!(saw_method);
-            assert!(saw_path);
             assert!(saw_header);
         }
         other => panic!("expected v5 publish packet, got {other:?}"),
@@ -847,7 +856,13 @@ fn mqtt_v5_publish_uses_command_id_as_correlation_when_reply_topic_present() {
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
             options: BrokerMessageOptions {
                 delivery: Some(ferredge_core::prelude::DeliveryGuarantee::AtLeastOnce),
-                reply_to: Some("rpc/reply".to_string()),
+                extensions: Some(
+                    MqttMessageOptions {
+                        response_topic: Some("rpc/reply".to_string()),
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
                 ..BrokerMessageOptions::default()
             },
         },
@@ -883,13 +898,12 @@ fn mqtt_v5_publish_registers_pending_reply_route() {
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
-            options: BrokerMessageOptions {
-                reply_to: Some("rpc/reply".to_string()),
-                correlation_id: Some("corr-route-1".to_string()),
-                ..BrokerMessageOptions::default()
-            },
+            options: BrokerMessageOptions::default(),
         },
-        correlation: None,
+        correlation: Some(Correlation {
+            request_id: "corr-route-1".to_string().into(),
+            reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
+        }),
     };
 
     let route = pending_reply_route_from_packet(&packet_request(&driver, &command))
@@ -916,7 +930,13 @@ fn mqtt_v5_publish_registers_pending_reply_route_from_command_id_fallback() {
             },
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
             options: BrokerMessageOptions {
-                reply_to: Some("rpc/reply".to_string()),
+                extensions: Some(
+                    MqttMessageOptions {
+                        response_topic: Some("rpc/reply".to_string()),
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
                 ..BrokerMessageOptions::default()
             },
         },
@@ -972,8 +992,10 @@ fn inbound_publish_packet_converts_to_routed_event() {
     match message {
         RoutedMessage::Event(event) => {
             assert_eq!(
-                event.address,
-                Address::Channel("sensors/temp".to_string().into())
+                event.route,
+                Route::Messaging {
+                    topic: "sensors/temp".to_string().into()
+                }
             );
             assert_eq!(event.payload, PayloadValue::Bytes(b"42".to_vec().into()));
             assert_eq!(
@@ -983,23 +1005,17 @@ fn inbound_publish_packet_converts_to_routed_event() {
                     reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
                 })
             );
-            match event.transport {
-                Some(TransportMeta::Mqtt(meta)) => {
-                    assert_eq!(meta.content_type.as_deref(), Some("application/json"));
-                    assert_eq!(meta.response_topic.as_deref(), Some("rpc/reply"));
-                    assert_eq!(meta.correlation_data.as_deref(), Some("corr-42"));
-                    assert_eq!(
-                        meta.correlation_data_bytes.as_deref(),
-                        Some(&b"corr-42"[..])
-                    );
-                    assert_eq!(meta.subscription_identifiers, vec![7]);
-                    assert_eq!(
-                        meta.user_properties,
-                        vec![("source".into(), "broker-a".into())]
-                    );
-                }
-                other => panic!("expected MQTT transport metadata, got {other:?}"),
-            }
+            let transport = event.transport.expect("expected mqtt transport capture");
+            assert_eq!(transport.protocol, ProtocolId::MQTT);
+            let meta = MqttMeta::view(&transport).expect("mqtt view over mqtt capture");
+            assert_eq!(meta.content_type.as_deref(), Some("application/json"));
+            assert_eq!(meta.response_topic.as_deref(), Some("rpc/reply"));
+            assert_eq!(meta.correlation_data.as_deref(), Some(&b"corr-42"[..]));
+            assert_eq!(meta.subscription_identifiers, vec![7]);
+            assert_eq!(
+                transport.get_pairs(ferredge_core::prelude::META_KEY_HEADERS),
+                Some(&[("source".into(), "broker-a".into())][..])
+            );
         }
         other => panic!("expected routed event, got {other:?}"),
     }
@@ -1125,13 +1141,10 @@ fn v5_puback_failure_converts_to_rejected_result_with_reason_codes() {
                 ferredge_core::prelude::DeliveryState::Rejected
             );
             assert_eq!(result.result.error.as_deref(), Some("QuotaExceeded"));
-            match result.transport {
-                Some(TransportMeta::Mqtt(meta)) => {
-                    assert_eq!(meta.packet_id, Some(42));
-                    assert_eq!(meta.reason_codes, vec!["QuotaExceeded".to_string()]);
-                }
-                other => panic!("expected MQTT transport metadata, got {other:?}"),
-            }
+            let transport = result.transport.expect("expected mqtt transport capture");
+            let meta = MqttMeta::view(&transport).expect("mqtt view over mqtt capture");
+            assert_eq!(meta.packet_id, Some(42));
+            assert_eq!(meta.reason_codes, vec![Cow::Borrowed("QuotaExceeded")]);
         }
         other => panic!("expected routed result, got {other:?}"),
     }
@@ -1193,15 +1206,12 @@ fn v5_suback_partial_failure_converts_to_rejected_result_with_reason_codes() {
                 ferredge_core::prelude::DeliveryState::Rejected
             );
             assert_eq!(result.result.error.as_deref(), Some("NotAuthorized"));
-            match result.transport {
-                Some(TransportMeta::Mqtt(meta)) => {
-                    assert_eq!(
-                        meta.reason_codes,
-                        vec!["GrantedQos1".to_string(), "NotAuthorized".to_string()]
-                    );
-                }
-                other => panic!("expected MQTT transport metadata, got {other:?}"),
-            }
+            let transport = result.transport.expect("expected mqtt transport capture");
+            let meta = MqttMeta::view(&transport).expect("mqtt view over mqtt capture");
+            assert_eq!(
+                meta.reason_codes,
+                vec![Cow::Borrowed("GrantedQos1"), Cow::Borrowed("NotAuthorized")]
+            );
         }
         other => panic!("expected routed result, got {other:?}"),
     }
@@ -1260,12 +1270,9 @@ fn v5_unsuback_failure_converts_to_rejected_result_with_reason_codes() {
                 ferredge_core::prelude::DeliveryState::Rejected
             );
             assert_eq!(result.result.error.as_deref(), Some("NotAuthorized"));
-            match result.transport {
-                Some(TransportMeta::Mqtt(meta)) => {
-                    assert_eq!(meta.reason_codes, vec!["NotAuthorized".to_string()]);
-                }
-                other => panic!("expected MQTT transport metadata, got {other:?}"),
-            }
+            let transport = result.transport.expect("expected mqtt transport capture");
+            let meta = MqttMeta::view(&transport).expect("mqtt view over mqtt capture");
+            assert_eq!(meta.reason_codes, vec![Cow::Borrowed("NotAuthorized")]);
         }
         other => panic!("expected routed result, got {other:?}"),
     }
@@ -1294,12 +1301,9 @@ fn v5_disconnect_failure_converts_to_rejected_transport_result() {
                 ferredge_core::prelude::DeliveryState::Rejected
             );
             assert_eq!(result.result.error.as_deref(), Some("ServerBusy"));
-            match result.transport {
-                Some(TransportMeta::Mqtt(meta)) => {
-                    assert_eq!(meta.reason_codes, vec!["ServerBusy".to_string()]);
-                }
-                other => panic!("expected MQTT transport metadata, got {other:?}"),
-            }
+            let transport = result.transport.expect("expected mqtt transport capture");
+            let meta = MqttMeta::view(&transport).expect("mqtt view over mqtt capture");
+            assert_eq!(meta.reason_codes, vec![Cow::Borrowed("ServerBusy")]);
         }
         other => panic!("expected routed result, got {other:?}"),
     }
@@ -1579,7 +1583,7 @@ fn mqtt_connect_packet_maps_v5_will_properties() {
             delivery: Some(DeliveryGuarantee::AtLeastOnce),
             retain: true,
             delay_interval_secs: Some(5),
-            payload_format: Some(MqttPayloadFormat::Utf8),
+            payload_format: Some("utf8".to_string()),
             message_expiry_interval_secs: Some(60),
             content_type: Some("text/plain".to_string()),
             response_topic: Some("status/reply".to_string()),
@@ -1641,8 +1645,10 @@ fn mqtt_listener_reconnects_after_broker_disconnect() {
     }
 
     assert_eq!(
-        events.lock().expect("events lock")[0].address,
-        Address::Channel("alerts/reconnected".to_string().into())
+        events.lock().expect("events lock")[0].route,
+        Route::Messaging {
+            topic: "alerts/reconnected".to_string().into()
+        }
     );
     assert_eq!(
         driver.listener_status().expect("listener status"),

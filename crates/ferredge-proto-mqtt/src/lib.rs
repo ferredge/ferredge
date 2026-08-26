@@ -5,6 +5,7 @@
 extern crate alloc;
 
 use alloc::{
+    borrow::Cow,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -16,6 +17,7 @@ use ferredge_bridge::{
 use ferredge_core::prelude::*;
 
 mod convert;
+mod meta;
 mod runtime;
 mod types;
 #[cfg(any(
@@ -75,6 +77,15 @@ use runtime::{
 };
 
 pub use convert::MqttBridgeCodec;
+pub use meta::{
+    KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_DUPLICATE, KEY_DURABLE_NAME,
+    KEY_MESSAGE_EXPIRY_INTERVAL_SECS, KEY_NO_LOCAL, KEY_PACKET_ID, KEY_PAYLOAD_FORMAT, KEY_QOS,
+    KEY_REASON_CODES, KEY_REASON_STRING, KEY_RESPONSE_TOPIC, KEY_RETAIN, KEY_RETAIN_AS_PUBLISHED,
+    KEY_RETAIN_HANDLING, KEY_SHARED_GROUP, KEY_SUBSCRIPTION_IDENTIFIERS, KEY_TOPIC,
+    KEY_TOPIC_ALIAS, MqttMessageOptions, MqttMeta, MqttPayloadFormat, MqttRetainHandling,
+    MqttSubscriptionOptions, mqtt_payload_format_from_name, mqtt_payload_format_name,
+    mqtt_will_payload_format, qos_from_delivery, retain_handling_code, retain_handling_from_code,
+};
 pub use runtime::{MqttDecodedInbound, MqttInboundDecoder};
 pub use types::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
@@ -1388,6 +1399,27 @@ impl EventSource for MqttDriver {
     }
 }
 
+fn split_mqtt_extensions(
+    extensions: Option<TransportMeta<'static>>,
+) -> (
+    MqttMeta<'static>,
+    Vec<(Cow<'static, str>, Cow<'static, str>)>,
+) {
+    match extensions {
+        Some(mut meta) => {
+            let user_properties = match meta.take(META_KEY_HEADERS) {
+                Some(MetaValue::Pairs(pairs)) => pairs,
+                _ => Vec::new(),
+            };
+            (
+                MqttMeta::from_transport_meta(meta).unwrap_or_default(),
+                user_properties,
+            )
+        }
+        None => (MqttMeta::default(), Vec::new()),
+    }
+}
+
 fn planner_message_for_command(
     command: Command,
 ) -> Result<ferredge_bridge::BridgeMessage<'static>, MqttCommandConversionError> {
@@ -1413,16 +1445,19 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
     type Error = MqttCommandConversionError;
 
     fn plan(&self, command: Command) -> Result<MqttNativePlan<'static>, Self::Error> {
+        let correlation = command.correlation;
         match command.intent {
             Intent::Send {
                 channel,
                 payload,
                 options,
             } => {
-                let mqtt_options = match options.protocol {
-                    Some(BrokerMessageProtocolOptions::Mqtt(mqtt)) => mqtt,
-                    _ => MqttMessageOptions::default(),
-                };
+                let BrokerMessageOptions {
+                    delivery,
+                    headers,
+                    extensions,
+                } = options;
+                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions);
                 let topic = match channel.kind {
                     Some(BrokerChannelKind::Topic) | None => channel.name,
                     Some(kind) => {
@@ -1433,29 +1468,34 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
                     command_id: command.id.into(),
                     topic: topic.into(),
                     payload: payload.into_owned(),
-                    delivery: options.delivery,
-                    retain: mqtt_options.retain,
-                    payload_format: mqtt_options.payload_format,
-                    content_type: mqtt_options.content_type.map(Into::into),
-                    message_expiry_interval_secs: mqtt_options.message_expiry_interval_secs,
-                    topic_alias: mqtt_options.topic_alias,
-                    headers: Vec::new(),
-                    user_properties: mqtt_options
-                        .user_properties
+                    delivery,
+                    retain: mqtt_view.retain,
+                    payload_format: mqtt_view.payload_format,
+                    content_type: mqtt_view.content_type,
+                    message_expiry_interval_secs: mqtt_view.message_expiry_interval_secs,
+                    topic_alias: mqtt_view.topic_alias,
+                    headers: headers
+                        .0
                         .into_iter()
-                        .map(|(key, value)| (key.into(), value.into()))
+                        .map(|header| (header.key, header.value))
                         .collect(),
-                    reply_to: options.reply_to.map(|value| Address::Channel(value.into())),
-                    response_topic: mqtt_options.response_topic.map(Into::into),
-                    correlation_id: options.correlation_id.map(Into::into),
-                    correlation_data: mqtt_options.correlation_data,
+                    user_properties,
+                    reply_to: correlation
+                        .as_ref()
+                        .and_then(|correlation| correlation.reply_to.clone()),
+                    response_topic: mqtt_view.response_topic,
+                    correlation_id: correlation.map(|correlation| correlation.request_id),
+                    correlation_data: mqtt_view.correlation_data.map(Cow::into_owned),
                 })
             }
             Intent::Subscribe { channel, options } => {
-                let mqtt_options = match options.protocol {
-                    Some(BrokerSubscriptionProtocolOptions::Mqtt(mqtt)) => mqtt,
-                    _ => MqttSubscriptionOptions::default(),
-                };
+                let BrokerSubscriptionOptions {
+                    delivery,
+                    durable_name,
+                    shared_group,
+                    extensions,
+                } = options;
+                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions);
                 let topic = match channel.kind {
                     Some(BrokerChannelKind::Topic) | None => channel.name,
                     Some(kind) => {
@@ -1465,18 +1505,14 @@ impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPla
                 Ok(MqttNativePlan::Subscribe {
                     command_id: command.id.into(),
                     topic: topic.into(),
-                    delivery: options.delivery,
-                    durable_name: options.durable_name.map(Into::into),
-                    shared_group: options.shared_group.map(Into::into),
-                    no_local: mqtt_options.no_local,
-                    retain_as_published: mqtt_options.retain_as_published,
-                    retain_handling: mqtt_options.retain_handling,
-                    subscription_identifier: mqtt_options.subscription_identifier,
-                    user_properties: mqtt_options
-                        .user_properties
-                        .into_iter()
-                        .map(|(key, value)| (key.into(), value.into()))
-                        .collect(),
+                    delivery,
+                    durable_name: durable_name.map(Into::into),
+                    shared_group: shared_group.map(Into::into),
+                    no_local: mqtt_view.no_local,
+                    retain_as_published: mqtt_view.retain_as_published,
+                    retain_handling: mqtt_view.retain_handling,
+                    subscription_identifier: mqtt_view.subscription_identifiers.first().copied(),
+                    user_properties,
                 })
             }
             Intent::Unsubscribe { channel } => {

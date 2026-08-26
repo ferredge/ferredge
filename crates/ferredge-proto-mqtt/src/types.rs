@@ -7,6 +7,8 @@ use alloc::{string::String, vec::Vec};
 
 use ferredge_bridge::BridgePlannerError;
 use ferredge_core::prelude::*;
+
+use crate::meta::{MqttPayloadFormat, MqttRetainHandling};
 use mqtt_protocol_core::mqtt;
 use serde::{Deserialize, Serialize};
 

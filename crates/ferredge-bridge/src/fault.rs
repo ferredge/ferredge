@@ -1,6 +1,6 @@
 use alloc::string::String;
 
-use ferredge_core::prelude::DeviceProtocol;
+use ferredge_core::prelude::ProtocolId;
 use serde::{Deserialize, Serialize};
 
 /// Normalized bridge fault with protocol-neutral classification.
@@ -43,7 +43,7 @@ pub enum BridgeFaultCategory {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeFaultSource {
     /// Protocol where the failure originated.
-    pub protocol: Option<DeviceProtocol>,
+    pub protocol: Option<ProtocolId>,
     /// Optional adapter-specific location hint.
     pub location: Option<String>,
 }
@@ -53,7 +53,7 @@ impl BridgeFault {
     pub fn protocol(
         code: impl Into<String>,
         retryable: bool,
-        protocol: DeviceProtocol,
+        protocol: ProtocolId,
         detail: Option<String>,
     ) -> Self {
         Self {

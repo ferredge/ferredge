@@ -11,15 +11,16 @@ use ferredge_test_support::{
 
 use ferredge_core::prelude::{
     Address, BackoffStrategy, BrokerAddress, BrokerChannelKind, BrokerMessageOptions,
-    BrokerMessageProtocolOptions, BrokerReconnectConfig, BrokerSubscriptionOptions,
-    BrokerSubscriptionProtocolOptions, Command, Correlation, DeliveryGuarantee, Device,
-    DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
-    MqttConnectProperties, MqttEndpointConfig, MqttMessageOptions, MqttPayloadFormat,
-    MqttProtocolVersion, MqttSubscriptionOptions, MqttWillConfig, PayloadValue, PubSub,
-    RoutedEvent, TransportMeta,
+    BrokerReconnectConfig, BrokerSubscriptionOptions, Command, Correlation, DeliveryGuarantee,
+    Device, DeviceEndpoint, DeviceStatus, EventSink, EventSource, Intent, Lifecycle, Map,
+    MqttConnectProperties, MqttEndpointConfig, MqttProtocolVersion, MqttWillConfig, PayloadValue,
+    PubSub, Route, RoutedEvent,
 };
 
-use crate::{MqttDriver, MqttListenerStatus, types::MqttPacketRequest};
+use crate::{
+    MqttDriver, MqttListenerStatus, MqttMessageOptions, MqttMeta, MqttPayloadFormat,
+    MqttSubscriptionOptions, types::MqttPacketRequest,
+};
 
 const MOSQUITTO_START_TIMEOUT_SECS: u64 = 5;
 const MOSQUITTO_EVENT_WAIT_TIMEOUT_SECS: u64 = 5;
@@ -181,6 +182,32 @@ fn publish_packet(
         .expect("publish packet should build")
 }
 
+fn publish_packet_with_correlation(
+    driver: &MqttDriver,
+    id: &str,
+    topic: &str,
+    payload: &[u8],
+    options: BrokerMessageOptions,
+    correlation: Correlation<'static>,
+) -> MqttPacketRequest {
+    driver
+        .native_packet_request(Command {
+            id: id.to_string(),
+            source_device_id: None,
+            target_device_id: driver.dvc.id.clone(),
+            intent: Intent::Send {
+                channel: BrokerAddress {
+                    name: topic.to_string(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                payload: PayloadValue::from(payload).into_owned(),
+                options,
+            },
+            correlation: Some(correlation),
+        })
+        .expect("publish packet should build")
+}
+
 fn wait_for_event_payload(
     events: &Arc<Mutex<Vec<RoutedEvent<'static>>>>,
     payload: &[u8],
@@ -269,7 +296,12 @@ fn assert_qos_roundtrip(broker: &MosquittoGuard, delivery: DeliveryGuarantee, su
     .expect("publisher should publish");
 
     let event = wait_for_event_payload(&events, payload.as_bytes());
-    assert_eq!(event.address, Address::Channel(topic.into()));
+    assert_eq!(
+        event.route,
+        Route::Messaging {
+            topic: topic.into()
+        }
+    );
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
     block_on(subscriber.stop()).expect("subscriber should stop cleanly");
@@ -460,32 +492,41 @@ fn mosquitto_v5_complex_property_roundtrip() {
     .expect("subscriber listener should start");
 
     block_on(publisher.start()).expect("publisher should connect");
-    block_on(publisher.publish(publish_packet(
-        &publisher,
-        "pub-v5-1",
-        "ferredge/it/v5",
-        br#"{"ok":true}"#,
-        BrokerMessageOptions {
-            delivery: Some(DeliveryGuarantee::BestEffort),
-            reply_to: Some("ferredge/it/reply".to_string()),
-            correlation_id: Some("corr-v5-123".to_string()),
-            protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
-                content_type: Some("application/json".to_string()),
-                user_properties: vec![
-                    ("x-trace".to_string(), "trace-123".to_string()),
-                    ("x-origin".to_string(), "ferredge".to_string()),
-                ],
-                ..MqttMessageOptions::default()
-            })),
-            ..BrokerMessageOptions::default()
-        },
-    )))
+    block_on(
+        publisher.publish(publish_packet_with_correlation(
+            &publisher,
+            "pub-v5-1",
+            "ferredge/it/v5",
+            br#"{"ok":true}"#,
+            BrokerMessageOptions {
+                delivery: Some(DeliveryGuarantee::BestEffort),
+                extensions: Some(
+                    MqttMessageOptions {
+                        content_type: Some("application/json".to_string()),
+                        user_properties: vec![
+                            ("x-trace".to_string(), "trace-123".to_string()),
+                            ("x-origin".to_string(), "ferredge".to_string()),
+                        ],
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
+                ..BrokerMessageOptions::default()
+            },
+            Correlation {
+                request_id: "corr-v5-123".to_string().into(),
+                reply_to: Some(Address::Channel("ferredge/it/reply".to_string().into())),
+            },
+        )),
+    )
     .expect("publisher should publish");
 
     let event = wait_for_event_payload(&events, br#"{"ok":true}"#);
     assert_eq!(
-        event.address,
-        Address::Channel("ferredge/it/v5".to_string().into())
+        event.route,
+        Route::Messaging {
+            topic: "ferredge/it/v5".to_string().into()
+        }
     );
     assert_eq!(event.payload, br#"{"ok":true}"#.as_slice().into());
     assert_eq!(
@@ -496,22 +537,20 @@ fn mosquitto_v5_complex_property_roundtrip() {
         })
     );
 
-    match event.transport {
-        Some(TransportMeta::Mqtt(meta)) => {
-            assert_eq!(meta.content_type.as_deref(), Some("application/json"));
-            assert_eq!(meta.response_topic.as_deref(), Some("ferredge/it/reply"));
-            assert_eq!(meta.correlation_data.as_deref(), Some("corr-v5-123"));
-            assert!(
-                meta.user_properties
-                    .contains(&("x-trace".to_string().into(), "trace-123".to_string().into()))
-            );
-            assert!(
-                meta.user_properties
-                    .contains(&("x-origin".to_string().into(), "ferredge".to_string().into()))
-            );
-        }
-        other => panic!("expected MQTT transport metadata, got {other:?}"),
-    }
+    let transport = event.transport.expect("expected mqtt transport capture");
+    let meta = MqttMeta::view(&transport).expect("mqtt view over mqtt capture");
+    assert_eq!(meta.content_type.as_deref(), Some("application/json"));
+    assert_eq!(meta.response_topic.as_deref(), Some("ferredge/it/reply"));
+    assert_eq!(meta.correlation_data.as_deref(), Some(&b"corr-v5-123"[..]));
+    let user_properties = transport
+        .get_pairs(ferredge_core::prelude::META_KEY_HEADERS)
+        .expect("mqtt user properties expected");
+    assert!(
+        user_properties.contains(&("x-trace".to_string().into(), "trace-123".to_string().into()))
+    );
+    assert!(
+        user_properties.contains(&("x-origin".to_string().into(), "ferredge".to_string().into()))
+    );
 
     block_on(publisher.stop()).expect("publisher should stop cleanly");
     block_on(subscriber.stop()).expect("subscriber should stop cleanly");
@@ -557,7 +596,7 @@ fn mosquitto_will_publishes_after_ungraceful_driver_drop() {
             delivery: Some(DeliveryGuarantee::AtLeastOnce),
             retain: true,
             delay_interval_secs: Some(1),
-            payload_format: Some(MqttPayloadFormat::Utf8),
+            payload_format: Some("utf8".to_string()),
             message_expiry_interval_secs: Some(30),
             content_type: Some("text/plain".to_string()),
             response_topic: Some("ferredge/it/will/reply".to_string()),
@@ -633,19 +672,24 @@ fn mosquitto_v5_topic_alias_publish_is_accepted_by_broker() {
     thread::sleep(Duration::from_millis(MOSQUITTO_SUBSCRIBER_STARTUP_MS));
 
     block_on(publisher.start()).expect("publisher should connect");
-    block_on(publisher.publish(publish_packet(
-        &publisher,
-        "pub-topic-alias-1",
-        "ferredge/it/topic-alias",
-        b"alias-ok",
-        BrokerMessageOptions {
-            protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
-                topic_alias: Some(7),
-                ..MqttMessageOptions::default()
-            })),
-            ..BrokerMessageOptions::default()
-        },
-    )))
+    block_on(
+        publisher.publish(publish_packet(
+            &publisher,
+            "pub-topic-alias-1",
+            "ferredge/it/topic-alias",
+            b"alias-ok",
+            BrokerMessageOptions {
+                extensions: Some(
+                    MqttMessageOptions {
+                        topic_alias: Some(7),
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
+                ..BrokerMessageOptions::default()
+            },
+        )),
+    )
     .expect("publisher should publish with topic alias");
 
     let output = subscriber
@@ -684,23 +728,28 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
     let payload = br#"{"retained":true}"#;
 
     block_on(publisher.start()).expect("publisher should connect");
-    block_on(publisher.publish(publish_packet(
-        &publisher,
-        "pub-retain-1",
-        topic,
-        payload,
-        BrokerMessageOptions {
-            delivery: Some(DeliveryGuarantee::AtLeastOnce),
-            protocol: Some(BrokerMessageProtocolOptions::Mqtt(MqttMessageOptions {
-                retain: true,
-                payload_format: Some(MqttPayloadFormat::Utf8),
-                content_type: Some("application/json".to_string()),
-                message_expiry_interval_secs: Some(30),
-                ..MqttMessageOptions::default()
-            })),
-            ..BrokerMessageOptions::default()
-        },
-    )))
+    block_on(
+        publisher.publish(publish_packet(
+            &publisher,
+            "pub-retain-1",
+            topic,
+            payload,
+            BrokerMessageOptions {
+                delivery: Some(DeliveryGuarantee::AtLeastOnce),
+                extensions: Some(
+                    MqttMessageOptions {
+                        retain: true,
+                        payload_format: Some(MqttPayloadFormat::Utf8),
+                        content_type: Some("application/json".to_string()),
+                        message_expiry_interval_secs: Some(30),
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
+                ..BrokerMessageOptions::default()
+            },
+        )),
+    )
     .expect("publisher should publish retained payload");
     block_on(publisher.stop()).expect("publisher should stop cleanly");
 
@@ -718,15 +767,19 @@ fn mosquitto_retained_publish_roundtrip_preserves_meta() {
     .expect("subscriber listener should start");
 
     let event = wait_for_event_payload(&events, payload);
-    assert_eq!(event.address, Address::Channel(topic.to_string().into()));
-    match event.transport {
-        Some(TransportMeta::Mqtt(meta)) => {
-            assert!(meta.retain, "retained publish should stay marked retained");
-            assert_eq!(meta.content_type.as_deref(), Some("application/json"));
-            assert_eq!(meta.payload_format.as_deref(), Some("1"));
-            assert_eq!(meta.message_expiry_interval_secs, Some(30));
+    assert_eq!(
+        event.route,
+        Route::Messaging {
+            topic: topic.to_string().into()
         }
-        other => panic!("expected MQTT transport metadata, got {other:?}"),
+    );
+    {
+        let transport = event.transport.as_ref().expect("mqtt transport capture");
+        let meta = MqttMeta::view(transport).expect("mqtt view over mqtt capture");
+        assert!(meta.retain, "retained publish should stay marked retained");
+        assert_eq!(meta.content_type.as_deref(), Some("application/json"));
+        assert_eq!(meta.payload_format, Some(MqttPayloadFormat::Utf8));
+        assert_eq!(meta.message_expiry_interval_secs, Some(30));
     }
 
     let clear_status = ProcessCommand::new("mosquitto_pub")
@@ -776,13 +829,14 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
                         },
                         options: BrokerSubscriptionOptions {
                             delivery: Some(DeliveryGuarantee::AtLeastOnce),
-                            protocol: Some(BrokerSubscriptionProtocolOptions::Mqtt(
+                            extensions: Some(
                                 MqttSubscriptionOptions {
                                     no_local: true,
                                     subscription_identifier: Some(41),
                                     ..MqttSubscriptionOptions::default()
-                                },
-                            )),
+                                }
+                                .into_transport_meta(),
+                            ),
                             ..BrokerSubscriptionOptions::default()
                         },
                     },
@@ -832,11 +886,10 @@ fn mosquitto_v5_subscription_identifier_and_no_local_work() {
     assert!(pub_status.success());
 
     let event = wait_for_event_payload(&events, b"remote-should-arrive");
-    match event.transport {
-        Some(TransportMeta::Mqtt(meta)) => {
-            assert_eq!(meta.subscription_identifiers, vec![41]);
-        }
-        other => panic!("expected MQTT transport metadata, got {other:?}"),
+    {
+        let transport = event.transport.as_ref().expect("mqtt transport capture");
+        let meta = MqttMeta::view(transport).expect("mqtt view over mqtt capture");
+        assert_eq!(meta.subscription_identifiers, vec![41]);
     }
 
     block_on(driver.stop()).expect("driver should stop cleanly");
@@ -1173,8 +1226,10 @@ fn mosquitto_replays_subscriptions_after_restart() {
 
     let event = wait_for_event_payload(&events, b"resub-ok");
     assert_eq!(
-        event.address,
-        Address::Channel("ferredge/it/recovery".to_string().into())
+        event.route,
+        Route::Messaging {
+            topic: "ferredge/it/recovery".to_string().into()
+        }
     );
     assert_eq!(
         subscriber
@@ -1241,8 +1296,10 @@ fn mosquitto_replays_queued_publish_after_restart() {
 
     let event = wait_for_event_payload(&events, b"queued-recovery-ok");
     assert_eq!(
-        event.address,
-        Address::Channel("ferredge/it/recovery/out".to_string().into())
+        event.route,
+        Route::Messaging {
+            topic: "ferredge/it/recovery/out".to_string().into()
+        }
     );
     assert_eq!(
         driver

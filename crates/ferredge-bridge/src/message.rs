@@ -1,16 +1,12 @@
 use alloc::borrow::Cow;
 
 use ferredge_core::prelude::{
-    Correlation, DeliveryState, DeviceId, EndpointRef, Headers, IntoOwned, PayloadValue,
+    Correlation, DeliveryState, DeviceId, EndpointRef, Headers, IntoOwned, PayloadValue, Route,
+    TransportMeta,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    capability::BridgeCapability,
-    fault::BridgeFault,
-    meta::{BridgeRoute, BridgeTransportMeta},
-    op::BridgeOp,
-};
+use crate::{capability::BridgeCapability, fault::BridgeFault, op::BridgeOp};
 
 /// Top-level bridge message envelope shared across protocols.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,9 +37,9 @@ pub struct BridgeCommand<'a> {
     /// Optional payload carried by the command.
     pub payload: Option<PayloadValue<'a>>,
     /// Logical routing information required by the transport codec.
-    pub route: BridgeRoute<'a>,
+    pub route: Route<'a>,
     /// Typed transport metadata preserved separately from arbitrary headers.
-    pub transport: Option<BridgeTransportMeta<'a>>,
+    pub transport: Option<TransportMeta<'a>>,
     /// Arbitrary protocol headers or properties.
     pub headers: Option<Headers<'a>>,
     /// Optional correlation metadata.
@@ -62,9 +58,9 @@ pub struct BridgeEvent<'a> {
     /// Event payload.
     pub payload: PayloadValue<'a>,
     /// Logical routing information preserved for the event.
-    pub route: BridgeRoute<'a>,
+    pub route: Route<'a>,
     /// Typed transport metadata preserved separately from arbitrary headers.
-    pub transport: Option<BridgeTransportMeta<'a>>,
+    pub transport: Option<TransportMeta<'a>>,
     /// Arbitrary protocol headers or properties.
     pub headers: Option<Headers<'a>>,
     /// Optional correlation metadata.
@@ -83,9 +79,9 @@ pub struct BridgeMessageMeta<'a> {
     /// Optional operation context for the result.
     pub operation: Option<BridgeOp>,
     /// Optional logical route associated with the result.
-    pub route: Option<BridgeRoute<'a>>,
+    pub route: Option<Route<'a>>,
     /// Optional typed transport metadata.
-    pub transport: Option<BridgeTransportMeta<'a>>,
+    pub transport: Option<TransportMeta<'a>>,
     /// Optional arbitrary headers or properties.
     pub headers: Option<Headers<'a>>,
     /// Optional correlation metadata.
@@ -137,9 +133,9 @@ pub struct BridgeFaultMessage<'a> {
     /// Optional correlation metadata.
     pub correlation: Option<Correlation<'a>>,
     /// Optional route metadata associated with the fault.
-    pub route: Option<BridgeRoute<'a>>,
+    pub route: Option<Route<'a>>,
     /// Optional typed transport metadata associated with the fault.
-    pub transport: Option<BridgeTransportMeta<'a>>,
+    pub transport: Option<TransportMeta<'a>>,
     /// Optional arbitrary headers or properties associated with the fault.
     pub headers: Option<Headers<'a>>,
     /// Fault payload.

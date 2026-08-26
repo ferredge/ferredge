@@ -10,14 +10,16 @@ use alloc::{
 };
 
 use ferredge_bridge::{
-    BridgeMessage, BridgeOp, BridgeOutbound, BridgePlannerError, BridgeRoute, BridgeTransportMeta,
-    NativeOutbound, ProtocolDecoder, ProtocolEncoder, ProtocolPlanner, RequestResponseAction,
-    planner,
+    BridgeMessage, BridgeOp, BridgeOutbound, BridgePlannerError, NativeOutbound, ProtocolDecoder,
+    ProtocolEncoder, ProtocolPlanner, RequestResponseAction, planner,
 };
 use ferredge_core::prelude::*;
 
 pub mod attributes;
 mod handler;
+mod meta;
+
+pub use meta::{HttpMeta, KEY_CONTENT_TYPE, KEY_METHOD, KEY_PATH, KEY_STATUS_CODE};
 #[cfg(any(
     all(feature = "tokio-runtime", feature = "async-std-runtime"),
     all(feature = "tokio-runtime", feature = "embassy-runtime"),
@@ -411,27 +413,33 @@ where
 
         let content_type = header_value(&self_.response.headers, "content-type");
         let payload = http_payload_from_response_body(&self_.response.body, content_type);
-        let transport = TransportMeta::Http(HttpMeta {
+        let mut transport = HttpMeta {
             method: options.method.as_deref().map(Cow::Borrowed),
             path: options.path.as_deref().map(Cow::Borrowed),
             status_code: Some(self_.response.status_code),
-            headers: Headers(
-                self_
-                    .response
-                    .headers
-                    .iter()
-                    .map(|(key, value)| Header {
-                        key: Cow::Borrowed(key.as_str()),
-                        value: Cow::Borrowed(value.as_str()),
-                    })
-                    .collect(),
-            ),
-        });
+            content_type: content_type.map(Cow::Borrowed),
+        }
+        .into_transport_meta();
+        if !self_.response.headers.is_empty() {
+            transport.set(
+                META_KEY_HEADERS,
+                MetaValue::Pairs(
+                    self_
+                        .response
+                        .headers
+                        .iter()
+                        .map(|(key, value)| {
+                            (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str()))
+                        })
+                        .collect(),
+                ),
+            );
+        }
 
         Ok(RoutedMessage::Result(RoutedResult {
             source: EndpointRef {
                 device_id: self_.device.id.clone(),
-                protocol: DeviceProtocol::HTTP,
+                protocol: ProtocolId::HTTP,
             },
             result: CommandResult {
                 command_id: self_.command.id.clone(),
@@ -486,16 +494,24 @@ impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
         let BridgeOp::RequestResponse(operation) = &command.operation else {
             return Err(HttpCommandConversionError::InvalidBridgeMessage);
         };
-        let BridgeRoute::RequestResponse { resource, path } = &command.route else {
+        let Route::RequestResponse { resource, path } = &command.route else {
             return Err(HttpCommandConversionError::InvalidBridgeMessage);
         };
 
-        let mut method = None;
-        let mut content_type = None;
-        if let Some(BridgeTransportMeta::Http(meta)) = &command.transport {
-            method = meta.method.clone();
-            content_type = meta.content_type.clone();
-        }
+        let http_capture = command
+            .transport
+            .as_ref()
+            .filter(|transport| transport.protocol == ProtocolId::HTTP);
+        let method = operation.method.clone().map(Cow::Owned).or_else(|| {
+            http_capture
+                .and_then(|transport| transport.get_str(KEY_METHOD))
+                .map(|value| Cow::Owned(value.to_string()))
+        });
+        let content_type = operation.content_type.clone().map(Cow::Owned).or_else(|| {
+            http_capture
+                .and_then(|transport| transport.get_str(KEY_CONTENT_TYPE))
+                .map(|value| Cow::Owned(value.to_string()))
+        });
 
         Ok(HttpNativePlan {
             resource: resource.clone(),
@@ -994,21 +1010,22 @@ mod tests {
                         reply_to: Some(Address::Resource("temp".to_string().into())),
                     })
                 );
-                match result.transport {
-                    Some(TransportMeta::Http(meta)) => {
-                        assert_eq!(meta.status_code, Some(200));
-                        assert_eq!(
-                            meta.headers,
-                            Headers::from(vec![
-                                ("Content-Type".to_string(), "text/plain".to_string()),
-                                ("X-Test".to_string(), "ok".to_string()),
-                                ("Content-Length".to_string(), "2".to_string()),
-                                ("Connection".to_string(), "close".to_string()),
-                            ])
-                        );
-                    }
-                    other => panic!("expected http transport, got {other:?}"),
-                }
+                let transport = result.transport.expect("expected http transport capture");
+                assert_eq!(transport.protocol, ProtocolId::HTTP);
+                let view = HttpMeta::view(&transport).expect("http view over http capture");
+                assert_eq!(view.status_code, Some(200));
+                assert_eq!(view.content_type.as_deref(), Some("text/plain"));
+                assert_eq!(
+                    transport.get_pairs(META_KEY_HEADERS),
+                    Some(
+                        &[
+                            (Cow::Borrowed("Content-Type"), Cow::Borrowed("text/plain")),
+                            (Cow::Borrowed("X-Test"), Cow::Borrowed("ok")),
+                            (Cow::Borrowed("Content-Length"), Cow::Borrowed("2")),
+                            (Cow::Borrowed("Connection"), Cow::Borrowed("close")),
+                        ][..]
+                    )
+                );
             }
             other => panic!("expected routed result, got {other:?}"),
         }

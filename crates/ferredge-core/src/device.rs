@@ -29,15 +29,6 @@ pub enum DeviceStatus {
     Unknown,
 }
 
-/// Transport protocol supported by device endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeviceProtocol {
-    MQTT,
-    HTTP,
-    Modbus,
-    CoAP,
-}
-
 /// Optional credential set for protocol endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -73,8 +64,8 @@ pub struct MqttWillConfig {
     pub retain: bool,
     /// Optional MQTT v5 will delay interval in seconds.
     pub delay_interval_secs: Option<u32>,
-    /// Optional MQTT v5 will payload format indicator.
-    pub payload_format: Option<crate::command::MqttPayloadFormat>,
+    /// Optional MQTT v5 will payload format indicator rendered as `"bytes"` or `"utf8"`.
+    pub payload_format: Option<String>,
     /// Optional MQTT v5 will message expiry interval in seconds.
     pub message_expiry_interval_secs: Option<u32>,
     /// Optional MQTT v5 will content type.
@@ -584,16 +575,16 @@ impl DeviceEndpoint {
     }
 
     /// Returns protocol implied by endpoint variant.
-    pub fn protocol(&self) -> DeviceProtocol {
+    pub fn protocol(&self) -> crate::meta::ProtocolId {
         match self {
-            DeviceEndpoint::Http(_) => DeviceProtocol::HTTP,
-            DeviceEndpoint::Mqtt(_) => DeviceProtocol::MQTT,
-            DeviceEndpoint::ModbusTCP(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusRTUOverTCP(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusRTU(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusASCII(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusUDP(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::CoAP(_) => DeviceProtocol::CoAP,
+            DeviceEndpoint::Http(_) => crate::meta::ProtocolId::HTTP,
+            DeviceEndpoint::Mqtt(_) => crate::meta::ProtocolId::MQTT,
+            DeviceEndpoint::ModbusTCP(_)
+            | DeviceEndpoint::ModbusRTUOverTCP(_)
+            | DeviceEndpoint::ModbusRTU(_)
+            | DeviceEndpoint::ModbusASCII(_)
+            | DeviceEndpoint::ModbusUDP(_) => crate::meta::ProtocolId::MODBUS,
+            DeviceEndpoint::CoAP(_) => crate::meta::ProtocolId::COAP,
         }
     }
 }
@@ -680,7 +671,7 @@ mod tests {
                 url: "127.0.0.1:8080".to_string(),
             })
             .protocol(),
-            DeviceProtocol::HTTP
+            crate::meta::ProtocolId::HTTP
         );
         assert_eq!(
             DeviceEndpoint::mqtt(MqttEndpointConfig {
@@ -698,7 +689,7 @@ mod tests {
                 supported_versions: vec![MqttProtocolVersion::V5_0, MqttProtocolVersion::V3_1_1],
             })
             .protocol(),
-            DeviceProtocol::MQTT
+            crate::meta::ProtocolId::MQTT
         );
         assert_eq!(
             DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
@@ -707,7 +698,7 @@ mod tests {
                 options: ModbusClientOptions::default(),
             })
             .protocol(),
-            DeviceProtocol::Modbus
+            crate::meta::ProtocolId::MODBUS
         );
         assert_eq!(
             DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
@@ -718,7 +709,7 @@ mod tests {
                 options: ModbusClientOptions::default(),
             })
             .protocol(),
-            DeviceProtocol::Modbus
+            crate::meta::ProtocolId::MODBUS
         );
         assert_eq!(
             DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
@@ -730,7 +721,7 @@ mod tests {
                 options: ModbusClientOptions::default(),
             })
             .protocol(),
-            DeviceProtocol::Modbus
+            crate::meta::ProtocolId::MODBUS
         );
         assert_eq!(
             DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {
@@ -739,14 +730,14 @@ mod tests {
                 options: ModbusClientOptions::default(),
             })
             .protocol(),
-            DeviceProtocol::Modbus
+            crate::meta::ProtocolId::MODBUS
         );
         assert_eq!(
             DeviceEndpoint::coap(CoapEndpointConfig {
                 url: "coap://127.0.0.1".to_string(),
             })
             .protocol(),
-            DeviceProtocol::CoAP
+            crate::meta::ProtocolId::COAP
         );
     }
 

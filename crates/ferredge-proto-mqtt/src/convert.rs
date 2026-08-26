@@ -16,13 +16,19 @@ use alloc::{
 };
 
 use ferredge_bridge::{
-    BridgeMessage, BridgeOp, BridgeOutbound, BridgeTransportMeta, MessagingAction, NativeOutbound,
+    BridgeMessage, BridgeOp, BridgeOutbound, MessagingAction, MessagingOp, NativeOutbound,
     ProtocolEncoder,
 };
 use ferredge_core::prelude::*;
 use mqtt_protocol_core::mqtt;
 use serde_json::to_vec;
 
+use crate::meta::{
+    KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_MESSAGE_EXPIRY_INTERVAL_SECS, KEY_NO_LOCAL,
+    KEY_PAYLOAD_FORMAT, KEY_RESPONSE_TOPIC, KEY_RETAIN, KEY_RETAIN_AS_PUBLISHED,
+    KEY_RETAIN_HANDLING, KEY_SUBSCRIPTION_IDENTIFIERS, KEY_TOPIC_ALIAS, MqttPayloadFormat,
+    MqttRetainHandling, mqtt_payload_format_from_name, retain_handling_from_code,
+};
 use crate::types::{
     MqttCommandConversionError, MqttCommandRef, MqttNativePlan, MqttPacketRequest, MqttWirePacket,
 };
@@ -88,7 +94,7 @@ struct PublishView<'a> {
     response_topic: Option<&'a str>,
     correlation_id: Option<String>,
     correlation_data: Option<Vec<u8>>,
-    projected_headers: ProjectedHeaderRefs<'a>,
+    projected_user_properties: Vec<(&'a str, &'a str)>,
 }
 
 struct SubscribeView<'a> {
@@ -104,14 +110,6 @@ struct SubscribeView<'a> {
     projected_user_properties: Vec<(&'a str, &'a str)>,
 }
 
-struct ProjectedHeaderRefs<'a> {
-    user_properties: Vec<(&'a str, &'a str)>,
-    content_type: Option<&'a str>,
-    http_method: Option<&'a str>,
-    http_path: Option<&'a str>,
-    http_status_code: Option<u16>,
-}
-
 enum PacketSemantics<'a> {
     Publish(PublishView<'a>),
     Subscribe(SubscribeView<'a>),
@@ -124,15 +122,17 @@ fn publish_view_from_bridge<'a>(
     let BridgeMessage::Command(bridge) = message else {
         return Err(MqttCommandConversionError::InvalidBridgeMessage);
     };
+    let BridgeOp::Messaging(MessagingOp { delivery, .. }) = &bridge.operation else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
     let topic = match &bridge.route {
-        ferredge_bridge::BridgeRoute::Messaging { topic } => topic.as_ref(),
+        Route::Messaging { topic } => topic.as_ref(),
         _ => return Err(MqttCommandConversionError::InvalidBridgeMessage),
     };
-    let mqtt = match &bridge.transport {
-        Some(BridgeTransportMeta::Mqtt(mqtt)) => Some(mqtt),
-        Some(BridgeTransportMeta::Http(_)) | None => None,
-    };
-    let projected = project_publish_metadata(bridge.transport.as_ref(), bridge.headers.as_ref());
+    let mqtt = bridge
+        .transport
+        .as_ref()
+        .filter(|meta| meta.protocol == ProtocolId::MQTT);
     Ok(PublishView {
         command_id: bridge.id.as_ref(),
         topic,
@@ -142,30 +142,34 @@ fn publish_view_from_bridge<'a>(
                 .as_ref()
                 .ok_or(MqttCommandConversionError::InvalidBridgeMessage)?,
         )?,
-        delivery: mqtt.and_then(|mqtt| delivery_from_qos(mqtt.qos)),
-        retain: mqtt.is_some_and(|mqtt| mqtt.retain),
+        delivery: *delivery,
+        retain: mqtt
+            .and_then(|meta| meta.get_bool(KEY_RETAIN))
+            .unwrap_or(false),
         payload_format: mqtt
-            .and_then(|mqtt| mqtt_payload_format_from_bridge(mqtt.payload_format.as_deref())),
-        content_type: mqtt
-            .and_then(|mqtt| mqtt.content_type.as_deref())
-            .or(projected.content_type),
-        message_expiry_interval_secs: mqtt.and_then(|mqtt| mqtt.message_expiry_interval_secs),
-        topic_alias: mqtt.and_then(|mqtt| mqtt.topic_alias),
+            .and_then(|meta| meta.get_str(KEY_PAYLOAD_FORMAT))
+            .and_then(mqtt_payload_format_from_name),
+        content_type: mqtt.and_then(|meta| meta.get_str(KEY_CONTENT_TYPE)),
+        message_expiry_interval_secs: mqtt
+            .and_then(|meta| meta.get_u64(KEY_MESSAGE_EXPIRY_INTERVAL_SECS))
+            .map(|value| value as u32),
+        topic_alias: mqtt
+            .and_then(|meta| meta.get_u64(KEY_TOPIC_ALIAS))
+            .map(|value| value as u16),
         reply_to: bridge
             .correlation
             .as_ref()
             .and_then(|correlation| correlation.reply_to.as_ref())
             .and_then(channel_reply_to),
-        response_topic: mqtt.and_then(|mqtt| mqtt.response_topic.as_deref()),
+        response_topic: mqtt.and_then(|meta| meta.get_str(KEY_RESPONSE_TOPIC)),
         correlation_id: bridge
             .correlation
             .as_ref()
-            .map(|correlation| correlation.request_id.to_string())
-            .or_else(|| {
-                mqtt.and_then(|mqtt| mqtt.correlation_data.as_ref().map(ToString::to_string))
-            }),
-        correlation_data: mqtt.and_then(|mqtt| mqtt.correlation_data_bytes.clone()),
-        projected_headers: projected,
+            .map(|correlation| correlation.request_id.to_string()),
+        correlation_data: mqtt
+            .and_then(|meta| meta.get_bytes(KEY_CORRELATION_DATA))
+            .map(|value| value.to_vec()),
+        projected_user_properties: header_user_properties(bridge.headers.as_ref()),
     })
 }
 
@@ -175,28 +179,37 @@ fn subscription_view_from_bridge<'a>(
     let BridgeMessage::Command(bridge) = message else {
         return Err(MqttCommandConversionError::InvalidBridgeMessage);
     };
+    let BridgeOp::Messaging(operation) = &bridge.operation else {
+        return Err(MqttCommandConversionError::InvalidBridgeMessage);
+    };
     let channel = match &bridge.route {
-        ferredge_bridge::BridgeRoute::Messaging { topic } => topic.as_ref(),
+        Route::Messaging { topic } => topic.as_ref(),
         _ => return Err(MqttCommandConversionError::InvalidBridgeMessage),
     };
-    let mqtt = match &bridge.transport {
-        Some(BridgeTransportMeta::Mqtt(mqtt)) => Some(mqtt),
-        Some(BridgeTransportMeta::Http(_)) | None => None,
-    };
-    let projected =
-        project_subscription_metadata(bridge.transport.as_ref(), bridge.headers.as_ref());
+    let mqtt = bridge
+        .transport
+        .as_ref()
+        .filter(|meta| meta.protocol == ProtocolId::MQTT);
     Ok(SubscribeView {
         command_id: bridge.id.as_ref(),
         topic: channel,
-        delivery: mqtt.and_then(|mqtt| delivery_from_qos(mqtt.qos)),
-        durable_name: mqtt.and_then(|mqtt| mqtt.durable_name.as_deref()),
-        shared_group: mqtt.and_then(|mqtt| mqtt.shared_group.as_deref()),
-        no_local: mqtt.is_some_and(|mqtt| mqtt.no_local),
-        retain_as_published: mqtt.is_some_and(|mqtt| mqtt.retain_as_published),
-        retain_handling: mqtt.and_then(|mqtt| mqtt.retain_handling),
+        delivery: operation.delivery,
+        durable_name: operation.durable_name.as_deref(),
+        shared_group: operation.shared_group.as_deref(),
+        no_local: mqtt
+            .and_then(|meta| meta.get_bool(KEY_NO_LOCAL))
+            .unwrap_or(false),
+        retain_as_published: mqtt
+            .and_then(|meta| meta.get_bool(KEY_RETAIN_AS_PUBLISHED))
+            .unwrap_or(false),
+        retain_handling: mqtt
+            .and_then(|meta| meta.get_u64(KEY_RETAIN_HANDLING))
+            .and_then(retain_handling_from_code),
         subscription_identifier: mqtt
-            .and_then(|mqtt| mqtt.subscription_identifiers.first().copied()),
-        projected_user_properties: projected.user_properties,
+            .and_then(|meta| meta.get_u64_list(KEY_SUBSCRIPTION_IDENTIFIERS))
+            .and_then(|values| values.first().copied())
+            .map(|value| value as u32),
+        projected_user_properties: header_user_properties(bridge.headers.as_ref()),
     })
 }
 
@@ -237,21 +250,15 @@ fn publish_view_from_native_plan<'a>(
         response_topic: response_topic.as_deref(),
         correlation_id: correlation_id.as_deref().map(ToString::to_string),
         correlation_data: correlation_data.clone(),
-        projected_headers: ProjectedHeaderRefs {
-            user_properties: user_properties
-                .iter()
-                .map(|(key, value)| (key.as_ref(), value.as_ref()))
-                .chain(
-                    headers
-                        .iter()
-                        .map(|(key, value)| (key.as_ref(), value.as_ref())),
-                )
-                .collect(),
-            content_type: None,
-            http_method: None,
-            http_path: None,
-            http_status_code: None,
-        },
+        projected_user_properties: user_properties
+            .iter()
+            .map(|(key, value)| (key.as_ref(), value.as_ref()))
+            .chain(
+                headers
+                    .iter()
+                    .map(|(key, value)| (key.as_ref(), value.as_ref())),
+            )
+            .collect(),
     })
 }
 
@@ -339,72 +346,15 @@ fn packet_semantics_from_native_plan<'a>(
     }
 }
 
-struct ProjectedSubscriptionMetadata<'a> {
-    user_properties: Vec<(&'a str, &'a str)>,
-}
-
-fn project_publish_metadata<'a>(
-    transport: Option<&'a BridgeTransportMeta<'a>>,
-    headers: Option<&'a Headers<'a>>,
-) -> ProjectedHeaderRefs<'a> {
-    let mut projected = ProjectedHeaderRefs {
-        user_properties: Vec::new(),
-        content_type: None,
-        http_method: None,
-        http_path: None,
-        http_status_code: None,
-    };
-    if let Some(transport) = transport {
-        match transport {
-            BridgeTransportMeta::Mqtt(_) => {}
-            BridgeTransportMeta::Http(meta) => {
-                projected.content_type = meta.content_type.as_deref();
-                projected.http_method = meta.method.as_deref();
-                projected.http_path = meta.path.as_deref();
-                projected.http_status_code = meta.status_code;
-            }
-        }
-    }
-    if let Some(headers) = headers {
-        projected.user_properties.extend(
+fn header_user_properties<'a>(headers: Option<&'a Headers<'a>>) -> Vec<(&'a str, &'a str)> {
+    headers
+        .map(|headers| {
             headers
                 .iter()
-                .map(|header| (header.key.as_ref(), header.value.as_ref())),
-        );
-    }
-    projected
-}
-
-fn project_subscription_metadata<'a>(
-    transport: Option<&'a BridgeTransportMeta<'a>>,
-    headers: Option<&'a Headers<'a>>,
-) -> ProjectedSubscriptionMetadata<'a> {
-    let mut projected = ProjectedSubscriptionMetadata {
-        user_properties: Vec::new(),
-    };
-    if let Some(BridgeTransportMeta::Http(meta)) = transport {
-        if let Some(method) = &meta.method {
-            projected
-                .user_properties
-                .push(("ferredge-http-method", method.as_ref()));
-        }
-        if let Some(path) = &meta.path {
-            projected
-                .user_properties
-                .push(("ferredge-http-path", path.as_ref()));
-        }
-        if let Some(status_code) = meta.status_code {
-            let _ = status_code;
-        }
-    }
-    if let Some(headers) = headers {
-        projected.user_properties.extend(
-            headers
-                .iter()
-                .map(|header| (header.key.as_ref(), header.value.as_ref())),
-        );
-    }
-    projected
+                .map(|header| (header.key.as_ref(), header.value.as_ref()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn qos_from_delivery(delivery: Option<DeliveryGuarantee>) -> mqtt::packet::Qos {
@@ -419,23 +369,6 @@ pub fn packet_id_for_qos(qos: mqtt::packet::Qos) -> Option<u16> {
     match qos {
         mqtt::packet::Qos::AtMostOnce => None,
         mqtt::packet::Qos::AtLeastOnce | mqtt::packet::Qos::ExactlyOnce => Some(1u16),
-    }
-}
-
-fn delivery_from_qos(qos: Option<u8>) -> Option<DeliveryGuarantee> {
-    match qos {
-        Some(2) => Some(DeliveryGuarantee::ExactlyOnce),
-        Some(1) => Some(DeliveryGuarantee::AtLeastOnce),
-        Some(0) => Some(DeliveryGuarantee::BestEffort),
-        _ => None,
-    }
-}
-
-fn mqtt_payload_format_from_bridge(payload_format: Option<&str>) -> Option<MqttPayloadFormat> {
-    match payload_format {
-        Some("utf8") => Some(MqttPayloadFormat::Utf8),
-        Some("bytes") => Some(MqttPayloadFormat::Bytes),
-        _ => None,
     }
 }
 
@@ -639,23 +572,7 @@ fn build_v5_publish_props(
         ));
     }
 
-    if let Some(method) = publish.projected_headers.http_method {
-        props.push(mqtt::packet::Property::UserProperty(
-            mqtt::packet::UserProperty::new("ferredge-http-method", method)?,
-        ));
-    }
-    if let Some(path) = publish.projected_headers.http_path {
-        props.push(mqtt::packet::Property::UserProperty(
-            mqtt::packet::UserProperty::new("ferredge-http-path", path)?,
-        ));
-    }
-    if let Some(status_code) = publish.projected_headers.http_status_code {
-        let status_code = status_code.to_string();
-        props.push(mqtt::packet::Property::UserProperty(
-            mqtt::packet::UserProperty::new("ferredge-http-status-code", status_code.as_str())?,
-        ));
-    }
-    for &(key, value) in &publish.projected_headers.user_properties {
+    for &(key, value) in &publish.projected_user_properties {
         props.push(mqtt::packet::Property::UserProperty(
             mqtt::packet::UserProperty::new(key, value)?,
         ));
@@ -720,10 +637,7 @@ fn validate_v3_publish_support(
         || publish.topic_alias.is_some()
         || publish.response_topic.is_some()
         || publish.correlation_data.is_some()
-        || !publish.projected_headers.user_properties.is_empty()
-        || publish.projected_headers.http_method.is_some()
-        || publish.projected_headers.http_path.is_some()
-        || publish.projected_headers.http_status_code.is_some()
+        || !publish.projected_user_properties.is_empty()
         || publish.reply_to.is_some()
         || publish.correlation_id.is_some()
     {

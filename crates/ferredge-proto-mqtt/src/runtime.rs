@@ -14,6 +14,7 @@ use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 use runtime_stack::StackSocket;
 
 use crate::convert::qos_from_delivery;
+use crate::meta::{MqttMeta, MqttPayloadFormat, mqtt_will_payload_format};
 use crate::runtime_stack;
 use crate::types::{MqttPacketRequest, MqttWirePacket};
 use crate::{
@@ -998,7 +999,11 @@ fn build_v5_will_props(will: &MqttWillConfig) -> Result<mqtt::packet::Properties
             mqtt::packet::WillDelayInterval::new(delay).map_err(|e| e.to_string())?,
         ));
     }
-    if let Some(payload_format) = will.payload_format {
+    if let Some(payload_format) = will
+        .payload_format
+        .as_deref()
+        .and_then(mqtt_will_payload_format)
+    {
         props.push(mqtt::packet::Property::PayloadFormatIndicator(
             mqtt::packet::PayloadFormatIndicator::new(match payload_format {
                 MqttPayloadFormat::Bytes => mqtt::packet::PayloadFormat::Binary,
@@ -1051,13 +1056,12 @@ fn reason_string_from_props_opt(props: &Option<mqtt::packet::Properties>) -> Opt
 fn mqtt_meta_from_v5_publish(
     packet: &mqtt::packet::v5_0::Publish,
     correlation_override: Option<String>,
-) -> MqttMeta<'static> {
+) -> TransportMeta<'static> {
     let mut content_type = None;
     let mut payload_format = None;
     let mut message_expiry_interval_secs = None;
     let mut response_topic = None;
-    let mut correlation_data = correlation_override.map(Cow::Owned);
-    let mut correlation_data_bytes = None;
+    let mut correlation_data = correlation_override.map(|value| Cow::Owned(value.into_bytes()));
     let mut topic_alias = None;
     let mut subscription_identifiers = Vec::new();
     let mut user_properties = Vec::new();
@@ -1068,7 +1072,11 @@ fn mqtt_meta_from_v5_publish(
                 content_type = Some(Cow::Owned(prop.val().to_string()))
             }
             mqtt::packet::Property::PayloadFormatIndicator(prop) => {
-                payload_format = Some(Cow::Owned(prop.val().to_string()))
+                payload_format = Some(if prop.val() == 1 {
+                    MqttPayloadFormat::Utf8
+                } else {
+                    MqttPayloadFormat::Bytes
+                })
             }
             mqtt::packet::Property::MessageExpiryInterval(prop) => {
                 message_expiry_interval_secs = Some(prop.val())
@@ -1078,10 +1086,8 @@ fn mqtt_meta_from_v5_publish(
             }
             mqtt::packet::Property::CorrelationData(prop) => {
                 if correlation_data.is_none() {
-                    correlation_data =
-                        Some(Cow::Owned(String::from_utf8_lossy(prop.val()).into_owned()));
+                    correlation_data = Some(Cow::Owned(prop.val().to_vec()));
                 }
-                correlation_data_bytes = Some(Cow::Owned(prop.val().to_vec()));
             }
             mqtt::packet::Property::TopicAlias(prop) => topic_alias = Some(prop.val()),
             mqtt::packet::Property::SubscriptionIdentifier(prop) => {
@@ -1095,9 +1101,9 @@ fn mqtt_meta_from_v5_publish(
         }
     }
 
-    MqttMeta {
-        topic: Cow::Owned(packet.topic_name().to_string()),
-        qos: packet.qos() as u8,
+    let mut meta = MqttMeta {
+        topic: Some(Cow::Owned(packet.topic_name().to_string())),
+        qos: Some(packet.qos() as u8),
         retain: packet.retain(),
         duplicate: packet.dup(),
         packet_id: packet.packet_id(),
@@ -1106,13 +1112,15 @@ fn mqtt_meta_from_v5_publish(
         message_expiry_interval_secs,
         response_topic,
         correlation_data,
-        correlation_data_bytes,
         topic_alias,
-        subscription_identifiers: subscription_identifiers.into(),
-        user_properties: user_properties.into(),
-        reason_codes: Vec::new().into(),
-        reason_string: None,
+        subscription_identifiers,
+        ..MqttMeta::default()
     }
+    .into_transport_meta();
+    if !user_properties.is_empty() {
+        meta.set(META_KEY_HEADERS, MetaValue::Pairs(user_properties));
+    }
+    meta
 }
 
 pub(crate) fn pending_reply_route_from_packet(
@@ -1151,7 +1159,7 @@ pub(crate) fn pending_reply_route_from_packet(
 pub(crate) fn mqtt_source(device_id: &str) -> EndpointRef {
     EndpointRef {
         device_id: device_id.to_string(),
-        protocol: DeviceProtocol::MQTT,
+        protocol: ProtocolId::MQTT,
     }
 }
 
@@ -1160,7 +1168,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
     packet: &'a mqtt::packet::v5_0::Publish,
 ) -> RoutedEvent<'a> {
     let mut correlation_id = None;
-    let mut correlation_data_bytes = None;
+    let mut correlation_data = None;
     let mut reply_to = None;
     let mut content_type = None;
     let mut payload_format = None;
@@ -1171,7 +1179,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
     for prop in packet.props() {
         match prop {
             mqtt::packet::Property::CorrelationData(prop) => {
-                correlation_data_bytes = Some(Cow::Borrowed(prop.val()));
+                correlation_data = Some(Cow::Borrowed(prop.val()));
                 correlation_id = Some(String::from_utf8_lossy(prop.val()));
             }
             mqtt::packet::Property::ResponseTopic(prop) => {
@@ -1181,7 +1189,11 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
                 content_type = Some(Cow::Borrowed(prop.val()));
             }
             mqtt::packet::Property::PayloadFormatIndicator(prop) => {
-                payload_format = Some(Cow::Owned(prop.val().to_string()));
+                payload_format = Some(if prop.val() == 1 {
+                    MqttPayloadFormat::Utf8
+                } else {
+                    MqttPayloadFormat::Bytes
+                });
             }
             mqtt::packet::Property::MessageExpiryInterval(prop) => {
                 message_expiry_interval_secs = Some(prop.val());
@@ -1202,38 +1214,41 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
         Address::Channel(channel) => Some(channel.clone()),
         Address::Resource(_) => None,
     });
-    let payload =
-        payload_value_from_mqtt_bytes(packet.payload().as_slice(), payload_format.as_deref());
+    let payload = payload_value_from_mqtt_bytes(packet.payload().as_slice(), payload_format);
+    let mut transport = MqttMeta {
+        topic: Some(Cow::Borrowed(packet.topic_name())),
+        qos: Some(packet.qos() as u8),
+        retain: packet.retain(),
+        duplicate: packet.dup(),
+        packet_id: packet.packet_id(),
+        content_type,
+        payload_format,
+        message_expiry_interval_secs,
+        response_topic,
+        correlation_data,
+        topic_alias,
+        subscription_identifiers,
+        ..MqttMeta::default()
+    }
+    .into_transport_meta();
+    if !user_properties.is_empty() {
+        transport.set(META_KEY_HEADERS, MetaValue::Pairs(user_properties));
+    }
     RoutedEvent {
         source: mqtt_source(device_id),
-        address: Address::Channel(Cow::Borrowed(packet.topic_name())),
+        route: Route::Messaging {
+            topic: Cow::Borrowed(packet.topic_name()),
+        },
         payload,
         correlation: if correlation_id.is_some() || reply_to.is_some() {
             Some(Correlation {
-                request_id: correlation_id.clone().unwrap_or_else(|| Cow::Borrowed("")),
+                request_id: correlation_id.unwrap_or_else(|| Cow::Borrowed("")),
                 reply_to,
             })
         } else {
             None
         },
-        transport: Some(TransportMeta::Mqtt(MqttMeta {
-            topic: Cow::Borrowed(packet.topic_name()),
-            qos: packet.qos() as u8,
-            retain: packet.retain(),
-            duplicate: packet.dup(),
-            packet_id: packet.packet_id(),
-            content_type,
-            payload_format,
-            message_expiry_interval_secs,
-            response_topic,
-            correlation_data: correlation_id.clone(),
-            correlation_data_bytes,
-            topic_alias,
-            subscription_identifiers: subscription_identifiers.into(),
-            user_properties: user_properties.into(),
-            reason_codes: Vec::new().into(),
-            reason_string: None,
-        })),
+        transport: Some(transport),
     }
 }
 
@@ -1262,7 +1277,7 @@ fn routed_reply_or_event_from_v5_publish(
                 payload: Some(
                     payload_value_from_mqtt_bytes(
                         packet.payload().as_slice(),
-                        mqtt_payload_format(packet).as_deref(),
+                        mqtt_payload_format(packet),
                     )
                     .into_owned(),
                 ),
@@ -1272,10 +1287,7 @@ fn routed_reply_or_event_from_v5_publish(
                     reply_to: route.reply_to,
                 }),
             },
-            transport: Some(TransportMeta::Mqtt(mqtt_meta_from_v5_publish(
-                packet,
-                Some(correlation_key),
-            ))),
+            transport: Some(mqtt_meta_from_v5_publish(packet, Some(correlation_key))),
         }));
     }
 
@@ -1290,34 +1302,33 @@ pub(crate) fn routed_event_from_v3_publish<'a>(
 ) -> RoutedEvent<'a> {
     RoutedEvent {
         source: mqtt_source(device_id),
-        address: Address::Channel(Cow::Borrowed(packet.topic_name())),
+        route: Route::Messaging {
+            topic: Cow::Borrowed(packet.topic_name()),
+        },
         payload: PayloadValue::Bytes(Cow::Borrowed(packet.payload().as_slice())),
         correlation: None,
-        transport: Some(TransportMeta::Mqtt(MqttMeta {
-            topic: Cow::Borrowed(packet.topic_name()),
-            qos: packet.qos() as u8,
-            retain: packet.retain(),
-            duplicate: packet.dup(),
-            packet_id: packet.packet_id(),
-            content_type: None,
-            payload_format: None,
-            message_expiry_interval_secs: None,
-            response_topic: None,
-            correlation_data: None,
-            correlation_data_bytes: None,
-            topic_alias: None,
-            subscription_identifiers: Vec::new().into(),
-            user_properties: Vec::new().into(),
-            reason_codes: Vec::new().into(),
-            reason_string: None,
-        })),
+        transport: Some(
+            MqttMeta {
+                topic: Some(Cow::Borrowed(packet.topic_name())),
+                qos: Some(packet.qos() as u8),
+                retain: packet.retain(),
+                duplicate: packet.dup(),
+                packet_id: packet.packet_id(),
+                ..MqttMeta::default()
+            }
+            .into_transport_meta(),
+        ),
     }
 }
 
-fn mqtt_payload_format(packet: &mqtt::packet::v5_0::Publish) -> Option<Cow<'static, str>> {
+fn mqtt_payload_format(packet: &mqtt::packet::v5_0::Publish) -> Option<MqttPayloadFormat> {
     for prop in packet.props() {
         if let mqtt::packet::Property::PayloadFormatIndicator(prop) = prop {
-            return Some(Cow::Owned(prop.val().to_string()));
+            return Some(if prop.val() == 1 {
+                MqttPayloadFormat::Utf8
+            } else {
+                MqttPayloadFormat::Bytes
+            });
         }
     }
     None
@@ -1325,9 +1336,9 @@ fn mqtt_payload_format(packet: &mqtt::packet::v5_0::Publish) -> Option<Cow<'stat
 
 fn payload_value_from_mqtt_bytes<'a>(
     bytes: &'a [u8],
-    payload_format: Option<&str>,
+    payload_format: Option<MqttPayloadFormat>,
 ) -> PayloadValue<'a> {
-    if payload_format == Some("1")
+    if payload_format == Some(MqttPayloadFormat::Utf8)
         && let Ok(value) = core::str::from_utf8(bytes)
     {
         return PayloadValue::String(Cow::Borrowed(value));
@@ -1356,14 +1367,14 @@ fn routed_result_from_v5_puback(
             .filter(|code| code.is_failure())
             .map(|code| Cow::Owned(code.to_string())),
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
@@ -1388,14 +1399,14 @@ fn routed_result_from_v5_pubrec(
             .filter(|code| code.is_failure())
             .map(|code| Cow::Owned(code.to_string())),
         false,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
@@ -1420,14 +1431,14 @@ fn routed_result_from_v5_pubrel(
             .filter(|code| code.is_failure())
             .map(|code| Cow::Owned(code.to_string())),
         false,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
@@ -1452,14 +1463,14 @@ fn routed_result_from_v5_pubcomp(
             .filter(|code| code.is_failure())
             .map(|code| Cow::Owned(code.to_string())),
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
@@ -1489,14 +1500,14 @@ fn routed_result_from_v5_suback(
             Some(Cow::Owned(failed_codes.join(",")))
         },
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_codes
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props(packet.props()),
-        ))),
+        )),
     )
 }
 
@@ -1526,14 +1537,14 @@ fn routed_result_from_v5_unsuback(
             Some(Cow::Owned(failed_codes.join(",")))
         },
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_codes
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props(packet.props()),
-        ))),
+        )),
     )
 }
 
@@ -1565,11 +1576,11 @@ fn routed_result_from_v5_disconnect(
             },
             correlation: None,
         },
-        transport: Some(TransportMeta::Mqtt(mqtt_result_meta(
+        transport: Some(mqtt_result_meta(
             None,
             reason_code_text.into_iter().collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     }
 }
 
@@ -1600,11 +1611,11 @@ fn routed_result_from_v5_auth(
             },
             correlation: None,
         },
-        transport: Some(TransportMeta::Mqtt(mqtt_result_meta(
+        transport: Some(mqtt_result_meta(
             None,
             reason_code_text.into_iter().collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     }
 }
 
@@ -1612,25 +1623,14 @@ fn mqtt_result_meta(
     packet_id: Option<u16>,
     reason_codes: Vec<String>,
     reason_string: Option<String>,
-) -> MqttMeta<'static> {
+) -> TransportMeta<'static> {
     MqttMeta {
-        topic: Cow::Borrowed(""),
-        qos: 0,
-        retain: false,
-        duplicate: false,
         packet_id,
-        content_type: None,
-        payload_format: None,
-        message_expiry_interval_secs: None,
-        response_topic: None,
-        correlation_data: None,
-        correlation_data_bytes: None,
-        topic_alias: None,
-        subscription_identifiers: Vec::new().into(),
-        user_properties: Vec::new().into(),
         reason_codes: reason_codes.into_iter().map(Cow::Owned).collect(),
         reason_string: reason_string.map(Cow::Owned),
+        ..MqttMeta::default()
     }
+    .into_transport_meta()
 }
 
 pub(crate) fn routed_result_from_packet_id(

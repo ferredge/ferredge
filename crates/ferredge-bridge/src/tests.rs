@@ -1,13 +1,13 @@
 use alloc::{string::ToString, vec};
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, Command, CommandResult, Correlation, DeliveryGuarantee, DeviceProtocol,
-    EndpointRef, Intent, PayloadValue, RequestOptions, RoutedResult,
+    Address, BrokerAddress, Command, CommandResult, Correlation, DeliveryGuarantee, EndpointRef,
+    Intent, MetaValue, PayloadValue, ProtocolId, RequestOptions, RoutedResult, TransportMeta,
 };
 
 use crate::{
-    BridgeFault, BridgeFaultCategory, BridgeMessage, BridgeOutcome, BridgePlannerError,
-    BridgeRoute, BridgeTransportMeta, planner,
+    BridgeFault, BridgeFaultCategory, BridgeMessage, BridgeOutcome, BridgePlannerError, Route,
+    planner,
 };
 
 #[test]
@@ -52,7 +52,7 @@ fn request_response_planner_preserves_correlation_and_resource() {
 
     assert!(matches!(
         message.route,
-        BridgeRoute::RequestResponse { resource, .. } if resource == "setpoint"
+        Route::RequestResponse { resource, .. } if resource == "setpoint"
     ));
     assert_eq!(
         message
@@ -68,7 +68,13 @@ fn request_response_planner_preserves_correlation_and_resource() {
 }
 
 #[test]
-fn messaging_planner_preserves_topic_and_correlation_id() {
+fn messaging_planner_preserves_topic_and_extension_capture() {
+    let mut extensions = TransportMeta::new(ProtocolId::MQTT);
+    extensions.set("response-topic", MetaValue::Str("topic/reply".into()));
+    extensions.set(
+        ferredge_core::prelude::META_KEY_HEADERS,
+        MetaValue::Pairs(vec![("trace".to_string().into(), "abc".to_string().into())]),
+    );
     let command = Command {
         id: "cmd-2".to_string(),
         source_device_id: None,
@@ -82,9 +88,7 @@ fn messaging_planner_preserves_topic_and_correlation_id() {
             options: ferredge_core::prelude::BrokerMessageOptions {
                 delivery: Some(DeliveryGuarantee::AtLeastOnce),
                 headers: Default::default(),
-                reply_to: Some("topic/reply".to_string()),
-                correlation_id: Some("corr-1".to_string()),
-                protocol: None,
+                extensions: Some(extensions),
             },
         },
         correlation: None,
@@ -96,15 +100,20 @@ fn messaging_planner_preserves_topic_and_correlation_id() {
 
     assert!(matches!(
         message.route,
-        BridgeRoute::Messaging { topic } if topic == "topic/a"
+        Route::Messaging { topic } if topic == "topic/a"
     ));
-    let BridgeTransportMeta::Mqtt(transport) = message.transport.expect("mqtt transport expected")
-    else {
-        panic!("expected mqtt transport");
-    };
-    assert_eq!(transport.correlation_data.as_deref(), Some("corr-1"));
-    assert_eq!(transport.response_topic.as_deref(), Some("topic/reply"));
-    assert!(message.headers.is_none());
+    let transport = message.transport.expect("mqtt transport expected");
+    assert_eq!(transport.protocol, ProtocolId::MQTT);
+    assert_eq!(transport.get_str("response-topic"), Some("topic/reply"));
+    assert!(
+        transport
+            .get(ferredge_core::prelude::META_KEY_HEADERS)
+            .is_none()
+    );
+    let headers = message
+        .headers
+        .expect("capture headers become envelope headers");
+    assert_eq!(headers.get("trace"), Some("abc"));
 }
 
 #[test]
@@ -160,7 +169,7 @@ fn planners_reject_unsupported_intents() {
 fn routed_result_to_bridge_preserves_progress_success_and_failure() {
     let source = EndpointRef {
         device_id: "mqtt-1".to_string(),
-        protocol: DeviceProtocol::MQTT,
+        protocol: ProtocolId::MQTT,
     };
     let correlation = Some(Correlation {
         request_id: "corr-1".to_string().into(),
@@ -258,7 +267,7 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
             assert!(!fault.retryable);
             assert_eq!(
                 fault.source.and_then(|source| source.protocol),
-                Some(DeviceProtocol::MQTT)
+                Some(ProtocolId::MQTT)
             );
         }
         other => panic!("expected failure bridge outcome, got {other:?}"),
@@ -290,7 +299,7 @@ fn bridge_fault_preserves_category_code_and_retryability() {
     let fault = BridgeFault::protocol(
         "0x02",
         true,
-        DeviceProtocol::Modbus,
+        ProtocolId::MODBUS,
         Some("illegal data address".to_string()),
     );
 
