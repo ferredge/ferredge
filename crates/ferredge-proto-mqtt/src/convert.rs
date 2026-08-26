@@ -28,7 +28,8 @@ use crate::meta::{
     KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_MESSAGE_EXPIRY_INTERVAL_SECS, KEY_NO_LOCAL,
     KEY_PAYLOAD_FORMAT, KEY_RESPONSE_TOPIC, KEY_RETAIN, KEY_RETAIN_AS_PUBLISHED,
     KEY_RETAIN_HANDLING, KEY_SUBSCRIPTION_IDENTIFIERS, KEY_TOPIC_ALIAS, MqttPayloadFormat,
-    MqttRetainHandling, mqtt_payload_format_from_name, retain_handling_from_code,
+    MqttRetainHandling, checked_capture_value, mqtt_payload_format_from_name,
+    retain_handling_from_code,
 };
 use crate::types::{
     MqttCommandConversionError, MqttCommandRef, MqttNativePlan, MqttPacketRequest, MqttWirePacket,
@@ -115,6 +116,18 @@ enum PacketSemantics<'a> {
     Unsubscribe(SubscribeView<'a>),
 }
 
+/// Interprets the bridge capture as MQTT, rejecting captures owned by other protocols.
+fn mqtt_capture<'a>(
+    transport: Option<&'a TransportMeta<'a>>,
+) -> Result<Option<&'a TransportMeta<'a>>, MqttCommandConversionError> {
+    match transport {
+        Some(meta) if meta.protocol != ProtocolId::MQTT => Err(
+            MqttCommandConversionError::ForeignExtensions(meta.protocol.clone()),
+        ),
+        other => Ok(other),
+    }
+}
+
 fn publish_view_from_bridge<'a>(
     message: &'a BridgeMessage<'a>,
 ) -> Result<PublishView<'a>, MqttCommandConversionError> {
@@ -128,10 +141,7 @@ fn publish_view_from_bridge<'a>(
         Route::Messaging { topic } => topic.as_ref(),
         _ => return Err(MqttCommandConversionError::InvalidBridgeMessage),
     };
-    let mqtt = bridge
-        .transport
-        .as_ref()
-        .filter(|meta| meta.protocol == ProtocolId::MQTT);
+    let mqtt = mqtt_capture(bridge.transport.as_ref())?;
     Ok(PublishView {
         command_id: bridge.id.as_ref(),
         topic,
@@ -147,14 +157,24 @@ fn publish_view_from_bridge<'a>(
             .unwrap_or(false),
         payload_format: mqtt
             .and_then(|meta| meta.get_str(KEY_PAYLOAD_FORMAT))
-            .and_then(mqtt_payload_format_from_name),
+            .map(|name| {
+                mqtt_payload_format_from_name(name).ok_or_else(|| {
+                    MqttCommandConversionError::InvalidExtensionName {
+                        key: KEY_PAYLOAD_FORMAT,
+                        value: name.to_string(),
+                    }
+                })
+            })
+            .transpose()?,
         content_type: mqtt.and_then(|meta| meta.get_str(KEY_CONTENT_TYPE)),
         message_expiry_interval_secs: mqtt
             .and_then(|meta| meta.get_u64(KEY_MESSAGE_EXPIRY_INTERVAL_SECS))
-            .map(|value| value as u32),
+            .map(|value| checked_capture_value(KEY_MESSAGE_EXPIRY_INTERVAL_SECS, value))
+            .transpose()?,
         topic_alias: mqtt
             .and_then(|meta| meta.get_u64(KEY_TOPIC_ALIAS))
-            .map(|value| value as u16),
+            .map(|value| checked_capture_value(KEY_TOPIC_ALIAS, value))
+            .transpose()?,
         reply_to: bridge
             .correlation
             .as_ref()
@@ -185,10 +205,7 @@ fn subscription_view_from_bridge<'a>(
         Route::Messaging { topic } => topic.as_ref(),
         _ => return Err(MqttCommandConversionError::InvalidBridgeMessage),
     };
-    let mqtt = bridge
-        .transport
-        .as_ref()
-        .filter(|meta| meta.protocol == ProtocolId::MQTT);
+    let mqtt = mqtt_capture(bridge.transport.as_ref())?;
     Ok(SubscribeView {
         command_id: bridge.id.as_ref(),
         topic: channel,
@@ -203,11 +220,20 @@ fn subscription_view_from_bridge<'a>(
             .unwrap_or(false),
         retain_handling: mqtt
             .and_then(|meta| meta.get_u64(KEY_RETAIN_HANDLING))
-            .and_then(retain_handling_from_code),
+            .map(|value| {
+                retain_handling_from_code(value).ok_or(
+                    MqttCommandConversionError::InvalidExtensionValue {
+                        key: KEY_RETAIN_HANDLING,
+                        value,
+                    },
+                )
+            })
+            .transpose()?,
         subscription_identifier: mqtt
             .and_then(|meta| meta.get_u64_list(KEY_SUBSCRIPTION_IDENTIFIERS))
             .and_then(|values| values.first().copied())
-            .map(|value| value as u32),
+            .map(|value| checked_capture_value(KEY_SUBSCRIPTION_IDENTIFIERS, value))
+            .transpose()?,
         projected_user_properties: header_user_properties(bridge.headers.as_ref()),
     })
 }
@@ -225,7 +251,6 @@ fn publish_view_from_native_plan<'a>(
         content_type,
         message_expiry_interval_secs,
         topic_alias,
-        headers,
         user_properties,
         reply_to,
         response_topic,
@@ -252,11 +277,6 @@ fn publish_view_from_native_plan<'a>(
         projected_user_properties: user_properties
             .iter()
             .map(|(key, value)| (key.as_ref(), value.as_ref()))
-            .chain(
-                headers
-                    .iter()
-                    .map(|(key, value)| (key.as_ref(), value.as_ref())),
-            )
             .collect(),
     })
 }

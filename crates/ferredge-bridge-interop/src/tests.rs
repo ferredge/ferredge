@@ -27,8 +27,9 @@ use ferredge_proto_modbus::{
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
 };
 use ferredge_proto_mqtt::{
-    MqttBridgeCodec, MqttCommandPlanner, MqttConnectProperties, MqttDriver, MqttEndpointConfig,
-    MqttMessageOptions, MqttMeta, MqttProtocolVersion, MqttWirePacket,
+    MqttBridgeCodec, MqttCommandConversionError, MqttCommandPlanner, MqttConnectProperties,
+    MqttDriver, MqttEndpointConfig, MqttMessageOptions, MqttMeta, MqttProtocolVersion,
+    MqttWirePacket,
 };
 use ferredge_test_support::{
     diagslave::DiagslaveGuard, mosquitto::MosquittoGuard, process::require_command,
@@ -871,23 +872,22 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
             error: None,
             correlation: None,
         },
-        transport: Some({
-            let mut capture = HttpMeta {
+        transport: Some(
+            HttpMeta {
                 method: Some("POST".to_string().into()),
                 path: Some("/interop/setpoint".to_string().into()),
                 status_code: Some(http_response.status_code),
                 content_type: Some("text/plain".to_string().into()),
+                headers: Some(Headers::from(
+                    http_response
+                        .headers
+                        .iter()
+                        .map(|(key, value)| (Cow::Owned(key.clone()), Cow::Owned(value.clone())))
+                        .collect::<Vec<(Cow<'_, str>, Cow<'_, str>)>>(),
+                )),
             }
-            .into_transport_meta();
-            capture.headers = Some(Headers::from(
-                http_response
-                    .headers
-                    .iter()
-                    .map(|(key, value)| (Cow::Owned(key.clone()), Cow::Owned(value.clone())))
-                    .collect::<Vec<(Cow<'_, str>, Cow<'_, str>)>>(),
-            ));
-            capture
-        }),
+            .into_transport_meta(),
+        ),
     };
     let http_result_bridge = planner::routed_result_to_bridge(http_result);
     let (result_transport, result_headers) = match &http_result_bridge {
@@ -919,30 +919,41 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
         other => panic!("expected bridged http success result, got {other:?}"),
     };
 
-    let projected_message = BridgeMessage::Command(BridgeCommand {
-        id: "http-result-mqtt-project".to_string().into(),
-        source_device_id: Some("http-interop-device".into()),
-        target_device_id: publisher.dvc.id.clone().into(),
-        capability: BridgeCapability::Messaging(MessagingCapability {
-            binary_payloads: true,
-        }),
-        operation: BridgeOp::Messaging(MessagingOp {
-            action: MessagingAction::Publish,
-            delivery: None,
-            durable_name: None,
-            shared_group: None,
-        }),
-        payload: Some(PayloadValue::Bytes(b"41".to_vec().into())),
-        route: Route::Messaging {
-            topic: topic.into(),
-        },
-        transport: result_transport,
-        headers: Some(result_headers),
-        correlation: None,
-    });
+    let make_projection = |transport| {
+        BridgeMessage::Command(BridgeCommand {
+            id: "http-result-mqtt-project".to_string().into(),
+            source_device_id: Some("http-interop-device".into()),
+            target_device_id: publisher.dvc.id.clone().into(),
+            capability: BridgeCapability::Messaging(MessagingCapability {
+                binary_payloads: true,
+            }),
+            operation: BridgeOp::Messaging(MessagingOp {
+                action: MessagingAction::Publish,
+                delivery: None,
+                durable_name: None,
+                shared_group: None,
+            }),
+            payload: Some(PayloadValue::Bytes(b"41".to_vec().into())),
+            route: Route::Messaging {
+                topic: topic.into(),
+            },
+            transport,
+            headers: Some(result_headers.clone()),
+            correlation: None,
+        })
+    };
+    let foreign_projection = make_projection(result_transport);
+    let foreign_error =
+        ProtocolEncoder::encode(&MqttBridgeCodec::new(&publisher.dvc), foreign_projection)
+            .expect_err("mqtt codec must reject the retained http capture");
+    assert!(matches!(
+        &foreign_error,
+        MqttCommandConversionError::ForeignExtensions(protocol) if *protocol == ProtocolId::HTTP
+    ));
+
     let projected_packet =
-        ProtocolEncoder::encode(&MqttBridgeCodec::new(&publisher.dvc), projected_message)
-            .expect("http result bridge should project into mqtt packet");
+        ProtocolEncoder::encode(&MqttBridgeCodec::new(&publisher.dvc), make_projection(None))
+            .expect("http result headers should project into mqtt packet");
     match projected_packet.packet {
         MqttWirePacket::V5Publish(packet) => {
             let props_debug = format!("{:?}", packet.props());

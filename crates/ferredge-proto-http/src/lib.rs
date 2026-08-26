@@ -98,6 +98,9 @@ pub enum HttpCommandConversionError {
     /// Bridge message kind cannot be represented as outbound HTTP request.
     #[error("bridge message does not describe an HTTP request")]
     InvalidBridgeMessage,
+    /// Options carried a transport capture for a different protocol.
+    #[error("options extensions capture belongs to protocol {0}, not HTTP")]
+    ForeignExtensions(ProtocolId),
 }
 
 /// HTTP protocol adapter implementing lifecycle and request/response capabilities.
@@ -263,20 +266,39 @@ impl ProtocolPlanner<NativeOutbound> for HttpCommandPlanner {
             _ => return Err(HttpCommandConversionError::UnsupportedIntent),
         };
 
+        let mut capture = split_http_extensions(options.extensions)?;
+        let mut headers = options.headers;
+        if let Some(capture_headers) = capture.headers.take() {
+            headers.merge(capture_headers);
+        }
         Ok(HttpNativePlan {
             resource,
             action,
             payload,
-            method: options.method,
+            method: options.method.or(capture.method),
             path: options.path,
-            content_type: options.content_type,
-            headers: options
-                .headers
+            content_type: options.content_type.or(capture.content_type),
+            headers: headers
                 .0
                 .into_iter()
                 .map(|header| (header.key, header.value))
                 .collect(),
         })
+    }
+}
+
+/// Splits an options extensions capture into a typed HTTP view, rejecting foreign protocols.
+fn split_http_extensions(
+    extensions: Option<TransportMeta<'_>>,
+) -> Result<HttpMeta<'_>, HttpCommandConversionError> {
+    match extensions {
+        Some(meta) => {
+            if meta.protocol != ProtocolId::HTTP {
+                return Err(HttpCommandConversionError::ForeignExtensions(meta.protocol));
+            }
+            Ok(HttpMeta::from_transport_meta(meta).unwrap_or_default())
+        }
+        None => Ok(HttpMeta::default()),
     }
 }
 
@@ -393,25 +415,25 @@ where
 
         let content_type = header_value(&self_.response.headers, "content-type");
         let payload = http_payload_from_response_body(&self_.response.body, content_type);
-        let mut transport = HttpMeta {
+        let transport = HttpMeta {
             method: options.method.as_deref().map(Cow::Borrowed),
             path: options.path.as_deref().map(Cow::Borrowed),
             status_code: Some(self_.response.status_code),
             content_type: content_type.map(Cow::Borrowed),
+            headers: (!self_.response.headers.is_empty()).then(|| {
+                Headers::from(
+                    self_
+                        .response
+                        .headers
+                        .iter()
+                        .map(|(key, value)| {
+                            (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str()))
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }),
         }
         .into_transport_meta();
-        if !self_.response.headers.is_empty() {
-            transport.headers = Some(Headers::from(
-                self_
-                    .response
-                    .headers
-                    .iter()
-                    .map(|(key, value)| {
-                        (Cow::Borrowed(key.as_str()), Cow::Borrowed(value.as_str()))
-                    })
-                    .collect::<Vec<_>>(),
-            ));
-        }
 
         Ok(RoutedMessage::Result(RoutedResult {
             source: EndpointRef {
@@ -475,10 +497,14 @@ impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
             return Err(HttpCommandConversionError::InvalidBridgeMessage);
         };
 
-        let http_capture = command
-            .transport
-            .as_ref()
-            .filter(|transport| transport.protocol == ProtocolId::HTTP);
+        let http_capture = match command.transport.as_ref() {
+            Some(transport) if transport.protocol != ProtocolId::HTTP => {
+                return Err(HttpCommandConversionError::ForeignExtensions(
+                    transport.protocol.clone(),
+                ));
+            }
+            other => other,
+        };
         let method = operation.method.clone().or_else(|| {
             http_capture
                 .and_then(|transport| transport.get_str(KEY_METHOD))
@@ -931,10 +957,115 @@ mod tests {
                 },
                 correlation: None,
             },
+            Command {
+                id: "cmd-parity-capture".into(),
+                source_device_id: None,
+                target_device_id: "device-1".into(),
+                intent: Intent::Read {
+                    resource: "temp".into(),
+                    options: RequestOptions {
+                        headers: Headers::from(vec![("X-Env".to_string(), "a".to_string())]),
+                        extensions: Some(
+                            HttpMeta {
+                                method: Some("PUT".into()),
+                                content_type: Some("text/plain".into()),
+                                headers: Some(Headers::from(vec![
+                                    ("X-Cap".to_string(), "1".to_string()),
+                                    ("x-env".to_string(), "capture".to_string()),
+                                ])),
+                                ..HttpMeta::default()
+                            }
+                            .into_transport_meta(),
+                        ),
+                        ..RequestOptions::default()
+                    },
+                },
+                correlation: None,
+            },
         ] {
             let native = driver.native_request(command.clone()).unwrap();
             let bridge = driver.bridge_request(command).unwrap();
             assert_eq!(native, bridge);
+        }
+    }
+
+    #[test]
+    fn native_request_honors_http_capture_fields_with_options_winning() {
+        let driver = make_driver();
+        let command = Command {
+            id: "cmd-native-capture".into(),
+            source_device_id: None,
+            target_device_id: "device-1".into(),
+            intent: Intent::Read {
+                resource: "temp".into(),
+                options: RequestOptions {
+                    headers: Headers::from(vec![("X-Env".to_string(), "a".to_string())]),
+                    content_type: Some("application/json".into()),
+                    extensions: Some(
+                        HttpMeta {
+                            method: Some("PUT".into()),
+                            content_type: Some("text/plain".into()),
+                            headers: Some(Headers::from(vec![
+                                ("X-Cap".to_string(), "1".to_string()),
+                                ("x-env".to_string(), "capture".to_string()),
+                            ])),
+                            ..HttpMeta::default()
+                        }
+                        .into_transport_meta(),
+                    ),
+                    ..RequestOptions::default()
+                },
+            },
+            correlation: None,
+        };
+
+        let request = driver
+            .native_request(command)
+            .expect("capture-carrying read should convert");
+
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.path, "/api/temp");
+        assert_eq!(
+            request.headers,
+            vec![
+                ("Accept".to_string(), "application/json".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("X-Env".to_string(), "a".to_string()),
+                ("X-Cap".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn http_requests_reject_foreign_extensions_capture_on_both_paths() {
+        let driver = make_driver();
+        let command = Command {
+            id: "cmd-foreign-capture".into(),
+            source_device_id: None,
+            target_device_id: "device-1".into(),
+            intent: Intent::Read {
+                resource: "temp".into(),
+                options: RequestOptions {
+                    extensions: Some(TransportMeta::new(ProtocolId::MQTT)),
+                    ..RequestOptions::default()
+                },
+            },
+            correlation: None,
+        };
+
+        for error in [
+            driver
+                .native_request(command.clone())
+                .expect_err("native path must reject a foreign capture"),
+            driver
+                .bridge_request(command)
+                .expect_err("bridge path must reject a foreign capture"),
+        ] {
+            assert!(matches!(
+                &error,
+                HttpCommandConversionError::ForeignExtensions(protocol)
+                    if *protocol == ProtocolId::MQTT
+            ));
         }
     }
 

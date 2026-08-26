@@ -1106,7 +1106,7 @@ fn mqtt_meta_from_v5_publish(
         }
     }
 
-    let mut meta = MqttMeta {
+    MqttMeta {
         topic: Some(Cow::Owned(packet.topic_name().to_string())),
         qos: Some(packet.qos() as u8),
         retain: packet.retain(),
@@ -1119,13 +1119,10 @@ fn mqtt_meta_from_v5_publish(
         correlation_data,
         topic_alias,
         subscription_identifiers,
+        headers: (!user_properties.is_empty()).then(|| Headers::from(user_properties)),
         ..MqttMeta::default()
     }
-    .into_transport_meta();
-    if !user_properties.is_empty() {
-        meta.headers = Some(Headers::from(user_properties));
-    }
-    meta
+    .into_transport_meta()
 }
 
 pub(crate) fn pending_reply_route_from_packet(
@@ -1220,7 +1217,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
         Address::Resource(_) => None,
     });
     let payload = payload_value_from_mqtt_bytes(packet.payload().as_slice(), payload_format);
-    let mut transport = MqttMeta {
+    let transport = MqttMeta {
         topic: Some(Cow::Borrowed(packet.topic_name())),
         qos: Some(packet.qos() as u8),
         retain: packet.retain(),
@@ -1233,12 +1230,10 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
         correlation_data,
         topic_alias,
         subscription_identifiers,
+        headers: (!user_properties.is_empty()).then(|| Headers::from(user_properties)),
         ..MqttMeta::default()
     }
     .into_transport_meta();
-    if !user_properties.is_empty() {
-        transport.headers = Some(Headers::from(user_properties));
-    }
     RoutedEvent {
         source: mqtt_source(device_id),
         route: Route::Messaging {

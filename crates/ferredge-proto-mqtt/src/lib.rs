@@ -1394,35 +1394,28 @@ impl EventSource for MqttDriver {
     }
 }
 
-/// MQTT v5 user-property pairs split away from an extensions capture.
-type MqttUserProperties<'a> = Vec<(Cow<'a, str>, Cow<'a, str>)>;
-
-fn split_mqtt_extensions<'a>(
-    extensions: Option<TransportMeta<'a>>,
-) -> Result<(MqttMeta<'a>, MqttUserProperties<'a>), MqttCommandConversionError> {
+fn split_mqtt_extensions(
+    extensions: Option<TransportMeta<'_>>,
+) -> Result<MqttMeta<'_>, MqttCommandConversionError> {
     match extensions {
-        Some(mut meta) => {
-            if meta.protocol != ProtocolId::MQTT {
-                return Err(MqttCommandConversionError::ForeignExtensions(meta.protocol));
-            }
-            let user_properties = meta
-                .headers
-                .take()
-                .map(|headers| {
-                    headers
-                        .0
-                        .into_iter()
-                        .map(|header| (header.key, header.value))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok((
-                MqttMeta::from_transport_meta(meta).unwrap_or_default(),
-                user_properties,
-            ))
-        }
-        None => Ok((MqttMeta::default(), Vec::new())),
+        Some(meta) => MqttMeta::try_from_transport_meta(meta),
+        None => Ok(MqttMeta::default()),
     }
+}
+
+/// Merges capture-carried user properties after the envelope headers, dropping already-present keys.
+fn merged_user_properties<'a>(
+    mut headers: Headers<'a>,
+    capture_headers: Option<Headers<'a>>,
+) -> Vec<(Cow<'a, str>, Cow<'a, str>)> {
+    if let Some(capture_headers) = capture_headers {
+        headers.merge(capture_headers);
+    }
+    headers
+        .0
+        .into_iter()
+        .map(|header| (header.key, header.value))
+        .collect()
 }
 
 fn planner_message_for_command<'a>(
@@ -1462,7 +1455,8 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
                     headers,
                     extensions,
                 } = options;
-                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions)?;
+                let mut mqtt_view = split_mqtt_extensions(extensions)?;
+                let user_properties = merged_user_properties(headers, mqtt_view.headers.take());
                 let topic = match channel.kind {
                     Some(BrokerChannelKind::Topic) | None => channel.name,
                     Some(kind) => {
@@ -1479,11 +1473,6 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
                     content_type: mqtt_view.content_type,
                     message_expiry_interval_secs: mqtt_view.message_expiry_interval_secs,
                     topic_alias: mqtt_view.topic_alias,
-                    headers: headers
-                        .0
-                        .into_iter()
-                        .map(|header| (header.key, header.value))
-                        .collect(),
                     user_properties,
                     reply_to: correlation
                         .as_ref()
@@ -1500,7 +1489,9 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
                     shared_group,
                     extensions,
                 } = options;
-                let (mqtt_view, user_properties) = split_mqtt_extensions(extensions)?;
+                let mut mqtt_view = split_mqtt_extensions(extensions)?;
+                let user_properties =
+                    merged_user_properties(Headers::default(), mqtt_view.headers.take());
                 let topic = match channel.kind {
                     Some(BrokerChannelKind::Topic) | None => channel.name,
                     Some(kind) => {

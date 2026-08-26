@@ -77,8 +77,6 @@ pub struct BridgeMessageMeta<'a> {
     pub capability: Option<BridgeCapability>,
     /// Optional operation context for the result.
     pub operation: Option<BridgeOp<'a>>,
-    /// Optional logical route associated with the result.
-    pub route: Option<Route<'a>>,
     /// Optional typed transport metadata.
     pub transport: Option<TransportMeta<'a>>,
     /// Optional arbitrary headers or properties.
@@ -223,7 +221,6 @@ impl IntoOwned for BridgeMessageMeta<'_> {
             command_id: IntoOwned::into_owned(self.command_id),
             capability: self.capability,
             operation: self.operation.into_owned(),
-            route: self.route.into_owned(),
             transport: self.transport.into_owned(),
             headers: self.headers.into_owned(),
             correlation: self.correlation.into_owned(),

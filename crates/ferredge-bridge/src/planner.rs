@@ -254,7 +254,6 @@ pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a
         command_id,
         capability: None,
         operation: None,
-        route: None,
         transport,
         headers,
         correlation,
@@ -367,14 +366,14 @@ fn split_capture_headers<'a>(
     }
 }
 
-/// Merges capture-carried header pairs into the envelope header set.
+/// Merges capture-carried header pairs after the envelope set, dropping already-present keys.
 fn capture_with_headers<'a>(
     transport: Option<TransportMeta<'a>>,
     mut headers: Headers<'a>,
 ) -> (Option<TransportMeta<'a>>, Option<Headers<'a>>) {
     let (transport, capture_headers) = split_capture_headers(transport);
     if let Some(capture_headers) = capture_headers {
-        headers.0.extend(capture_headers.0);
+        headers.merge(capture_headers);
     }
     (transport, (!headers.is_empty()).then_some(headers))
 }

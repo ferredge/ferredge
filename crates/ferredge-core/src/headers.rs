@@ -79,6 +79,15 @@ impl<'a> Headers<'a> {
         });
     }
 
+    /// Appends headers whose keys are not already present, first occurrence winning per `get`.
+    pub fn merge(&mut self, other: Headers<'a>) {
+        for header in other.0 {
+            if self.get(header.key.as_ref()).is_none() {
+                self.0.push(header);
+            }
+        }
+    }
+
     /// Iterates headers in preserved order.
     pub fn iter(&self) -> impl Iterator<Item = &Header<'a>> {
         self.0.iter()

@@ -195,9 +195,18 @@ typed views over them, formalized by the `ProtocolMeta<'a>` trait in
 - `const PROTOCOL: ProtocolId` — the protocol identity the view projects,
 - `into_transport_meta(self) -> TransportMeta<'a>` — encode by move, zero-copy,
 - `from_transport_meta(meta: TransportMeta<'a>) -> Option<Self>` — decode by
-  move (returns `None` if `meta.protocol` doesn't match),
+  move (returns `None` if `meta.protocol` doesn't match or an entry is
+  malformed, e.g. an integer beyond its wire field width or an unknown name),
 - `view(meta: &'a TransportMeta<'a>) -> Option<Self>` — borrowing view
-  without consuming the capture.
+  without consuming the capture, with the same malformed-capture rules.
+
+Views also carry the capture's first-class headers as a
+`pub headers: Option<Headers<'a>>` field: `from_transport_meta` moves
+`meta.headers` into the view, `into_transport_meta` moves it back out, and
+`view` re-borrows it — so wire headers round-trip through the typed view
+without a separate side channel. Modbus is the deliberate exception: it
+defines no capture keys, and its planners ignore `options.extensions`
+uniformly on both outbound paths.
 
 ### Header flow
 
@@ -208,6 +217,12 @@ in `bridge/src/planner.rs`) moves that field out of the capture and promotes
 it to the envelope-level `Headers<'a>` field, so bridge consumers see
 headers uniformly regardless of source protocol, while the rest of the
 capture passes through losslessly.
+
+The canonical merged order — identical on the bridge and native outbound
+paths — is envelope/options headers first, capture-carried headers appended
+after, with exact-duplicate keys deduplicated first-occurrence-wins
+(`Headers::merge` in `core/src/headers.rs`, matching the case-insensitive
+`Headers::get` semantics).
 
 ## Zero-copy and ownership
 
@@ -221,8 +236,10 @@ discipline:
 - **`IntoOwned` (`core/src/owned.rs`)** converts any borrowed model value to
   its `'static` counterpart. It is implemented for the Cows, `Option`,
   `Vec`, and tuples, and every model type wires it up (plus an inherent
-  `into_owned()` convenience). `as_borrowed()` on the leaf types gives the
-  reverse: a cheap re-borrowing view.
+  `into_owned()` convenience). `as_borrowed()` gives the reverse view: leaf
+  `Cow`s re-borrow for free, while list-shaped values (`U64List`, `StrList`,
+  `Pairs`) clone their `Vec` spines — the values inside are typically small,
+  but it is not free.
 - **Sanctioned owned boundaries** — the only places `.into_owned()` is
   expected, exactly once each:
   1. `PubSub::subscribe` (`core/src/router.rs`) requires
@@ -335,6 +352,7 @@ pub struct CoapMeta<'a> {
     pub message_type: Option<Cow<'a, str>>,
     pub observe: Option<u64>,
     pub token: Option<Cow<'a, [u8]>>,
+    pub headers: Option<Headers<'a>>,
 }
 
 impl<'a> ProtocolMeta<'a> for CoapMeta<'a> {
@@ -347,15 +365,21 @@ impl<'a> ProtocolMeta<'a> for CoapMeta<'a> {
             meta.set(KEY_TOKEN, MetaValue::Bytes(token));
         }
         // ... remaining fields ...
+        meta.headers = self.headers;
         meta
     }
 
-    /// Decode by move; `None` if the capture belongs to another protocol.
-    fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
+    /// Decode by move; `None` if the capture belongs to another protocol
+    /// or an entry is malformed (e.g. an out-of-range integer).
+    fn from_transport_meta(mut meta: TransportMeta<'a>) -> Option<Self> {
         if meta.protocol != ProtocolId::COAP {
             return None;
         }
-        // match meta.into_entries() into typed fields ...
+        let mut view = CoapMeta {
+            headers: meta.headers.take(),
+            ..CoapMeta::default()
+        };
+        // match meta.into_entries() into the remaining typed fields ...
         unimplemented!()
     }
 
@@ -366,6 +390,7 @@ impl<'a> ProtocolMeta<'a> for CoapMeta<'a> {
         }
         Some(CoapMeta {
             token: meta.get_bytes(KEY_TOKEN).map(Cow::Borrowed),
+            headers: meta.headers.as_ref().map(Headers::as_borrowed),
             // ...
         })
     }
@@ -373,8 +398,10 @@ impl<'a> ProtocolMeta<'a> for CoapMeta<'a> {
 ```
 
 If CoAP carries name/value properties that should surface as envelope
-headers, store them in the capture's first-class `headers` field; the
-bridge planner promotes them automatically.
+headers, store them in the capture's first-class `headers` field — the
+typed view round-trips it as shown above, and the bridge planner promotes
+it to the envelope automatically (envelope headers first, capture headers
+appended, first occurrence wins).
 
 ### 4. Planner, encoder, decoder
 

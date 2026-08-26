@@ -86,12 +86,6 @@ fn bridge_packet_request(driver: &MqttDriver, command: &Command) -> MqttPacketRe
         .expect("mqtt bridge packet should build")
 }
 
-fn encode_bridge_message(driver: &MqttDriver, message: &BridgeMessage<'_>) -> MqttPacketRequest {
-    MqttBridgeCodec::new(&driver.dvc)
-        .encode(message.clone().into_owned())
-        .expect("bridge message should encode")
-}
-
 fn block_on<F: Future>(future: F) -> F::Output {
     static RUNTIME: OnceLock<StackRuntime> = OnceLock::new();
     RUNTIME.get_or_init(StackRuntime::default).block_on(future)
@@ -480,10 +474,123 @@ fn mqtt_native_and_bridge_packet_requests_match_for_supported_commands() {
             },
             correlation: None,
         },
+        Command {
+            id: "cmd-native-send-headers".into(),
+            source_device_id: None,
+            target_device_id: "mqtt-device-1".into(),
+            intent: Intent::Send {
+                channel: BrokerAddress {
+                    name: "sensors/temp".into(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                payload: PayloadValue::Bytes(b"42".to_vec().into()),
+                options: BrokerMessageOptions {
+                    headers: ferredge_core::prelude::Headers::from(vec![
+                        ("X-Env".to_string(), "1".to_string()),
+                        ("X-Dup".to_string(), "envelope".to_string()),
+                    ]),
+                    extensions: Some(
+                        MqttMessageOptions {
+                            user_properties: vec![
+                                ("X-Dup".to_string(), "capture".to_string()),
+                                ("X-Cap".to_string(), "2".to_string()),
+                            ],
+                            ..MqttMessageOptions::default()
+                        }
+                        .into_transport_meta(),
+                    ),
+                    ..BrokerMessageOptions::default()
+                },
+            },
+            correlation: None,
+        },
+        Command {
+            id: "cmd-native-sub-headers".into(),
+            source_device_id: None,
+            target_device_id: "mqtt-device-1".into(),
+            intent: Intent::Subscribe {
+                channel: BrokerAddress {
+                    name: "alerts/#".into(),
+                    kind: Some(BrokerChannelKind::Topic),
+                },
+                options: BrokerSubscriptionOptions {
+                    extensions: Some(
+                        MqttSubscriptionOptions {
+                            user_properties: vec![
+                                ("X-Sub".to_string(), "a".to_string()),
+                                ("X-Sub-2".to_string(), "b".to_string()),
+                            ],
+                            ..MqttSubscriptionOptions::default()
+                        }
+                        .into_transport_meta(),
+                    ),
+                    ..BrokerSubscriptionOptions::default()
+                },
+            },
+            correlation: None,
+        },
     ] {
         let native = packet_request(&driver, &command);
         let bridge = bridge_packet_request(&driver, &command);
         assert_eq!(native, bridge);
+    }
+}
+
+#[test]
+fn mqtt_user_properties_merge_envelope_first_and_dedupe_capture_keys() {
+    let driver = make_default_driver();
+    let command = Command {
+        id: "cmd-user-prop-order".into(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".into(),
+        intent: Intent::Send {
+            channel: BrokerAddress {
+                name: "sensors/temp".into(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: PayloadValue::Bytes(b"42".to_vec().into()),
+            options: BrokerMessageOptions {
+                headers: ferredge_core::prelude::Headers::from(vec![
+                    ("X-Env".to_string(), "1".to_string()),
+                    ("X-Dup".to_string(), "envelope".to_string()),
+                ]),
+                extensions: Some(
+                    MqttMessageOptions {
+                        user_properties: vec![
+                            ("x-dup".to_string(), "capture".to_string()),
+                            ("X-Cap".to_string(), "2".to_string()),
+                        ],
+                        ..MqttMessageOptions::default()
+                    }
+                    .into_transport_meta(),
+                ),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    let expected = [("X-Env", "1"), ("X-Dup", "envelope"), ("X-Cap", "2")];
+    for packet in [
+        packet_request(&driver, &command),
+        bridge_packet_request(&driver, &command),
+    ] {
+        match packet.packet {
+            MqttWirePacket::V5Publish(publish) => {
+                let mut sequence = Vec::new();
+                for prop in publish.props() {
+                    if let mqtt::packet::Property::UserProperty(prop) = prop {
+                        sequence.push((prop.key().to_string(), prop.val().to_string()));
+                    }
+                }
+                let expected = expected
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect::<Vec<_>>();
+                assert_eq!(sequence, expected);
+            }
+            other => panic!("expected v5 publish packet, got {other:?}"),
+        }
     }
 }
 
@@ -640,14 +747,67 @@ fn send_command_with_foreign_extensions_capture_is_rejected() {
         correlation: None,
     };
 
-    let error = driver
-        .native_packet_request(command)
+    let native_error = driver
+        .native_packet_request(command.clone())
         .expect_err("foreign-protocol extensions capture should be rejected");
     assert!(matches!(
-        error,
+        native_error,
         crate::types::MqttCommandConversionError::ForeignExtensions(protocol)
             if protocol == ProtocolId::HTTP
     ));
+
+    let bridge_error = driver
+        .bridge_packet_request(command)
+        .expect_err("bridge path must reject the same foreign capture");
+    assert!(matches!(
+        bridge_error,
+        crate::types::MqttCommandConversionError::ForeignExtensions(protocol)
+            if protocol == ProtocolId::HTTP
+    ));
+}
+
+#[test]
+fn send_command_with_overflowing_capture_value_is_rejected_on_both_paths() {
+    let driver = make_default_driver();
+    let mut capture = TransportMeta::new(ProtocolId::MQTT);
+    capture.set(
+        crate::meta::KEY_MESSAGE_EXPIRY_INTERVAL_SECS,
+        ferredge_core::prelude::MetaValue::U64(u64::from(u32::MAX) + 1),
+    );
+    let command = Command {
+        id: "cmd-overflow-extensions".into(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".into(),
+        intent: Intent::Send {
+            channel: BrokerAddress {
+                name: "state/device".into(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: PayloadValue::Bytes(b"online".to_vec().into()),
+            options: BrokerMessageOptions {
+                extensions: Some(capture),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    };
+
+    for error in [
+        driver
+            .native_packet_request(command.clone())
+            .expect_err("native path must reject overflowing capture values"),
+        driver
+            .bridge_packet_request(command)
+            .expect_err("bridge path must reject overflowing capture values"),
+    ] {
+        assert!(matches!(
+            error,
+            crate::types::MqttCommandConversionError::InvalidExtensionValue {
+                key: crate::meta::KEY_MESSAGE_EXPIRY_INTERVAL_SECS,
+                value,
+            } if value == u64::from(u32::MAX) + 1
+        ));
+    }
 }
 
 #[test]
@@ -811,7 +971,7 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
 }
 
 #[test]
-fn mqtt_v5_publish_ignores_foreign_transport_capture() {
+fn mqtt_v5_publish_rejects_foreign_transport_capture() {
     let driver = make_default_driver();
     let mut http_capture = TransportMeta::new(ProtocolId::HTTP);
     http_capture.set(
@@ -844,32 +1004,14 @@ fn mqtt_v5_publish_ignores_foreign_transport_capture() {
         correlation: None,
     });
 
-    let packet = encode_bridge_message(&driver, &message);
-
-    match packet.packet {
-        MqttWirePacket::V5Publish(packet) => {
-            let mut saw_header = false;
-            for prop in packet.props() {
-                match prop {
-                    mqtt::packet::Property::ContentType(_) => {
-                        panic!("foreign capture must not project a content type");
-                    }
-                    mqtt::packet::Property::UserProperty(prop) => {
-                        assert!(
-                            !prop.key().starts_with("ferredge-http-"),
-                            "http smuggling user properties must not be emitted"
-                        );
-                        if prop.key() == "X-Request-Version" {
-                            saw_header = prop.val() == "2026-05";
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            assert!(saw_header);
-        }
-        other => panic!("expected v5 publish packet, got {other:?}"),
-    }
+    let error = MqttBridgeCodec::new(&driver.dvc)
+        .encode(message)
+        .expect_err("foreign capture on the bridge path should be rejected");
+    assert!(matches!(
+        error,
+        crate::types::MqttCommandConversionError::ForeignExtensions(protocol)
+            if protocol == ProtocolId::HTTP
+    ));
 }
 
 #[test]

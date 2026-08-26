@@ -93,7 +93,6 @@ pub enum MqttNativePlan<'a> {
         content_type: Option<Cow<'a, str>>,
         message_expiry_interval_secs: Option<u32>,
         topic_alias: Option<u16>,
-        headers: Vec<(Cow<'a, str>, Cow<'a, str>)>,
         user_properties: Vec<(Cow<'a, str>, Cow<'a, str>)>,
         reply_to: Option<Address<'a>>,
         response_topic: Option<Cow<'a, str>>,
@@ -131,7 +130,6 @@ impl MqttNativePlan<'_> {
                 content_type,
                 message_expiry_interval_secs,
                 topic_alias,
-                headers,
                 user_properties,
                 reply_to,
                 response_topic,
@@ -147,12 +145,6 @@ impl MqttNativePlan<'_> {
                 content_type: content_type.map(|value| Cow::Owned(value.into_owned())),
                 message_expiry_interval_secs,
                 topic_alias,
-                headers: headers
-                    .into_iter()
-                    .map(|(key, value)| {
-                        (Cow::Owned(key.into_owned()), Cow::Owned(value.into_owned()))
-                    })
-                    .collect(),
                 user_properties: user_properties
                     .into_iter()
                     .map(|(key, value)| {
@@ -254,6 +246,12 @@ pub enum MqttCommandConversionError {
     /// Options carried a transport capture for a different protocol.
     #[error("options extensions capture belongs to protocol {0}, not MQTT")]
     ForeignExtensions(ProtocolId),
+    /// Extensions capture entry does not fit the MQTT wire field width.
+    #[error("extensions capture entry {key} has out-of-range value {value}")]
+    InvalidExtensionValue { key: &'static str, value: u64 },
+    /// Extensions capture entry carries a name outside the documented vocabulary.
+    #[error("extensions capture entry {key} has unknown value {value}")]
+    InvalidExtensionName { key: &'static str, value: String },
 }
 
 /// Borrowed view carrying enough context to convert routed command into MQTT packets.
