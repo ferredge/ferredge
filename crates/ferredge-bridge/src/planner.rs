@@ -366,7 +366,7 @@ fn split_capture_headers<'a>(
     }
 }
 
-/// Merges capture-carried header pairs after the envelope set, dropping already-present keys.
+/// Appends capture-carried header pairs after the envelope set, preserving every pair verbatim.
 fn capture_with_headers<'a>(
     transport: Option<TransportMeta<'a>>,
     mut headers: Headers<'a>,

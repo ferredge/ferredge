@@ -3,12 +3,14 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 use std::{
+    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
 
 #[cfg(not(feature = "std"))]
 use alloc::{
+    borrow::Cow,
     format,
     string::{String, ToString},
     vec,
@@ -24,13 +26,7 @@ use mqtt_protocol_core::mqtt;
 use serde_json::to_vec;
 
 use crate::endpoint::MqttProtocolVersion;
-use crate::meta::{
-    KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_MESSAGE_EXPIRY_INTERVAL_SECS, KEY_NO_LOCAL,
-    KEY_PAYLOAD_FORMAT, KEY_RESPONSE_TOPIC, KEY_RETAIN, KEY_RETAIN_AS_PUBLISHED,
-    KEY_RETAIN_HANDLING, KEY_SUBSCRIPTION_IDENTIFIERS, KEY_TOPIC_ALIAS, MqttPayloadFormat,
-    MqttRetainHandling, checked_capture_value, mqtt_payload_format_from_name,
-    retain_handling_from_code,
-};
+use crate::meta::{MqttMeta, MqttPayloadFormat, MqttRetainHandling};
 use crate::types::{
     MqttCommandConversionError, MqttCommandRef, MqttNativePlan, MqttPacketRequest, MqttWirePacket,
 };
@@ -87,11 +83,11 @@ struct PublishView<'a> {
     delivery: Option<DeliveryGuarantee>,
     retain: bool,
     payload_format: Option<MqttPayloadFormat>,
-    content_type: Option<&'a str>,
+    content_type: Option<Cow<'a, str>>,
     message_expiry_interval_secs: Option<u32>,
     topic_alias: Option<u16>,
     reply_to: Option<String>,
-    response_topic: Option<&'a str>,
+    response_topic: Option<Cow<'a, str>>,
     correlation_id: Option<String>,
     correlation_data: Option<Vec<u8>>,
     projected_user_properties: Vec<(&'a str, &'a str)>,
@@ -116,15 +112,13 @@ enum PacketSemantics<'a> {
     Unsubscribe(SubscribeView<'a>),
 }
 
-/// Interprets the bridge capture as MQTT, rejecting captures owned by other protocols.
-fn mqtt_capture<'a>(
+/// Decodes and fully validates the bridge capture through the typed MQTT view, exactly like the native path.
+fn mqtt_capture_view<'a>(
     transport: Option<&'a TransportMeta<'a>>,
-) -> Result<Option<&'a TransportMeta<'a>>, MqttCommandConversionError> {
+) -> Result<MqttMeta<'a>, MqttCommandConversionError> {
     match transport {
-        Some(meta) if meta.protocol != ProtocolId::MQTT => Err(
-            MqttCommandConversionError::ForeignExtensions(meta.protocol.clone()),
-        ),
-        other => Ok(other),
+        Some(meta) => MqttMeta::try_from_transport_meta(meta.as_borrowed()),
+        None => Ok(MqttMeta::default()),
     }
 }
 
@@ -141,7 +135,7 @@ fn publish_view_from_bridge<'a>(
         Route::Messaging { topic } => topic.as_ref(),
         _ => return Err(MqttCommandConversionError::InvalidBridgeMessage),
     };
-    let mqtt = mqtt_capture(bridge.transport.as_ref())?;
+    let mqtt = mqtt_capture_view(bridge.transport.as_ref())?;
     Ok(PublishView {
         command_id: bridge.id.as_ref(),
         topic,
@@ -152,42 +146,22 @@ fn publish_view_from_bridge<'a>(
                 .ok_or(MqttCommandConversionError::InvalidBridgeMessage)?,
         )?,
         delivery: *delivery,
-        retain: mqtt
-            .and_then(|meta| meta.get_bool(KEY_RETAIN))
-            .unwrap_or(false),
-        payload_format: mqtt
-            .and_then(|meta| meta.get_str(KEY_PAYLOAD_FORMAT))
-            .map(|name| {
-                mqtt_payload_format_from_name(name).ok_or_else(|| {
-                    MqttCommandConversionError::InvalidExtensionName {
-                        key: KEY_PAYLOAD_FORMAT,
-                        value: name.to_string(),
-                    }
-                })
-            })
-            .transpose()?,
-        content_type: mqtt.and_then(|meta| meta.get_str(KEY_CONTENT_TYPE)),
-        message_expiry_interval_secs: mqtt
-            .and_then(|meta| meta.get_u64(KEY_MESSAGE_EXPIRY_INTERVAL_SECS))
-            .map(|value| checked_capture_value(KEY_MESSAGE_EXPIRY_INTERVAL_SECS, value))
-            .transpose()?,
-        topic_alias: mqtt
-            .and_then(|meta| meta.get_u64(KEY_TOPIC_ALIAS))
-            .map(|value| checked_capture_value(KEY_TOPIC_ALIAS, value))
-            .transpose()?,
+        retain: mqtt.retain,
+        payload_format: mqtt.payload_format,
+        content_type: mqtt.content_type,
+        message_expiry_interval_secs: mqtt.message_expiry_interval_secs,
+        topic_alias: mqtt.topic_alias,
         reply_to: bridge
             .correlation
             .as_ref()
             .and_then(|correlation| correlation.reply_to.as_ref())
             .and_then(channel_reply_to),
-        response_topic: mqtt.and_then(|meta| meta.get_str(KEY_RESPONSE_TOPIC)),
+        response_topic: mqtt.response_topic,
         correlation_id: bridge
             .correlation
             .as_ref()
             .map(|correlation| correlation.request_id.to_string()),
-        correlation_data: mqtt
-            .and_then(|meta| meta.get_bytes(KEY_CORRELATION_DATA))
-            .map(|value| value.to_vec()),
+        correlation_data: mqtt.correlation_data.map(Cow::into_owned),
         projected_user_properties: header_user_properties(bridge.headers.as_ref()),
     })
 }
@@ -205,35 +179,17 @@ fn subscription_view_from_bridge<'a>(
         Route::Messaging { topic } => topic.as_ref(),
         _ => return Err(MqttCommandConversionError::InvalidBridgeMessage),
     };
-    let mqtt = mqtt_capture(bridge.transport.as_ref())?;
+    let mqtt = mqtt_capture_view(bridge.transport.as_ref())?;
     Ok(SubscribeView {
         command_id: bridge.id.as_ref(),
         topic: channel,
         delivery: operation.delivery,
         durable_name: operation.durable_name.as_deref(),
         shared_group: operation.shared_group.as_deref(),
-        no_local: mqtt
-            .and_then(|meta| meta.get_bool(KEY_NO_LOCAL))
-            .unwrap_or(false),
-        retain_as_published: mqtt
-            .and_then(|meta| meta.get_bool(KEY_RETAIN_AS_PUBLISHED))
-            .unwrap_or(false),
-        retain_handling: mqtt
-            .and_then(|meta| meta.get_u64(KEY_RETAIN_HANDLING))
-            .map(|value| {
-                retain_handling_from_code(value).ok_or(
-                    MqttCommandConversionError::InvalidExtensionValue {
-                        key: KEY_RETAIN_HANDLING,
-                        value,
-                    },
-                )
-            })
-            .transpose()?,
-        subscription_identifier: mqtt
-            .and_then(|meta| meta.get_u64_list(KEY_SUBSCRIPTION_IDENTIFIERS))
-            .and_then(|values| values.first().copied())
-            .map(|value| checked_capture_value(KEY_SUBSCRIPTION_IDENTIFIERS, value))
-            .transpose()?,
+        no_local: mqtt.no_local,
+        retain_as_published: mqtt.retain_as_published,
+        retain_handling: mqtt.retain_handling,
+        subscription_identifier: mqtt.subscription_identifiers.first().copied(),
         projected_user_properties: header_user_properties(bridge.headers.as_ref()),
     })
 }
@@ -267,11 +223,11 @@ fn publish_view_from_native_plan<'a>(
         delivery: *delivery,
         retain: *retain,
         payload_format: *payload_format,
-        content_type: content_type.as_deref(),
+        content_type: content_type.as_deref().map(Cow::Borrowed),
         message_expiry_interval_secs: *message_expiry_interval_secs,
         topic_alias: *topic_alias,
         reply_to: reply_to.as_ref().and_then(channel_reply_to),
-        response_topic: response_topic.as_deref(),
+        response_topic: response_topic.as_deref().map(Cow::Borrowed),
         correlation_id: correlation_id.as_deref().map(ToString::to_string),
         correlation_data: correlation_data.as_deref().map(<[u8]>::to_vec),
         projected_user_properties: user_properties
@@ -561,12 +517,16 @@ fn build_v5_publish_props(
         ));
     }
 
-    if let Some(reply_to) = publish.response_topic.or(publish.reply_to.as_deref()) {
+    if let Some(reply_to) = publish
+        .response_topic
+        .as_deref()
+        .or(publish.reply_to.as_deref())
+    {
         props.push(mqtt::packet::Property::ResponseTopic(
             mqtt::packet::ResponseTopic::new(reply_to)?,
         ));
     }
-    if let Some(content_type) = publish.content_type {
+    if let Some(content_type) = publish.content_type.as_deref() {
         props.push(mqtt::packet::Property::ContentType(
             mqtt::packet::ContentType::new(content_type)?,
         ));

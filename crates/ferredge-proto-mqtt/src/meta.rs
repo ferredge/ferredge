@@ -265,7 +265,7 @@ pub struct MqttMeta<'a> {
 }
 
 impl<'a> MqttMeta<'a> {
-    /// Decodes an MQTT capture by move, rejecting foreign protocols and malformed entries.
+    /// Decodes an MQTT capture by move, rejecting foreign protocols, malformed entries, and wrong-typed known keys; duplicate keys decode first-occurrence-wins.
     pub fn try_from_transport_meta(
         mut meta: TransportMeta<'a>,
     ) -> Result<Self, MqttCommandConversionError> {
@@ -276,19 +276,28 @@ impl<'a> MqttMeta<'a> {
             headers: meta.headers.take(),
             ..MqttMeta::default()
         };
+        let mut seen: Vec<Cow<'static, str>> = Vec::new();
         for (key, value) in meta.into_entries() {
-            match (key.as_ref(), value) {
-                (KEY_TOPIC, MetaValue::Str(value)) => view.topic = Some(value),
-                (KEY_QOS, MetaValue::U64(value)) => {
-                    view.qos = Some(checked_capture_value(KEY_QOS, value)?);
+            if seen.iter().any(|entry| entry == &key) {
+                continue;
+            }
+            seen.push(key.clone());
+            match key.as_ref() {
+                KEY_TOPIC => view.topic = Some(expect_str(KEY_TOPIC, value)?),
+                KEY_QOS => {
+                    view.qos = Some(checked_capture_value(KEY_QOS, expect_u64(KEY_QOS, value)?)?);
                 }
-                (KEY_RETAIN, MetaValue::Bool(value)) => view.retain = value,
-                (KEY_DUPLICATE, MetaValue::Bool(value)) => view.duplicate = value,
-                (KEY_PACKET_ID, MetaValue::U64(value)) => {
-                    view.packet_id = Some(checked_capture_value(KEY_PACKET_ID, value)?);
+                KEY_RETAIN => view.retain = expect_bool(KEY_RETAIN, value)?,
+                KEY_DUPLICATE => view.duplicate = expect_bool(KEY_DUPLICATE, value)?,
+                KEY_PACKET_ID => {
+                    view.packet_id = Some(checked_capture_value(
+                        KEY_PACKET_ID,
+                        expect_u64(KEY_PACKET_ID, value)?,
+                    )?);
                 }
-                (KEY_CONTENT_TYPE, MetaValue::Str(value)) => view.content_type = Some(value),
-                (KEY_PAYLOAD_FORMAT, MetaValue::Str(value)) => {
+                KEY_CONTENT_TYPE => view.content_type = Some(expect_str(KEY_CONTENT_TYPE, value)?),
+                KEY_PAYLOAD_FORMAT => {
+                    let value = expect_str(KEY_PAYLOAD_FORMAT, value)?;
                     view.payload_format = Some(
                         mqtt_payload_format_from_name(value.as_ref()).ok_or_else(|| {
                             MqttCommandConversionError::InvalidExtensionName {
@@ -298,34 +307,45 @@ impl<'a> MqttMeta<'a> {
                         })?,
                     );
                 }
-                (KEY_MESSAGE_EXPIRY_INTERVAL_SECS, MetaValue::U64(value)) => {
+                KEY_MESSAGE_EXPIRY_INTERVAL_SECS => {
                     view.message_expiry_interval_secs = Some(checked_capture_value(
                         KEY_MESSAGE_EXPIRY_INTERVAL_SECS,
-                        value,
+                        expect_u64(KEY_MESSAGE_EXPIRY_INTERVAL_SECS, value)?,
                     )?);
                 }
-                (KEY_RESPONSE_TOPIC, MetaValue::Str(value)) => view.response_topic = Some(value),
-                (KEY_CORRELATION_DATA, MetaValue::Bytes(value)) => {
-                    view.correlation_data = Some(value);
+                KEY_RESPONSE_TOPIC => {
+                    view.response_topic = Some(expect_str(KEY_RESPONSE_TOPIC, value)?);
                 }
-                (KEY_TOPIC_ALIAS, MetaValue::U64(value)) => {
-                    view.topic_alias = Some(checked_capture_value(KEY_TOPIC_ALIAS, value)?);
+                KEY_CORRELATION_DATA => {
+                    view.correlation_data = Some(expect_bytes(KEY_CORRELATION_DATA, value)?);
                 }
-                (KEY_SUBSCRIPTION_IDENTIFIERS, MetaValue::U64List(values)) => {
-                    view.subscription_identifiers = values
-                        .into_iter()
-                        .map(|value| checked_capture_value(KEY_SUBSCRIPTION_IDENTIFIERS, value))
-                        .collect::<Result<_, _>>()?;
+                KEY_TOPIC_ALIAS => {
+                    view.topic_alias = Some(checked_capture_value(
+                        KEY_TOPIC_ALIAS,
+                        expect_u64(KEY_TOPIC_ALIAS, value)?,
+                    )?);
                 }
-                (KEY_REASON_CODES, MetaValue::StrList(values)) => view.reason_codes = values,
-                (KEY_REASON_STRING, MetaValue::Str(value)) => view.reason_string = Some(value),
-                (KEY_DURABLE_NAME, MetaValue::Str(value)) => view.durable_name = Some(value),
-                (KEY_SHARED_GROUP, MetaValue::Str(value)) => view.shared_group = Some(value),
-                (KEY_NO_LOCAL, MetaValue::Bool(value)) => view.no_local = value,
-                (KEY_RETAIN_AS_PUBLISHED, MetaValue::Bool(value)) => {
-                    view.retain_as_published = value;
+                KEY_SUBSCRIPTION_IDENTIFIERS => {
+                    view.subscription_identifiers =
+                        expect_u64_list(KEY_SUBSCRIPTION_IDENTIFIERS, value)?
+                            .into_iter()
+                            .map(|value| checked_capture_value(KEY_SUBSCRIPTION_IDENTIFIERS, value))
+                            .collect::<Result<_, _>>()?;
                 }
-                (KEY_RETAIN_HANDLING, MetaValue::U64(value)) => {
+                KEY_REASON_CODES => {
+                    view.reason_codes = expect_str_list(KEY_REASON_CODES, value)?;
+                }
+                KEY_REASON_STRING => {
+                    view.reason_string = Some(expect_str(KEY_REASON_STRING, value)?);
+                }
+                KEY_DURABLE_NAME => view.durable_name = Some(expect_str(KEY_DURABLE_NAME, value)?),
+                KEY_SHARED_GROUP => view.shared_group = Some(expect_str(KEY_SHARED_GROUP, value)?),
+                KEY_NO_LOCAL => view.no_local = expect_bool(KEY_NO_LOCAL, value)?,
+                KEY_RETAIN_AS_PUBLISHED => {
+                    view.retain_as_published = expect_bool(KEY_RETAIN_AS_PUBLISHED, value)?;
+                }
+                KEY_RETAIN_HANDLING => {
+                    let value = expect_u64(KEY_RETAIN_HANDLING, value)?;
                     view.retain_handling = Some(retain_handling_from_code(value).ok_or(
                         MqttCommandConversionError::InvalidExtensionValue {
                             key: KEY_RETAIN_HANDLING,
@@ -337,6 +357,69 @@ impl<'a> MqttMeta<'a> {
             }
         }
         Ok(view)
+    }
+}
+
+/// Requires one capture value to be UTF-8 text.
+fn expect_str<'a>(
+    key: &'static str,
+    value: MetaValue<'a>,
+) -> Result<Cow<'a, str>, MqttCommandConversionError> {
+    match value {
+        MetaValue::Str(value) => Ok(value),
+        _ => Err(MqttCommandConversionError::InvalidExtensionType { key }),
+    }
+}
+
+/// Requires one capture value to be an unsigned integer.
+fn expect_u64(key: &'static str, value: MetaValue<'_>) -> Result<u64, MqttCommandConversionError> {
+    match value {
+        MetaValue::U64(value) => Ok(value),
+        _ => Err(MqttCommandConversionError::InvalidExtensionType { key }),
+    }
+}
+
+/// Requires one capture value to be a boolean flag.
+fn expect_bool(
+    key: &'static str,
+    value: MetaValue<'_>,
+) -> Result<bool, MqttCommandConversionError> {
+    match value {
+        MetaValue::Bool(value) => Ok(value),
+        _ => Err(MqttCommandConversionError::InvalidExtensionType { key }),
+    }
+}
+
+/// Requires one capture value to be opaque bytes.
+fn expect_bytes<'a>(
+    key: &'static str,
+    value: MetaValue<'a>,
+) -> Result<Cow<'a, [u8]>, MqttCommandConversionError> {
+    match value {
+        MetaValue::Bytes(value) => Ok(value),
+        _ => Err(MqttCommandConversionError::InvalidExtensionType { key }),
+    }
+}
+
+/// Requires one capture value to be an unsigned integer list.
+fn expect_u64_list(
+    key: &'static str,
+    value: MetaValue<'_>,
+) -> Result<Vec<u64>, MqttCommandConversionError> {
+    match value {
+        MetaValue::U64List(values) => Ok(values),
+        _ => Err(MqttCommandConversionError::InvalidExtensionType { key }),
+    }
+}
+
+/// Requires one capture value to be a text list.
+fn expect_str_list<'a>(
+    key: &'static str,
+    value: MetaValue<'a>,
+) -> Result<Vec<Cow<'a, str>>, MqttCommandConversionError> {
+    match value {
+        MetaValue::StrList(values) => Ok(values),
+        _ => Err(MqttCommandConversionError::InvalidExtensionType { key }),
     }
 }
 
@@ -439,69 +522,7 @@ impl<'a> ProtocolMeta<'a> for MqttMeta<'a> {
 
     /// Borrows an MQTT transport capture as a typed view; foreign or malformed captures yield `None`.
     fn view(meta: &'a TransportMeta<'a>) -> Option<MqttMeta<'a>> {
-        if meta.protocol != ProtocolId::MQTT {
-            return None;
-        }
-        Some(MqttMeta {
-            topic: meta.get_str(KEY_TOPIC).map(Cow::Borrowed),
-            qos: meta.get_u64(KEY_QOS).map(u8::try_from).transpose().ok()?,
-            retain: meta.get_bool(KEY_RETAIN).unwrap_or(false),
-            duplicate: meta.get_bool(KEY_DUPLICATE).unwrap_or(false),
-            packet_id: meta
-                .get_u64(KEY_PACKET_ID)
-                .map(u16::try_from)
-                .transpose()
-                .ok()?,
-            content_type: meta.get_str(KEY_CONTENT_TYPE).map(Cow::Borrowed),
-            payload_format: meta
-                .get_str(KEY_PAYLOAD_FORMAT)
-                .map(|name| mqtt_payload_format_from_name(name).ok_or(()))
-                .transpose()
-                .ok()?,
-            message_expiry_interval_secs: meta
-                .get_u64(KEY_MESSAGE_EXPIRY_INTERVAL_SECS)
-                .map(u32::try_from)
-                .transpose()
-                .ok()?,
-            response_topic: meta.get_str(KEY_RESPONSE_TOPIC).map(Cow::Borrowed),
-            correlation_data: meta.get_bytes(KEY_CORRELATION_DATA).map(Cow::Borrowed),
-            topic_alias: meta
-                .get_u64(KEY_TOPIC_ALIAS)
-                .map(u16::try_from)
-                .transpose()
-                .ok()?,
-            subscription_identifiers: meta
-                .get_u64_list(KEY_SUBSCRIPTION_IDENTIFIERS)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(|value| u32::try_from(*value))
-                        .collect::<Result<_, _>>()
-                })
-                .transpose()
-                .ok()?
-                .unwrap_or_default(),
-            reason_codes: meta
-                .get_str_list(KEY_REASON_CODES)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(|value| Cow::Borrowed(value.as_ref()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            reason_string: meta.get_str(KEY_REASON_STRING).map(Cow::Borrowed),
-            durable_name: meta.get_str(KEY_DURABLE_NAME).map(Cow::Borrowed),
-            shared_group: meta.get_str(KEY_SHARED_GROUP).map(Cow::Borrowed),
-            no_local: meta.get_bool(KEY_NO_LOCAL).unwrap_or(false),
-            retain_as_published: meta.get_bool(KEY_RETAIN_AS_PUBLISHED).unwrap_or(false),
-            retain_handling: meta
-                .get_u64(KEY_RETAIN_HANDLING)
-                .map(|value| retain_handling_from_code(value).ok_or(()))
-                .transpose()
-                .ok()?,
-            headers: meta.headers.as_ref().map(Headers::as_borrowed),
-        })
+        Self::try_from_transport_meta(meta.as_borrowed()).ok()
     }
 }
 
@@ -538,9 +559,4 @@ impl IntoOwned for MqttMeta<'_> {
             headers: self.headers.into_owned(),
         }
     }
-}
-
-/// Parses the will payload format text used by device configuration.
-pub fn mqtt_will_payload_format(value: &str) -> Option<MqttPayloadFormat> {
-    mqtt_payload_format_from_name(value.trim().to_lowercase().as_str())
 }

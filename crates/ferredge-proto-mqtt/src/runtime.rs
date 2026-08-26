@@ -17,7 +17,7 @@ use crate::convert::qos_from_delivery;
 use crate::endpoint::{
     MqttConnackProperties, MqttEndpointConfig, MqttProtocolVersion, MqttWillConfig,
 };
-use crate::meta::{MqttMeta, MqttPayloadFormat, mqtt_will_payload_format};
+use crate::meta::{MqttMeta, MqttPayloadFormat};
 use crate::runtime_stack;
 use crate::types::{MqttPacketRequest, MqttWirePacket};
 use crate::{
@@ -1004,11 +1004,7 @@ fn build_v5_will_props(will: &MqttWillConfig) -> Result<mqtt::packet::Properties
             mqtt::packet::WillDelayInterval::new(delay).map_err(|e| e.to_string())?,
         ));
     }
-    if let Some(payload_format) = will
-        .payload_format
-        .as_deref()
-        .and_then(mqtt_will_payload_format)
-    {
+    if let Some(payload_format) = will.payload_format {
         props.push(mqtt::packet::Property::PayloadFormatIndicator(
             mqtt::packet::PayloadFormatIndicator::new(match payload_format {
                 MqttPayloadFormat::Bytes => mqtt::packet::PayloadFormat::Binary,

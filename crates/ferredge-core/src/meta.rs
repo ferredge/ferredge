@@ -152,13 +152,16 @@ impl<'a> TransportMeta<'a> {
         }
     }
 
-    /// Removes and returns the value stored under the given key, if any.
+    /// Removes every entry stored under the given key, returning the first value, if any.
     pub fn take(&mut self, key: &str) -> Option<MetaValue<'a>> {
         let index = self
             .entries
             .iter()
             .position(|(entry_key, _)| entry_key.as_ref() == key)?;
-        Some(self.entries.remove(index).1)
+        let value = self.entries.remove(index).1;
+        self.entries
+            .retain(|(entry_key, _)| entry_key.as_ref() != key);
+        Some(value)
     }
 
     /// Returns the string value stored under the given key, if any.
@@ -265,8 +268,38 @@ pub trait ProtocolMeta<'a>: Sized {
     const PROTOCOL: ProtocolId;
     /// Moves this view into a transport capture (zero-copy: Cows move).
     fn into_transport_meta(self) -> TransportMeta<'a>;
-    /// Moves a capture into this view when the protocol matches.
+    /// Moves a capture into this view; `None` covers protocol mismatch and malformed captures alike (a view's fallible decoder distinguishes them).
     fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self>;
-    /// Borrows this view from a capture when the protocol matches.
+    /// Borrows this view from a capture; `None` covers protocol mismatch and malformed captures alike (a view's fallible decoder distinguishes them).
     fn view(meta: &'a TransportMeta<'a>) -> Option<Self>;
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn take_removes_all_duplicate_entries_returning_the_first() {
+        let mut meta = TransportMeta::new(ProtocolId::MQTT);
+        meta.entries = vec![
+            (
+                Cow::Borrowed("topic"),
+                MetaValue::Str(Cow::Borrowed("first")),
+            ),
+            (Cow::Borrowed("qos"), MetaValue::U64(1)),
+            (
+                Cow::Borrowed("topic"),
+                MetaValue::Str(Cow::Borrowed("second")),
+            ),
+        ];
+
+        assert_eq!(
+            meta.take("topic"),
+            Some(MetaValue::Str(Cow::Borrowed("first")))
+        );
+        assert_eq!(meta.take("topic"), None);
+        assert_eq!(meta.get_u64("qos"), Some(1));
+    }
 }

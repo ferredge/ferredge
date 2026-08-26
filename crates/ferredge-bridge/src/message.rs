@@ -16,8 +16,6 @@ pub enum BridgeMessage<'a> {
     Event(BridgeEvent<'a>),
     /// Inbound bridge result or completion.
     Result(BridgeResult<'a>),
-    /// Inbound or synthesized bridge fault.
-    Fault(BridgeFaultMessage<'a>),
 }
 
 /// Normalized outbound bridge command.
@@ -120,25 +118,6 @@ pub enum BridgeOutcome<'a> {
     },
 }
 
-/// Bridge fault envelope with optional source and command context.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BridgeFaultMessage<'a> {
-    /// Optional source endpoint where the fault originated.
-    pub source: Option<EndpointRef>,
-    /// Optional related command identifier.
-    pub command_id: Option<Cow<'a, str>>,
-    /// Optional correlation metadata.
-    pub correlation: Option<Correlation<'a>>,
-    /// Optional route metadata associated with the fault.
-    pub route: Option<Route<'a>>,
-    /// Optional typed transport metadata associated with the fault.
-    pub transport: Option<TransportMeta<'a>>,
-    /// Optional arbitrary headers or properties associated with the fault.
-    pub headers: Option<Headers<'a>>,
-    /// Fault payload.
-    pub fault: crate::fault::BridgeFault,
-}
-
 impl BridgeMessage<'_> {
     /// Materializes an owned bridge message for async boundaries.
     pub fn into_owned(self) -> BridgeMessage<'static> {
@@ -153,7 +132,6 @@ impl IntoOwned for BridgeMessage<'_> {
             BridgeMessage::Command(command) => BridgeMessage::Command(command.into_owned()),
             BridgeMessage::Event(event) => BridgeMessage::Event(event.into_owned()),
             BridgeMessage::Result(result) => BridgeMessage::Result(result.into_owned()),
-            BridgeMessage::Fault(fault) => BridgeMessage::Fault(fault.into_owned()),
         }
     }
 }
@@ -271,28 +249,6 @@ impl IntoOwned for BridgeOutcome<'_> {
                 error: error.into_owned(),
                 fault,
             },
-        }
-    }
-}
-
-impl BridgeFaultMessage<'_> {
-    /// Materializes an owned bridge fault message for async boundaries.
-    pub fn into_owned(self) -> BridgeFaultMessage<'static> {
-        IntoOwned::into_owned(self)
-    }
-}
-
-impl IntoOwned for BridgeFaultMessage<'_> {
-    type Owned = BridgeFaultMessage<'static>;
-    fn into_owned(self) -> Self::Owned {
-        BridgeFaultMessage {
-            source: self.source,
-            command_id: self.command_id.into_owned(),
-            correlation: self.correlation.into_owned(),
-            route: self.route.into_owned(),
-            transport: self.transport.into_owned(),
-            headers: self.headers.into_owned(),
-            fault: self.fault,
         }
     }
 }

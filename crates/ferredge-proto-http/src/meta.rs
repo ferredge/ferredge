@@ -1,11 +1,13 @@
 extern crate alloc;
 
-use alloc::borrow::Cow;
+use alloc::{borrow::Cow, vec::Vec};
 
 use ferredge_core::prelude::{
     Headers, IntoOwned, MetaValue, ProtocolId, ProtocolMeta, TransportMeta,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::HttpCommandConversionError;
 
 /// Capture key for the HTTP request method.
 pub const KEY_METHOD: &str = "method";
@@ -31,6 +33,63 @@ pub struct HttpMeta<'a> {
     pub headers: Option<Headers<'a>>,
 }
 
+impl<'a> HttpMeta<'a> {
+    /// Decodes an HTTP capture by move, rejecting foreign protocols, malformed entries, and wrong-typed known keys; duplicate keys decode first-occurrence-wins.
+    pub fn try_from_transport_meta(
+        mut meta: TransportMeta<'a>,
+    ) -> Result<Self, HttpCommandConversionError> {
+        if meta.protocol != ProtocolId::HTTP {
+            return Err(HttpCommandConversionError::ForeignExtensions(meta.protocol));
+        }
+        let mut view = HttpMeta {
+            headers: meta.headers.take(),
+            ..HttpMeta::default()
+        };
+        let mut seen: Vec<Cow<'static, str>> = Vec::new();
+        for (key, value) in meta.into_entries() {
+            if seen.iter().any(|entry| entry == &key) {
+                continue;
+            }
+            seen.push(key.clone());
+            match key.as_ref() {
+                KEY_METHOD => view.method = Some(expect_str(KEY_METHOD, value)?),
+                KEY_PATH => view.path = Some(expect_str(KEY_PATH, value)?),
+                KEY_STATUS_CODE => {
+                    let value = expect_u64(KEY_STATUS_CODE, value)?;
+                    view.status_code = Some(u16::try_from(value).map_err(|_| {
+                        HttpCommandConversionError::InvalidExtensionValue {
+                            key: KEY_STATUS_CODE,
+                            value,
+                        }
+                    })?);
+                }
+                KEY_CONTENT_TYPE => view.content_type = Some(expect_str(KEY_CONTENT_TYPE, value)?),
+                _ => {}
+            }
+        }
+        Ok(view)
+    }
+}
+
+/// Requires one capture value to be UTF-8 text.
+fn expect_str<'a>(
+    key: &'static str,
+    value: MetaValue<'a>,
+) -> Result<Cow<'a, str>, HttpCommandConversionError> {
+    match value {
+        MetaValue::Str(value) => Ok(value),
+        _ => Err(HttpCommandConversionError::InvalidExtensionType { key }),
+    }
+}
+
+/// Requires one capture value to be an unsigned integer.
+fn expect_u64(key: &'static str, value: MetaValue<'_>) -> Result<u64, HttpCommandConversionError> {
+    match value {
+        MetaValue::U64(value) => Ok(value),
+        _ => Err(HttpCommandConversionError::InvalidExtensionType { key }),
+    }
+}
+
 impl<'a> ProtocolMeta<'a> for HttpMeta<'a> {
     const PROTOCOL: ProtocolId = ProtocolId::HTTP;
 
@@ -54,44 +113,13 @@ impl<'a> ProtocolMeta<'a> for HttpMeta<'a> {
     }
 
     /// Decodes an HTTP transport capture into a typed view by move; foreign or malformed captures yield `None`.
-    fn from_transport_meta(mut meta: TransportMeta<'a>) -> Option<Self> {
-        if meta.protocol != ProtocolId::HTTP {
-            return None;
-        }
-        let mut view = HttpMeta {
-            headers: meta.headers.take(),
-            ..HttpMeta::default()
-        };
-        for (key, value) in meta.into_entries() {
-            match (key.as_ref(), value) {
-                (KEY_METHOD, MetaValue::Str(value)) => view.method = Some(value),
-                (KEY_PATH, MetaValue::Str(value)) => view.path = Some(value),
-                (KEY_STATUS_CODE, MetaValue::U64(value)) => {
-                    view.status_code = Some(u16::try_from(value).ok()?);
-                }
-                (KEY_CONTENT_TYPE, MetaValue::Str(value)) => view.content_type = Some(value),
-                _ => {}
-            }
-        }
-        Some(view)
+    fn from_transport_meta(meta: TransportMeta<'a>) -> Option<Self> {
+        Self::try_from_transport_meta(meta).ok()
     }
 
     /// Borrows an HTTP transport capture as a typed view; foreign or malformed captures yield `None`.
     fn view(meta: &'a TransportMeta<'a>) -> Option<HttpMeta<'a>> {
-        if meta.protocol != ProtocolId::HTTP {
-            return None;
-        }
-        Some(HttpMeta {
-            method: meta.get_str(KEY_METHOD).map(Cow::Borrowed),
-            path: meta.get_str(KEY_PATH).map(Cow::Borrowed),
-            status_code: meta
-                .get_u64(KEY_STATUS_CODE)
-                .map(u16::try_from)
-                .transpose()
-                .ok()?,
-            content_type: meta.get_str(KEY_CONTENT_TYPE).map(Cow::Borrowed),
-            headers: meta.headers.as_ref().map(Headers::as_borrowed),
-        })
+        Self::try_from_transport_meta(meta.as_borrowed()).ok()
     }
 }
 

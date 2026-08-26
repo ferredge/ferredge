@@ -14,7 +14,7 @@ Workspace crates (`crates/`):
 | `ferredge-bridge` | Bridge intermediate representation (IR), semantic planners, plug-in planner/encoder/decoder traits |
 | `ferredge-proto-mqtt` / `-http` / `-modbus` | Protocol drivers: endpoint configs, resource attributes, typed metadata views, planners, codecs |
 | `ferredge-bridge-interop` | Cross-protocol bridging integration tests |
-| `ferredge-runtime-std` / `-tokio` / `-async-std` / `-embassy` | Runtime adapters implementing the core runtime/net/serial traits |
+| `ferredge-runtime-tokio` / `-async-std` / `-embassy` | Runtime adapters implementing the core runtime/net/serial traits |
 | `ferredge-test-support` | Shared test helpers |
 
 `ferredge-core` and `ferredge-bridge` are `no_std` + `alloc` (`std` is an
@@ -44,13 +44,17 @@ inbound:
 
   native wire type --ProtocolDecoder--> Decoded<'a> view
       --> RoutedEvent<'a> / RoutedResult<'a>  (ferredge-core)
-      --> BridgeMessage<'a> (Event/Result/Fault) via bridge planner helpers
+      --> BridgeMessage<'a> (Event/Result) via bridge planner helpers
 ```
 
 Both outbound paths exist per protocol. The bridge IR path is used when a
 message must cross protocols (MQTT device talking to a Modbus device); the
 native path is a zero-overhead shortcut when the source command already
 targets the same protocol.
+
+Deliberate behavior change from `main`: a correlated `Send` now errors with
+`MqttV5PublishOptionsOnV3` against MQTT 3.1.1 brokers on the native path
+too (main silently dropped the correlation there).
 
 ## The canonical message model
 
@@ -88,7 +92,7 @@ and encode themselves into the capture via `into_transport_meta()`.
 
 ### Bridge IR
 
-`BridgeMessage<'a>` (`bridge/src/message.rs`) is a four-way envelope:
+`BridgeMessage<'a>` (`bridge/src/message.rs`) is a three-way envelope:
 
 - `Command(BridgeCommand<'a>)` — normalized outbound command: `capability`
   (`BridgeCapability`), `operation` (`BridgeOp<'a>`), optional payload,
@@ -98,9 +102,9 @@ and encode themselves into the capture via `into_transport_meta()`.
   plus a source `EndpointRef`.
 - `Result(BridgeResult<'a>)` — `{ meta: BridgeMessageMeta<'a>, outcome:
   BridgeOutcome<'a> }` where `BridgeOutcome` is `Progress { state }`,
-  `Success { payload }`, or `Failure { state, payload, error, fault }`.
-- `Fault(BridgeFaultMessage<'a>)` — a `BridgeFault` (category, protocol
-  code, retryability, source protocol) with optional context.
+  `Success { payload }`, or `Failure { state, payload, error, fault }` —
+  failures carry a `BridgeFault` (category, protocol code, retryability,
+  source protocol).
 
 `BridgeCapability` (Messaging / RequestResponse / RegisterAccess, plus
 reserved variants) and `BridgeOp` (actions plus transport-neutral knobs
@@ -196,15 +200,27 @@ typed views over them, formalized by the `ProtocolMeta<'a>` trait in
 - `into_transport_meta(self) -> TransportMeta<'a>` — encode by move, zero-copy,
 - `from_transport_meta(meta: TransportMeta<'a>) -> Option<Self>` — decode by
   move (returns `None` if `meta.protocol` doesn't match or an entry is
-  malformed, e.g. an integer beyond its wire field width or an unknown name),
+  malformed: an integer beyond its wire field width, an unknown name, or a
+  known key stored with the wrong value type),
 - `view(meta: &'a TransportMeta<'a>) -> Option<Self>` — borrowing view
   without consuming the capture, with the same malformed-capture rules.
+
+Both views also expose an inherent `try_from_transport_meta` returning the
+crate's conversion error, which distinguishes protocol mismatch from the
+malformed cases the `Option` paths collapse into `None`. Both outbound
+paths (native and bridge) decode captures through it, so they accept and
+reject identically. Duplicate capture keys decode deterministically:
+the first occurrence wins on every path, and `TransportMeta::take` removes
+all entries under a key, returning the first. Unknown keys are ignored —
+the capture stays an open SPI for third-party entries.
 
 Views also carry the capture's first-class headers as a
 `pub headers: Option<Headers<'a>>` field: `from_transport_meta` moves
 `meta.headers` into the view, `into_transport_meta` moves it back out, and
 `view` re-borrows it — so wire headers round-trip through the typed view
-without a separate side channel. Modbus is the deliberate exception: it
+without a separate side channel. Note that `view` is not free for headers:
+like the list-shaped `MetaValue`s, `Headers::as_borrowed` clones the `Vec`
+spine (the leaf `Cow`s re-borrow). Modbus is the deliberate exception: it
 defines no capture keys, and its planners ignore `options.extensions`
 uniformly on both outbound paths.
 
@@ -220,9 +236,11 @@ capture passes through losslessly.
 
 The canonical merged order — identical on the bridge and native outbound
 paths — is envelope/options headers first, capture-carried headers appended
-after, with exact-duplicate keys deduplicated first-occurrence-wins
-(`Headers::merge` in `core/src/headers.rs`, matching the case-insensitive
-`Headers::get` semantics).
+after (`Headers::merge` in `core/src/headers.rs` is ordered concatenation).
+Nothing is deduplicated: duplicate and case-distinct keys are preserved
+verbatim, as MQTT v5 user properties and repeatable HTTP headers
+(`Set-Cookie`, `Via`) require. `Headers::get` stays case-insensitive
+first-match — a read convenience, unrelated to wire preservation.
 
 ## Zero-copy and ownership
 

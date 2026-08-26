@@ -537,7 +537,7 @@ fn mqtt_native_and_bridge_packet_requests_match_for_supported_commands() {
 }
 
 #[test]
-fn mqtt_user_properties_merge_envelope_first_and_dedupe_capture_keys() {
+fn mqtt_user_properties_preserve_duplicates_envelope_first_capture_appended() {
     let driver = make_default_driver();
     let command = Command {
         id: "cmd-user-prop-order".into(),
@@ -559,6 +559,8 @@ fn mqtt_user_properties_merge_envelope_first_and_dedupe_capture_keys() {
                         user_properties: vec![
                             ("x-dup".to_string(), "capture".to_string()),
                             ("X-Cap".to_string(), "2".to_string()),
+                            ("X-Cap".to_string(), "2".to_string()),
+                            ("X-Dup".to_string(), "capture-exact".to_string()),
                         ],
                         ..MqttMessageOptions::default()
                     }
@@ -570,7 +572,14 @@ fn mqtt_user_properties_merge_envelope_first_and_dedupe_capture_keys() {
         correlation: None,
     };
 
-    let expected = [("X-Env", "1"), ("X-Dup", "envelope"), ("X-Cap", "2")];
+    let expected = [
+        ("X-Env", "1"),
+        ("X-Dup", "envelope"),
+        ("x-dup", "capture"),
+        ("X-Cap", "2"),
+        ("X-Cap", "2"),
+        ("X-Dup", "capture-exact"),
+    ];
     for packet in [
         packet_request(&driver, &command),
         bridge_packet_request(&driver, &command),
@@ -808,6 +817,171 @@ fn send_command_with_overflowing_capture_value_is_rejected_on_both_paths() {
             } if value == u64::from(u32::MAX) + 1
         ));
     }
+}
+
+fn send_command_with_capture(capture: TransportMeta<'static>) -> Command<'static> {
+    Command {
+        id: "cmd-divergence".into(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".into(),
+        intent: Intent::Send {
+            channel: BrokerAddress {
+                name: "state/device".into(),
+                kind: Some(BrokerChannelKind::Topic),
+            },
+            payload: PayloadValue::Bytes(b"online".to_vec().into()),
+            options: BrokerMessageOptions {
+                extensions: Some(capture),
+                ..BrokerMessageOptions::default()
+            },
+        },
+        correlation: None,
+    }
+}
+
+#[test]
+fn out_of_range_qos_capture_is_rejected_identically_on_both_paths() {
+    let driver = make_default_driver();
+    let mut capture = TransportMeta::new(ProtocolId::MQTT);
+    capture.set(
+        crate::meta::KEY_QOS,
+        ferredge_core::prelude::MetaValue::U64(999),
+    );
+    let command = send_command_with_capture(capture);
+
+    for error in [
+        driver
+            .native_packet_request(command.clone())
+            .expect_err("native path must reject an out-of-range QoS capture"),
+        driver
+            .bridge_packet_request(command)
+            .expect_err("bridge path must reject an out-of-range QoS capture"),
+    ] {
+        assert!(matches!(
+            error,
+            crate::types::MqttCommandConversionError::InvalidExtensionValue {
+                key: crate::meta::KEY_QOS,
+                value: 999,
+            }
+        ));
+    }
+}
+
+#[test]
+fn out_of_range_subscription_identifiers_on_publish_are_rejected_on_both_paths() {
+    let driver = make_default_driver();
+    let mut capture = TransportMeta::new(ProtocolId::MQTT);
+    capture.set(
+        crate::meta::KEY_SUBSCRIPTION_IDENTIFIERS,
+        ferredge_core::prelude::MetaValue::U64List(vec![u64::MAX]),
+    );
+    let command = send_command_with_capture(capture);
+
+    for error in [
+        driver
+            .native_packet_request(command.clone())
+            .expect_err("native path must reject out-of-range subscription identifiers"),
+        driver
+            .bridge_packet_request(command)
+            .expect_err("bridge path must reject out-of-range subscription identifiers"),
+    ] {
+        assert!(matches!(
+            error,
+            crate::types::MqttCommandConversionError::InvalidExtensionValue {
+                key: crate::meta::KEY_SUBSCRIPTION_IDENTIFIERS,
+                value: u64::MAX,
+            }
+        ));
+    }
+}
+
+#[test]
+fn queue_channel_kind_is_rejected_identically_on_both_paths() {
+    let driver = make_default_driver();
+    let command = Command {
+        id: "cmd-queue-kind".into(),
+        source_device_id: None,
+        target_device_id: "mqtt-device-1".into(),
+        intent: Intent::Send {
+            channel: BrokerAddress {
+                name: "jobs/ingest".into(),
+                kind: Some(BrokerChannelKind::Queue),
+            },
+            payload: PayloadValue::Bytes(b"job".to_vec().into()),
+            options: BrokerMessageOptions::default(),
+        },
+        correlation: None,
+    };
+
+    for error in [
+        driver
+            .native_packet_request(command.clone())
+            .expect_err("native path must reject queue channel kinds"),
+        driver
+            .bridge_packet_request(command)
+            .expect_err("bridge path must reject queue channel kinds"),
+    ] {
+        assert!(matches!(
+            error,
+            crate::types::MqttCommandConversionError::UnsupportedChannelKind(
+                BrokerChannelKind::Queue
+            )
+        ));
+    }
+}
+
+#[test]
+fn duplicate_capture_keys_decode_first_occurrence_wins_on_every_path() {
+    let json = r#"{
+        "protocol": "mqtt",
+        "headers": null,
+        "entries": [
+            ["topic", {"Str": "first"}],
+            ["topic", {"Str": "second"}],
+            ["qos", {"U64": 1}],
+            ["qos", {"U64": 999}]
+        ]
+    }"#;
+    let mut capture: TransportMeta<'static> =
+        serde_json::from_str(json).expect("capture with duplicate keys should deserialize");
+
+    let result_view = MqttMeta::try_from_transport_meta(capture.as_borrowed())
+        .expect("shadowed malformed duplicates must not fail the decode");
+    assert_eq!(result_view.topic.as_deref(), Some("first"));
+    assert_eq!(result_view.qos, Some(1));
+
+    let borrowed_view = MqttMeta::view(&capture).expect("borrowing view should decode");
+    assert_eq!(borrowed_view.topic.as_deref(), Some("first"));
+    assert_eq!(borrowed_view.qos, Some(1));
+
+    assert_eq!(
+        capture.take(crate::meta::KEY_TOPIC),
+        Some(ferredge_core::prelude::MetaValue::Str("first".into()))
+    );
+    assert_eq!(capture.take(crate::meta::KEY_TOPIC), None);
+
+    let moved_view = MqttMeta::from_transport_meta(capture).expect("moving view should decode");
+    assert_eq!(moved_view.qos, Some(1));
+}
+
+#[test]
+fn wrong_typed_known_key_errors_on_result_path_and_yields_none_on_view() {
+    let mut capture = TransportMeta::new(ProtocolId::MQTT);
+    capture.set(
+        crate::meta::KEY_QOS,
+        ferredge_core::prelude::MetaValue::Str("1".into()),
+    );
+
+    assert!(matches!(
+        MqttMeta::try_from_transport_meta(capture.as_borrowed()),
+        Err(
+            crate::types::MqttCommandConversionError::InvalidExtensionType {
+                key: crate::meta::KEY_QOS,
+            }
+        )
+    ));
+    assert!(MqttMeta::view(&capture).is_none());
+    assert!(MqttMeta::from_transport_meta(capture).is_none());
 }
 
 #[test]
@@ -1759,7 +1933,7 @@ fn mqtt_connect_packet_maps_v5_will_properties() {
             delivery: Some(DeliveryGuarantee::AtLeastOnce),
             retain: true,
             delay_interval_secs: Some(5),
-            payload_format: Some("utf8".to_string()),
+            payload_format: Some(MqttPayloadFormat::Utf8),
             message_expiry_interval_secs: Some(60),
             content_type: Some("text/plain".to_string()),
             response_topic: Some("status/reply".to_string()),

@@ -592,7 +592,7 @@ fn mosquitto_will_publishes_after_ungraceful_driver_drop() {
         delivery: Some(DeliveryGuarantee::AtLeastOnce),
         retain: true,
         delay_interval_secs: Some(1),
-        payload_format: Some("utf8".to_string()),
+        payload_format: Some(MqttPayloadFormat::Utf8),
         message_expiry_interval_secs: Some(30),
         content_type: Some("text/plain".to_string()),
         response_topic: Some("ferredge/it/will/reply".to_string()),

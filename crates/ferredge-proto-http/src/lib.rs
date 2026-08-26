@@ -101,6 +101,12 @@ pub enum HttpCommandConversionError {
     /// Options carried a transport capture for a different protocol.
     #[error("options extensions capture belongs to protocol {0}, not HTTP")]
     ForeignExtensions(ProtocolId),
+    /// Extensions capture entry does not fit the HTTP wire field width.
+    #[error("extensions capture entry {key} has out-of-range value {value}")]
+    InvalidExtensionValue { key: &'static str, value: u64 },
+    /// Extensions capture entry stores a value type that does not match its documented key.
+    #[error("extensions capture entry {key} has a mismatched value type")]
+    InvalidExtensionType { key: &'static str },
 }
 
 /// HTTP protocol adapter implementing lifecycle and request/response capabilities.
@@ -276,7 +282,7 @@ impl ProtocolPlanner<NativeOutbound> for HttpCommandPlanner {
             action,
             payload,
             method: options.method.or(capture.method),
-            path: options.path,
+            path: options.path.or(capture.path),
             content_type: options.content_type.or(capture.content_type),
             headers: headers
                 .0
@@ -287,17 +293,12 @@ impl ProtocolPlanner<NativeOutbound> for HttpCommandPlanner {
     }
 }
 
-/// Splits an options extensions capture into a typed HTTP view, rejecting foreign protocols.
+/// Splits an options extensions capture into a typed HTTP view, rejecting foreign protocols and malformed captures.
 fn split_http_extensions(
     extensions: Option<TransportMeta<'_>>,
 ) -> Result<HttpMeta<'_>, HttpCommandConversionError> {
     match extensions {
-        Some(meta) => {
-            if meta.protocol != ProtocolId::HTTP {
-                return Err(HttpCommandConversionError::ForeignExtensions(meta.protocol));
-            }
-            Ok(HttpMeta::from_transport_meta(meta).unwrap_or_default())
-        }
+        Some(meta) => HttpMeta::try_from_transport_meta(meta),
         None => Ok(HttpMeta::default()),
     }
 }
@@ -362,15 +363,15 @@ impl<'p> ProtocolEncoder<NativeOutbound, HttpNativePlan<'p>, HttpRequest>
         if let Some(override_method) = &planned.method {
             method = override_method.to_string();
         }
+        for (key, value) in &planned.headers {
+            merge_header(&mut headers, key.to_string(), value.to_string());
+        }
         if let Some(content_type) = &planned.content_type {
             merge_header(
                 &mut headers,
                 "Content-Type".to_string(),
                 content_type.to_string(),
             );
-        }
-        for (key, value) in &planned.headers {
-            merge_header(&mut headers, key.to_string(), value.to_string());
         }
 
         Ok(HttpRequest {
@@ -497,32 +498,20 @@ impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
             return Err(HttpCommandConversionError::InvalidBridgeMessage);
         };
 
-        let http_capture = match command.transport.as_ref() {
-            Some(transport) if transport.protocol != ProtocolId::HTTP => {
-                return Err(HttpCommandConversionError::ForeignExtensions(
-                    transport.protocol.clone(),
-                ));
+        let capture = match command.transport.as_ref() {
+            Some(transport) => {
+                HttpMeta::try_from_transport_meta(transport.as_borrowed())?.into_owned()
             }
-            other => other,
+            None => HttpMeta::default(),
         };
-        let method = operation.method.clone().or_else(|| {
-            http_capture
-                .and_then(|transport| transport.get_str(KEY_METHOD))
-                .map(|value| Cow::Owned(value.to_string()))
-        });
-        let content_type = operation.content_type.clone().or_else(|| {
-            http_capture
-                .and_then(|transport| transport.get_str(KEY_CONTENT_TYPE))
-                .map(|value| Cow::Owned(value.to_string()))
-        });
 
         Ok(HttpNativePlan {
             resource: resource.clone(),
             action: operation.action.clone(),
             payload: command.payload.clone(),
-            method,
-            path: path.clone(),
-            content_type,
+            method: operation.method.clone().or(capture.method),
+            path: path.clone().or(capture.path),
+            content_type: operation.content_type.clone().or(capture.content_type),
             headers: command
                 .headers
                 .as_ref()
@@ -1007,7 +996,7 @@ mod tests {
                             content_type: Some("text/plain".into()),
                             headers: Some(Headers::from(vec![
                                 ("X-Cap".to_string(), "1".to_string()),
-                                ("x-env".to_string(), "capture".to_string()),
+                                ("Content-Type".to_string(), "text/html".to_string()),
                             ])),
                             ..HttpMeta::default()
                         }
@@ -1019,21 +1008,137 @@ mod tests {
             correlation: None,
         };
 
-        let request = driver
-            .native_request(command)
-            .expect("capture-carrying read should convert");
+        for request in [
+            driver.native_request(command.clone()).unwrap(),
+            driver.bridge_request(command).unwrap(),
+        ] {
+            assert_eq!(request.method, "PUT");
+            assert_eq!(request.path, "/api/temp");
+            assert_eq!(
+                request.headers,
+                vec![
+                    ("Accept".to_string(), "application/json".to_string()),
+                    ("X-Env".to_string(), "a".to_string()),
+                    ("X-Cap".to_string(), "1".to_string()),
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                ]
+            );
+        }
+    }
 
-        assert_eq!(request.method, "PUT");
-        assert_eq!(request.path, "/api/temp");
+    #[test]
+    fn capture_method_and_path_reach_the_request_unless_options_override_them() {
+        let driver = make_driver();
+        let capture_only = Command {
+            id: "cmd-capture-method-path".into(),
+            source_device_id: None,
+            target_device_id: "device-1".into(),
+            intent: Intent::Read {
+                resource: "temp".into(),
+                options: RequestOptions {
+                    extensions: Some(
+                        HttpMeta {
+                            method: Some("PUT".into()),
+                            path: Some("/capture/override".into()),
+                            ..HttpMeta::default()
+                        }
+                        .into_transport_meta(),
+                    ),
+                    ..RequestOptions::default()
+                },
+            },
+            correlation: None,
+        };
+        for request in [
+            driver.native_request(capture_only.clone()).unwrap(),
+            driver.bridge_request(capture_only).unwrap(),
+        ] {
+            assert_eq!(request.method, "PUT");
+            assert_eq!(request.path, "/capture/override");
+        }
+
+        let options_win = Command {
+            id: "cmd-options-method-path".into(),
+            source_device_id: None,
+            target_device_id: "device-1".into(),
+            intent: Intent::Read {
+                resource: "temp".into(),
+                options: RequestOptions {
+                    method: Some("PATCH".into()),
+                    path: Some("/options/override".into()),
+                    extensions: Some(
+                        HttpMeta {
+                            method: Some("PUT".into()),
+                            path: Some("/capture/override".into()),
+                            ..HttpMeta::default()
+                        }
+                        .into_transport_meta(),
+                    ),
+                    ..RequestOptions::default()
+                },
+            },
+            correlation: None,
+        };
+        for request in [
+            driver.native_request(options_win.clone()).unwrap(),
+            driver.bridge_request(options_win).unwrap(),
+        ] {
+            assert_eq!(request.method, "PATCH");
+            assert_eq!(request.path, "/options/override");
+        }
+    }
+
+    #[test]
+    fn malformed_status_code_capture_is_rejected_identically_on_both_paths() {
+        let driver = make_driver();
+        let mut capture = TransportMeta::new(ProtocolId::HTTP);
+        capture.set(KEY_METHOD, MetaValue::Str("PUT".into()));
+        capture.set(KEY_STATUS_CODE, MetaValue::U64(u64::from(u16::MAX) + 1));
+        let command = Command {
+            id: "cmd-malformed-status".into(),
+            source_device_id: None,
+            target_device_id: "device-1".into(),
+            intent: Intent::Read {
+                resource: "temp".into(),
+                options: RequestOptions {
+                    extensions: Some(capture),
+                    ..RequestOptions::default()
+                },
+            },
+            correlation: None,
+        };
+
+        for error in [
+            driver
+                .native_request(command.clone())
+                .expect_err("native path must reject a malformed capture"),
+            driver
+                .bridge_request(command)
+                .expect_err("bridge path must reject a malformed capture"),
+        ] {
+            assert_eq!(
+                error,
+                HttpCommandConversionError::InvalidExtensionValue {
+                    key: KEY_STATUS_CODE,
+                    value: u64::from(u16::MAX) + 1,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_typed_known_key_errors_on_result_path_and_yields_none_on_view() {
+        let mut capture = TransportMeta::new(ProtocolId::HTTP);
+        capture.set(KEY_STATUS_CODE, MetaValue::Str("200".into()));
+
         assert_eq!(
-            request.headers,
-            vec![
-                ("Accept".to_string(), "application/json".to_string()),
-                ("Content-Type".to_string(), "application/json".to_string()),
-                ("X-Env".to_string(), "a".to_string()),
-                ("X-Cap".to_string(), "1".to_string()),
-            ]
+            HttpMeta::try_from_transport_meta(capture.as_borrowed()),
+            Err(HttpCommandConversionError::InvalidExtensionType {
+                key: KEY_STATUS_CODE,
+            })
         );
+        assert_eq!(HttpMeta::view(&capture), None);
+        assert_eq!(HttpMeta::from_transport_meta(capture), None);
     }
 
     #[test]

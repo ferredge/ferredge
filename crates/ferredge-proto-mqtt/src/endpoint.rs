@@ -8,6 +8,7 @@ use ferredge_core::prelude::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::meta::MqttPayloadFormat;
 use crate::types::MqttResourceAttributes;
 
 /// Device definition bound to the MQTT endpoint and resource model.
@@ -26,8 +27,8 @@ pub struct MqttWillConfig {
     pub retain: bool,
     /// Optional MQTT v5 will delay interval in seconds.
     pub delay_interval_secs: Option<u32>,
-    /// Optional MQTT v5 will payload format indicator rendered as `"bytes"` or `"utf8"`.
-    pub payload_format: Option<String>,
+    /// Optional MQTT v5 will payload format indicator.
+    pub payload_format: Option<MqttPayloadFormat>,
     /// Optional MQTT v5 will message expiry interval in seconds.
     pub message_expiry_interval_secs: Option<u32>,
     /// Optional MQTT v5 will content type.

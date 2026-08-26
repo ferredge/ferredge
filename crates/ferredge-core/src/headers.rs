@@ -79,13 +79,9 @@ impl<'a> Headers<'a> {
         });
     }
 
-    /// Appends headers whose keys are not already present, first occurrence winning per `get`.
+    /// Appends the other collection's pairs after this one's, preserving every pair verbatim.
     pub fn merge(&mut self, other: Headers<'a>) {
-        for header in other.0 {
-            if self.get(header.key.as_ref()).is_none() {
-                self.0.push(header);
-            }
-        }
+        self.0.extend(other.0);
     }
 
     /// Iterates headers in preserved order.
@@ -130,5 +126,42 @@ impl From<Vec<(String, String)>> for Headers<'static> {
 impl<'a> From<Vec<(Cow<'a, str>, Cow<'a, str>)>> for Headers<'a> {
     fn from(value: Vec<(Cow<'a, str>, Cow<'a, str>)>) -> Self {
         Headers(value.into_iter().map(Header::from).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn merge_concatenates_preserving_duplicates_and_case_distinct_keys() {
+        let mut headers = Headers::from(vec![
+            ("Set-Cookie".to_string(), "a=1".to_string()),
+            ("X-Env".to_string(), "envelope".to_string()),
+        ]);
+        headers.merge(Headers::from(vec![
+            ("x-env".to_string(), "capture".to_string()),
+            ("Set-Cookie".to_string(), "b=2".to_string()),
+            ("Set-Cookie".to_string(), "b=2".to_string()),
+        ]));
+
+        let pairs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|header| (header.key.as_ref(), header.value.as_ref()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("Set-Cookie", "a=1"),
+                ("X-Env", "envelope"),
+                ("x-env", "capture"),
+                ("Set-Cookie", "b=2"),
+                ("Set-Cookie", "b=2"),
+            ]
+        );
+        assert_eq!(headers.get("set-cookie"), Some("a=1"));
     }
 }

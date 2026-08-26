@@ -252,6 +252,9 @@ pub enum MqttCommandConversionError {
     /// Extensions capture entry carries a name outside the documented vocabulary.
     #[error("extensions capture entry {key} has unknown value {value}")]
     InvalidExtensionName { key: &'static str, value: String },
+    /// Extensions capture entry stores a value type that does not match its documented key.
+    #[error("extensions capture entry {key} has a mismatched value type")]
+    InvalidExtensionType { key: &'static str },
 }
 
 /// Borrowed view carrying enough context to convert routed command into MQTT packets.

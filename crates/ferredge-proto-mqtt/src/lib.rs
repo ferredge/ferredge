@@ -89,7 +89,7 @@ pub use meta::{
     KEY_RETAIN_HANDLING, KEY_SHARED_GROUP, KEY_SUBSCRIPTION_IDENTIFIERS, KEY_TOPIC,
     KEY_TOPIC_ALIAS, MqttMessageOptions, MqttMeta, MqttPayloadFormat, MqttRetainHandling,
     MqttSubscriptionOptions, mqtt_payload_format_from_name, mqtt_payload_format_name,
-    mqtt_will_payload_format, qos_from_delivery, retain_handling_code, retain_handling_from_code,
+    qos_from_delivery, retain_handling_code, retain_handling_from_code,
 };
 pub use runtime::{MqttDecodedInbound, MqttInboundDecoder};
 pub use types::{
@@ -1403,7 +1403,7 @@ fn split_mqtt_extensions(
     }
 }
 
-/// Merges capture-carried user properties after the envelope headers, dropping already-present keys.
+/// Appends capture-carried user properties after the envelope headers, preserving every pair verbatim.
 fn merged_user_properties<'a>(
     mut headers: Headers<'a>,
     capture_headers: Option<Headers<'a>>,
@@ -1422,7 +1422,14 @@ fn planner_message_for_command<'a>(
     command: Command<'a>,
 ) -> Result<ferredge_bridge::BridgeMessage<'a>, MqttCommandConversionError> {
     match &command.intent {
-        Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
+        Intent::Send { channel, .. }
+        | Intent::Subscribe { channel, .. }
+        | Intent::Unsubscribe { channel } => {
+            if let Some(kind) = channel.kind
+                && kind != BrokerChannelKind::Topic
+            {
+                return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
+            }
             planner::command_to_messaging(command).map_err(Into::into)
         }
         _ => Err(MqttCommandConversionError::UnsupportedIntent),
