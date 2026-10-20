@@ -7,7 +7,9 @@ use ferredge_test_support::{
 use ferredge_core::prelude::*;
 
 use crate::{
-    ModbusDriver,
+    ModbusAsciiEndpointConfig, ModbusClientOptions, ModbusDriver, ModbusEndpoint,
+    ModbusReconnectConfig, ModbusRtuEndpointConfig, ModbusRtuOverTcpEndpointConfig,
+    ModbusTcpEndpointConfig, ModbusUdpEndpointConfig,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
 };
 const MAX_COIL_START_ADDR: u16 = 4013;
@@ -22,7 +24,7 @@ enum ModpollEndpoint {
     Serial { mode: &'static str, path: String },
 }
 
-fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
+fn make_driver(endpoint: ModbusEndpoint) -> ModbusDriver {
     let mut resources = Map::default();
     resources.insert(
         "holding_u16".to_string(),
@@ -128,7 +130,7 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
     );
 
     ModbusDriver::new(Device {
-        id: "diag-1".to_string(),
+        id: "diag-1".into(),
         name: "diagslave".to_string(),
         status: DeviceStatus::Online,
         endpoint,
@@ -169,7 +171,7 @@ fn modbus_options(persistent_session: bool, max_attempts: u32) -> ModbusClientOp
 }
 
 fn make_tcp_driver(port: u16, options: ModbusClientOptions) -> ModbusDriver {
-    make_driver(DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+    make_driver(ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port,
         options,
@@ -177,30 +179,28 @@ fn make_tcp_driver(port: u16, options: ModbusClientOptions) -> ModbusDriver {
 }
 
 fn make_rtu_over_tcp_driver(port: u16, options: ModbusClientOptions) -> ModbusDriver {
-    make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
-        ModbusRtuOverTcpEndpointConfig {
-            addr: "127.0.0.1".to_string(),
-            port,
-            options,
-        },
-    ))
+    make_driver(ModbusEndpoint::RtuOverTcp(ModbusRtuOverTcpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port,
+        options,
+    }))
 }
 
 #[cfg(unix)]
 fn make_rtu_driver(path: String, options: ModbusClientOptions) -> ModbusDriver {
-    make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+    make_driver(ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
         serial: serial_port_config(path),
         options,
     }))
 }
 
-fn write_command(resource: &str, payload: PayloadValue<'static>) -> Command {
+fn write_command(resource: &str, payload: PayloadValue<'static>) -> Command<'static> {
     Command {
-        id: format!("write-{resource}"),
+        id: format!("write-{resource}").into(),
         source_device_id: None,
-        target_device_id: "diag-1".to_string(),
+        target_device_id: "diag-1".to_string().into(),
         intent: Intent::Write {
-            resource: resource.to_string(),
+            resource: resource.to_string().into(),
             payload,
             options: RequestOptions::default(),
         },
@@ -208,13 +208,13 @@ fn write_command(resource: &str, payload: PayloadValue<'static>) -> Command {
     }
 }
 
-fn read_command(resource: &str) -> Command {
+fn read_command(resource: &str) -> Command<'static> {
     Command {
-        id: format!("read-{resource}"),
+        id: format!("read-{resource}").into(),
         source_device_id: None,
-        target_device_id: "diag-1".to_string(),
+        target_device_id: "diag-1".to_string().into(),
         intent: Intent::Read {
-            resource: resource.to_string(),
+            resource: resource.to_string().into(),
             options: RequestOptions::default(),
         },
         correlation: None,
@@ -232,14 +232,7 @@ fn expected_coil_read_payload(write_count: usize, read_count: u16) -> Vec<bool> 
 }
 
 fn payload_value_from_coils(coils: &[bool]) -> PayloadValue<'static> {
-    PayloadValue::List(
-        coils
-            .iter()
-            .copied()
-            .map(PayloadValue::Bool)
-            .collect::<Vec<_>>()
-            .into(),
-    )
+    PayloadValue::List(coils.iter().copied().map(PayloadValue::Bool).collect())
 }
 
 async fn assert_driver_coil_round_trip(
@@ -338,7 +331,7 @@ fn parse_modpoll_coils(stdout: &[u8]) -> Vec<bool> {
 #[test]
 fn diagslave_tcp_write_then_read_max_coils() {
     let guard = DiagslaveGuard::start("tcp");
-    let driver = make_driver(DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: guard.port(),
         options: ModbusClientOptions::default(),
@@ -382,7 +375,7 @@ fn native_diagslave_tcp_execute_command_roundtrip_holding_register() {
 #[test]
 fn diagslave_udp_write_then_read_max_coils() {
     let guard = DiagslaveGuard::start("udp");
-    let driver = make_driver(DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Udp(ModbusUdpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: guard.port(),
         options: ModbusClientOptions::default(),
@@ -413,13 +406,11 @@ fn diagslave_udp_write_then_read_max_coils() {
 #[test]
 fn diagslave_rtu_over_tcp_write_then_read_max_coils() {
     let guard = DiagslaveGuard::start("enc");
-    let driver = make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
-        ModbusRtuOverTcpEndpointConfig {
-            addr: "127.0.0.1".to_string(),
-            port: guard.port(),
-            options: ModbusClientOptions::default(),
-        },
-    ));
+    let driver = make_driver(ModbusEndpoint::RtuOverTcp(ModbusRtuOverTcpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port: guard.port(),
+        options: ModbusClientOptions::default(),
+    }));
     let modpoll = ModpollEndpoint::Tcp {
         mode: "enc",
         port: guard.port(),
@@ -451,7 +442,7 @@ fn diagslave_rtu_over_pty_write_then_read_max_coils() {
     let master_path = pty.master_path();
     // The socat-backed PTY master can briefly report Closed between non-persistent RTU requests.
     // Allow a few bounded reopen retries so the follow-up read remains stable on CI.
-    let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
         serial: serial_port_config(master_path.clone()),
         options: modbus_options(false, 3),
     }));
@@ -486,7 +477,7 @@ fn diagslave_ascii_over_pty_write_then_read_max_coils() {
     let master_path = pty.master_path();
     // Large ASCII PTY exchanges can briefly leave the socat-backed master unavailable on CI.
     // Keep the test non-persistent, but allow a few bounded reopen retries for the follow-up read.
-    let driver = make_driver(DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Ascii(ModbusAsciiEndpointConfig {
         serial: serial_port_config(master_path.clone()),
         options: modbus_options(false, 3),
     }));
@@ -516,7 +507,7 @@ fn diagslave_ascii_over_pty_write_then_read_max_coils() {
 #[test]
 fn diagslave_tcp_write_then_read_offset_coils() {
     let guard = DiagslaveGuard::start("tcp");
-    let driver = make_driver(DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: guard.port(),
         options: ModbusClientOptions::default(),
@@ -547,7 +538,7 @@ fn diagslave_tcp_write_then_read_offset_coils() {
 #[test]
 fn diagslave_udp_write_then_read_offset_coils() {
     let guard = DiagslaveGuard::start("udp");
-    let driver = make_driver(DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Udp(ModbusUdpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: guard.port(),
         options: ModbusClientOptions::default(),
@@ -578,13 +569,11 @@ fn diagslave_udp_write_then_read_offset_coils() {
 #[test]
 fn diagslave_rtu_over_tcp_write_then_read_offset_coils() {
     let guard = DiagslaveGuard::start("enc");
-    let driver = make_driver(DeviceEndpoint::modbus_rtu_over_tcp(
-        ModbusRtuOverTcpEndpointConfig {
-            addr: "127.0.0.1".to_string(),
-            port: guard.port(),
-            options: ModbusClientOptions::default(),
-        },
-    ));
+    let driver = make_driver(ModbusEndpoint::RtuOverTcp(ModbusRtuOverTcpEndpointConfig {
+        addr: "127.0.0.1".to_string(),
+        port: guard.port(),
+        options: ModbusClientOptions::default(),
+    }));
     let modpoll = ModpollEndpoint::Tcp {
         mode: "enc",
         port: guard.port(),
@@ -616,7 +605,7 @@ fn diagslave_rtu_over_pty_write_then_read_offset_coils() {
     let master_path = pty.master_path();
     // The socat-backed PTY master can briefly report Closed between non-persistent RTU requests.
     // Allow a few bounded reopen retries so the follow-up read remains stable on CI.
-    let driver = make_driver(DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
         serial: serial_port_config(master_path.clone()),
         options: modbus_options(false, 3),
     }));
@@ -649,7 +638,7 @@ fn diagslave_ascii_over_pty_write_then_read_offset_coils() {
     let pty = SerialPtyGuard::start();
     let _guard = DiagslaveGuard::start_serial("ascii", &pty.slave_path());
     let master_path = pty.master_path();
-    let driver = make_driver(DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
+    let driver = make_driver(ModbusEndpoint::Ascii(ModbusAsciiEndpointConfig {
         serial: serial_port_config(master_path.clone()),
         options: ModbusClientOptions::default(),
     }));

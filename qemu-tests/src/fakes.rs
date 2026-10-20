@@ -144,12 +144,7 @@ async fn net_task(mut runner: embassy_net::Runner<'static, TestDriver>) -> ! {
 
 /// Spawns an embassy-net stack over `driver` with a static address and wraps it in the
 /// ferredge adapter.
-pub fn make_net(
-    spawner: Spawner,
-    driver: TestDriver,
-    address: Ipv4Cidr,
-    seed: u64,
-) -> EmbassyNet {
+pub fn make_net(spawner: Spawner, driver: TestDriver, address: Ipv4Cidr, seed: u64) -> EmbassyNet {
     // Heap-leaked rather than StaticCell: this runs once per stack (4 total) and the
     // resources must outlive the never-ending runner task anyway.
     let resources: &'static mut StackResources<8> = Box::leak(Box::new(StackResources::new()));

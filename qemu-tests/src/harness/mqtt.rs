@@ -6,7 +6,10 @@ use alloc::{rc::Rc, string::ToString, vec, vec::Vec};
 use core::cell::RefCell;
 
 use ferredge_core::prelude::*;
-use ferredge_proto_mqtt::{MqttDriver, MqttListenerStatus};
+use ferredge_proto_mqtt::{
+    MqttConnectProperties, MqttDevice, MqttDriver, MqttEndpointConfig, MqttListenerStatus,
+    MqttProtocolVersion,
+};
 use ferredge_runtime_embassy::{EmbassyNet, EmbassyRuntime};
 
 use super::HOST_ADDR;
@@ -28,12 +31,12 @@ impl EventSink for CollectSink {
     }
 }
 
-fn mqtt_device(id: &str, client_id: &str) -> Device<ferredge_proto_mqtt::MqttResourceAttributes> {
+fn mqtt_device(id: &str, client_id: &str) -> MqttDevice {
     Device {
-        id: id.to_string(),
+        id: id.into(),
         name: "mosquitto".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
+        endpoint: MqttEndpointConfig {
             broker: alloc::format!("{HOST_ADDR}:41883"),
             client_id: client_id.to_string(),
             auth: None,
@@ -46,7 +49,7 @@ fn mqtt_device(id: &str, client_id: &str) -> Device<ferredge_proto_mqtt::MqttRes
             will: None,
             reconnect: BrokerReconnectConfig::default(),
             supported_versions: vec![MqttProtocolVersion::V5_0],
-        }),
+        },
         metadata: None,
         max_connections: Some(4),
         resources: Map::default(),
@@ -96,12 +99,12 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
 
     let subscribe = subscriber
         .native_packet_request(Command {
-            id: "harness-subscribe-1".to_string(),
+            id: "harness-subscribe-1".into(),
             source_device_id: None,
-            target_device_id: "harness-mqtt-sub".to_string(),
+            target_device_id: "harness-mqtt-sub".into(),
             intent: Intent::Subscribe {
                 channel: BrokerAddress {
-                    name: TOPIC.to_string(),
+                    name: TOPIC.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 options: BrokerSubscriptionOptions::default(),
@@ -122,12 +125,12 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
         .expect("mosquitto should accept the publisher connection");
     let publish = publisher
         .native_packet_request(Command {
-            id: "harness-publish-1".to_string(),
+            id: "harness-publish-1".into(),
             source_device_id: None,
-            target_device_id: "harness-mqtt-pub".to_string(),
+            target_device_id: "harness-mqtt-pub".into(),
             intent: Intent::Send {
                 channel: BrokerAddress {
-                    name: TOPIC.to_string(),
+                    name: TOPIC.into(),
                     kind: Some(BrokerChannelKind::Topic),
                 },
                 payload: PayloadValue::from(PAYLOAD).into_owned(),
@@ -158,7 +161,7 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
     let events = received.0.borrow();
     let event = events
         .iter()
-        .find(|event| matches!(&event.address, Address::Channel(topic) if topic == TOPIC))
+        .find(|event| matches!(&event.route, Route::Messaging { topic } if topic == TOPIC))
         .expect("received event should target the subscribed topic");
     assert_eq!(
         event.payload,
@@ -169,7 +172,10 @@ pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
     drop(events);
     log::debug!("subscriber received the published message");
 
-    publisher.stop().await.expect("publisher stop should succeed");
+    publisher
+        .stop()
+        .await
+        .expect("publisher stop should succeed");
     subscriber
         .stop()
         .await

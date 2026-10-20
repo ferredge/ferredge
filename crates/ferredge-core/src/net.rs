@@ -9,6 +9,7 @@ use crate::maybe::{MaybeSend, MaybeSync};
 
 /// Error returned by abstract async network operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum NetError {
     /// Remote endpoint closed the connection.
     #[error("network transport is closed")]

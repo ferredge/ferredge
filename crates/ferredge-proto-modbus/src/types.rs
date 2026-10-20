@@ -21,7 +21,7 @@ use crate::{StackNet, StackSerial};
 use crate::{
     StackRuntime,
     attributes::ModbusResourceAttributes,
-    convert::endpoint_options,
+    endpoint::ModbusDevice,
     transport::{ModbusTransport, StackTransport},
 };
 
@@ -115,7 +115,7 @@ pub(crate) enum ModbusValue<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ModbusCommandRef<'a> {
-    pub device: &'a Device<ModbusResourceAttributes>,
+    pub device: &'a ModbusDevice,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,19 +140,19 @@ impl ModbusNativePlan<'_> {
 }
 
 pub struct ModbusCommandPlanner<'a> {
-    device: &'a Device<ModbusResourceAttributes>,
+    device: &'a ModbusDevice,
 }
 
 /// Inbound Modbus response decoder bound to one originating command.
 pub struct ModbusResponseDecoderContext<'a> {
-    device: &'a Device<ModbusResourceAttributes>,
-    command: &'a Command,
+    device: &'a ModbusDevice,
+    command: &'a Command<'a>,
 }
 
 /// Decoded inbound Modbus response plus bound command context.
 pub struct ModbusDecodedResponse<'a, 'ctx> {
-    device: &'ctx Device<ModbusResourceAttributes>,
-    command: &'ctx Command,
+    device: &'ctx ModbusDevice,
+    command: &'ctx Command<'ctx>,
     response: &'a ModbusResponse,
 }
 
@@ -166,7 +166,7 @@ pub struct ModbusDecodedResponse<'a, 'ctx> {
 /// type-erased serial default.
 #[derive(Clone)]
 pub struct ModbusDriver<T: ModbusTransport = StackTransport> {
-    pub dvc: Device<ModbusResourceAttributes>,
+    pub dvc: ModbusDevice,
     pub(crate) runtime: StackRuntime,
     pub(crate) transport: T,
     pub(crate) persistent_session: Shared<RuntimeMutex<Option<T::Session>>>,
@@ -187,7 +187,7 @@ impl ModbusDriver {
     /// embassy stack has no ambient executor or network stack — construct with
     /// [`ModbusDriver::with_stack`] or [`ModbusDriver::with_transport`] there.
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-    pub fn new(dvc: Device<ModbusResourceAttributes>) -> Self {
+    pub fn new(dvc: ModbusDevice) -> Self {
         Self::with_stack(
             dvc,
             StackRuntime::default(),
@@ -204,12 +204,7 @@ where
 {
     /// Creates a new Modbus driver from device metadata plus an explicit runtime stack,
     /// serving every Modbus endpoint family through a [`StackTransport`].
-    pub fn with_stack(
-        dvc: Device<ModbusResourceAttributes>,
-        runtime: StackRuntime,
-        net: N,
-        serial: S,
-    ) -> Self {
+    pub fn with_stack(dvc: ModbusDevice, runtime: StackRuntime, net: N, serial: S) -> Self {
         Self::with_transport(dvc, runtime, StackTransport::new(net, serial))
     }
 }
@@ -217,11 +212,7 @@ where
 impl<T: ModbusTransport> ModbusDriver<T> {
     /// Creates a new Modbus driver from device metadata plus an explicit runtime and wire
     /// transport. The transport determines which endpoint families the driver can execute.
-    pub fn with_transport(
-        dvc: Device<ModbusResourceAttributes>,
-        runtime: StackRuntime,
-        transport: T,
-    ) -> Self {
+    pub fn with_transport(dvc: ModbusDevice, runtime: StackRuntime, transport: T) -> Self {
         Self {
             dvc,
             runtime: runtime.clone(),
@@ -230,14 +221,14 @@ impl<T: ModbusTransport> ModbusDriver<T> {
         }
     }
 
-    pub async fn execute_command(&self, command: Command) -> Result<ModbusResponse, String> {
+    pub async fn execute_command(&self, command: Command<'_>) -> Result<ModbusResponse, String> {
         let request = self.native_request(command).map_err(|e| e.to_string())?;
         self.execute(request).await
     }
 
     pub fn native_request(
         &self,
-        command: Command,
+        command: Command<'_>,
     ) -> Result<ModbusRequest, ModbusCommandConversionError> {
         let planner = ModbusCommandPlanner::new(&self.dvc);
         let codec = crate::ModbusBridgeCodec::new(&self.dvc);
@@ -247,12 +238,12 @@ impl<T: ModbusTransport> ModbusDriver<T> {
 
     pub fn bridge_request(
         &self,
-        command: Command,
+        command: Command<'_>,
     ) -> Result<ModbusRequest, ModbusCommandConversionError> {
         let register = match &command.intent {
             Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
-                let resource_def = self.dvc.resources.get(resource).ok_or_else(|| {
-                    ModbusCommandConversionError::UnknownResource(resource.clone())
+                let resource_def = self.dvc.resources.get(resource.as_ref()).ok_or_else(|| {
+                    ModbusCommandConversionError::UnknownResource(resource.to_string())
                 })?;
                 register_meta(&resource_def.resource_attributes)
             }
@@ -262,13 +253,7 @@ impl<T: ModbusTransport> ModbusDriver<T> {
         let message = planner::command_to_register_access(
             command,
             register,
-            endpoint_options(&self.dvc.endpoint)
-                .ok_or_else(|| {
-                    ModbusCommandConversionError::InvalidResource(
-                        "missing Modbus endpoint options".to_string(),
-                    )
-                })?
-                .unit_id,
+            self.dvc.endpoint.options().unit_id,
         )?;
         crate::ModbusBridgeCodec::new(&self.dvc).encode_ref(ModbusNativePlan::try_from(&message)?)
     }
@@ -276,20 +261,20 @@ impl<T: ModbusTransport> ModbusDriver<T> {
 
 impl<'a> ModbusCommandPlanner<'a> {
     /// Creates an outbound planner bound to one Modbus device definition.
-    pub fn new(device: &'a Device<ModbusResourceAttributes>) -> Self {
+    pub fn new(device: &'a ModbusDevice) -> Self {
         Self { device }
     }
 
     pub fn plan_ref<'b>(
         &self,
-        command: &'b Command,
+        command: &'b Command<'_>,
     ) -> Result<ModbusNativePlan<'b>, ModbusCommandConversionError> {
         let (resource, action, payload) = match &command.intent {
-            Intent::Read { resource, .. } => (resource.as_str(), RegisterAccessAction::Read, None),
+            Intent::Read { resource, .. } => (resource.as_ref(), RegisterAccessAction::Read, None),
             Intent::Write {
                 resource, payload, ..
             } => (
-                resource.as_str(),
+                resource.as_ref(),
                 RegisterAccessAction::Write,
                 Some(payload.as_borrowed()),
             ),
@@ -299,13 +284,7 @@ impl<'a> ModbusCommandPlanner<'a> {
             self.device.resources.get(resource).ok_or_else(|| {
                 ModbusCommandConversionError::UnknownResource(resource.to_string())
             })?;
-        let unit_id = endpoint_options(&self.device.endpoint)
-            .ok_or_else(|| {
-                ModbusCommandConversionError::InvalidResource(
-                    "missing Modbus endpoint options".to_string(),
-                )
-            })?
-            .unit_id;
+        let unit_id = self.device.endpoint.options().unit_id;
 
         Ok(ModbusNativePlan {
             resource: Cow::Borrowed(resource),
@@ -317,42 +296,62 @@ impl<'a> ModbusCommandPlanner<'a> {
     }
 }
 
-impl ProtocolPlanner<BridgeOutbound, BridgeMessage<'static>> for ModbusCommandPlanner<'_> {
+impl ProtocolPlanner<BridgeOutbound> for ModbusCommandPlanner<'_> {
     type Error = ModbusCommandConversionError;
+    type Planned<'a> = BridgeMessage<'a>;
 
-    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+    fn plan<'a>(&self, command: Command<'a>) -> Result<BridgeMessage<'a>, Self::Error> {
         let register = match &command.intent {
             Intent::Read { resource, .. } | Intent::Write { resource, .. } => {
-                let resource_def = self.device.resources.get(resource).ok_or_else(|| {
-                    ModbusCommandConversionError::UnknownResource(resource.clone())
-                })?;
+                let resource_def =
+                    self.device
+                        .resources
+                        .get(resource.as_ref())
+                        .ok_or_else(|| {
+                            ModbusCommandConversionError::UnknownResource(resource.to_string())
+                        })?;
                 register_meta(&resource_def.resource_attributes)
             }
             _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
         };
 
-        let unit_id = endpoint_options(&self.device.endpoint)
-            .ok_or_else(|| {
-                ModbusCommandConversionError::InvalidResource(
-                    "missing Modbus endpoint options".to_string(),
-                )
-            })?
-            .unit_id;
+        let unit_id = self.device.endpoint.options().unit_id;
 
         planner::command_to_register_access(command, register, unit_id).map_err(Into::into)
     }
 }
 
-impl ProtocolPlanner<NativeOutbound, ModbusNativePlan<'static>> for ModbusCommandPlanner<'_> {
+impl ProtocolPlanner<NativeOutbound> for ModbusCommandPlanner<'_> {
     type Error = ModbusCommandConversionError;
+    type Planned<'a> = ModbusNativePlan<'a>;
 
-    fn plan(&self, command: Command) -> Result<ModbusNativePlan<'static>, Self::Error> {
-        self.plan_ref(&command).map(ModbusNativePlan::into_owned)
+    fn plan<'a>(&self, command: Command<'a>) -> Result<ModbusNativePlan<'a>, Self::Error> {
+        let (resource, action, payload) = match command.intent {
+            Intent::Read { resource, .. } => (resource, RegisterAccessAction::Read, None),
+            Intent::Write {
+                resource, payload, ..
+            } => (resource, RegisterAccessAction::Write, Some(payload)),
+            _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
+        };
+        let resource_def = self
+            .device
+            .resources
+            .get(resource.as_ref())
+            .ok_or_else(|| ModbusCommandConversionError::UnknownResource(resource.to_string()))?;
+        let unit_id = self.device.endpoint.options().unit_id;
+
+        Ok(ModbusNativePlan {
+            register: register_meta(&resource_def.resource_attributes),
+            resource: resource.into(),
+            action,
+            payload,
+            unit_id,
+        })
     }
 }
 
 impl<'a> ModbusResponseDecoderContext<'a> {
-    pub fn new(device: &'a Device<ModbusResourceAttributes>, command: &'a Command) -> Self {
+    pub fn new(device: &'a ModbusDevice, command: &'a Command<'a>) -> Self {
         Self { device, command }
     }
 
@@ -386,36 +385,33 @@ where
     fn try_from(value: ModbusDecodedResponse<'a, 'ctx>) -> Result<Self, Self::Error> {
         let self_ = value;
         let resource = match &self_.command.intent {
-            Intent::Read { resource, .. } | Intent::Write { resource, .. } => resource.as_str(),
+            Intent::Read { resource, .. } | Intent::Write { resource, .. } => resource.as_ref(),
             _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
         };
 
-        Ok(RoutedMessage::Result(RoutedResult {
-            source: EndpointRef {
-                device_id: self_.device.id.clone(),
-                protocol: DeviceProtocol::Modbus,
-            },
-            result: CommandResult {
-                command_id: self_.command.id.clone(),
-                device_id: self_.device.id.clone(),
-                state: DeliveryState::Completed,
-                payload: Some(self_.response.payload()?),
-                error: None,
-                correlation: self_
+        Ok(RoutedMessage::Result(RoutedResult::new(
+            EndpointRef::new(self_.device.id.clone(), ProtocolId::MODBUS),
+            CommandResult::new(
+                self_.command.id.clone(),
+                self_.device.id.clone(),
+                DeliveryState::Completed,
+                Some(self_.response.payload()?),
+                None,
+                self_
                     .command
                     .correlation
                     .as_ref()
                     .map(Correlation::as_borrowed),
-            },
-            transport: None,
-        }))
+            ),
+            None,
+        )))
         .map(|message| match message {
             RoutedMessage::Result(mut result) => {
                 result.result.correlation = result.result.correlation.or_else(|| {
-                    Some(Correlation {
-                        request_id: Cow::Borrowed(self_.command.id.as_str()),
-                        reply_to: Some(Address::Resource(Cow::Borrowed(resource))),
-                    })
+                    Some(Correlation::new(
+                        self_.command.id.clone(),
+                        Some(Address::Resource(Cow::Borrowed(resource))),
+                    ))
                 });
                 RoutedMessage::Result(result)
             }
@@ -449,7 +445,7 @@ impl<'a> TryFrom<&'a BridgeMessage<'a>> for ModbusNativePlan<'a> {
         let BridgeOp::RegisterAccess(operation) = &command.operation else {
             return Err(ModbusCommandConversionError::InvalidBridgeMessage);
         };
-        let ferredge_bridge::BridgeRoute::AddressedAccess {
+        let Route::AddressedAccess {
             resource,
             access,
             node_id,
@@ -461,10 +457,7 @@ impl<'a> TryFrom<&'a BridgeMessage<'a>> for ModbusNativePlan<'a> {
         Ok(ModbusNativePlan {
             resource: resource.clone(),
             action: operation.action.clone(),
-            payload: command
-                .payload
-                .as_ref()
-                .map(payload_value_from_bridge_payload),
+            payload: command.payload.as_ref().map(PayloadValue::as_borrowed),
             register: access.clone(),
             unit_id: node_id.unwrap_or(1) as u8,
         })
@@ -488,58 +481,15 @@ impl ModbusResponse {
     }
 }
 
-fn payload_value_from_bridge_payload<'a>(
-    payload: &'a ferredge_bridge::BridgePayload<'a>,
-) -> PayloadValue<'a> {
-    match payload {
-        ferredge_bridge::BridgePayload::Empty => PayloadValue::Null,
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::Bool(value)) => {
-            PayloadValue::Bool(*value)
-        }
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::I64(value)) => {
-            PayloadValue::I64(*value)
-        }
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::U64(value)) => {
-            PayloadValue::U64(*value)
-        }
-        ferredge_bridge::BridgePayload::Scalar(ferredge_bridge::BridgeScalar::F64(value)) => {
-            PayloadValue::F64(*value)
-        }
-        ferredge_bridge::BridgePayload::Text(value) => {
-            PayloadValue::String(Cow::Borrowed(value.as_ref()))
-        }
-        ferredge_bridge::BridgePayload::Binary(value) => {
-            PayloadValue::Bytes(Cow::Borrowed(value.as_ref()))
-        }
-        ferredge_bridge::BridgePayload::Sequence(values) => PayloadValue::List(Cow::Owned(
-            values
-                .iter()
-                .map(payload_value_from_bridge_payload)
-                .collect(),
-        )),
-        ferredge_bridge::BridgePayload::Object(values) => PayloadValue::Map(Cow::Owned(
-            values
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        Cow::Borrowed(key.as_ref()),
-                        payload_value_from_bridge_payload(value),
-                    )
-                })
-                .collect(),
-        )),
-    }
-}
-
 fn register_meta(attributes: &ModbusResourceAttributes) -> ferredge_bridge::AddressedAccessMeta {
-    ferredge_bridge::AddressedAccessMeta {
-        address: u32::from(attributes.address),
-        domain: match attributes.register_kind {
+    ferredge_bridge::AddressedAccessMeta::new(
+        u32::from(attributes.address),
+        match attributes.register_kind {
             crate::attributes::ModbusRegisterKind::Coil => "coil".into(),
             crate::attributes::ModbusRegisterKind::DiscreteInput => "discrete-input".into(),
             crate::attributes::ModbusRegisterKind::HoldingRegister => "holding-register".into(),
             crate::attributes::ModbusRegisterKind::InputRegister => "input-register".into(),
         },
-        quantity: attributes.quantity,
-    }
+        attributes.quantity,
+    )
 }

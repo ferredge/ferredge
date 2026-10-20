@@ -7,6 +7,7 @@ use crate::sync::AsyncMutex;
 
 /// Error returned by runtime-backed task handles.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TaskJoinError {
     /// Task was cancelled or aborted before successful completion.
     #[error("task was cancelled")]
@@ -18,6 +19,7 @@ pub enum TaskJoinError {
 
 /// Error returned by runtime-backed channel operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ChannelError {
     /// Channel is full and cannot currently accept more messages.
     #[error("channel is full")]

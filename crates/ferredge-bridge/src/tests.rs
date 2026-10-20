@@ -1,33 +1,29 @@
-use alloc::{string::ToString, vec, vec::Vec};
+use alloc::{string::ToString, vec};
 
 use ferredge_core::prelude::{
-    Address, BrokerAddress, Command, CommandResult, Correlation, DeliveryGuarantee, DeviceProtocol,
-    EndpointRef, Intent, PayloadValue, RequestOptions, RoutedResult,
+    Address, BrokerAddress, Command, CommandResult, Correlation, DeliveryGuarantee, EndpointRef,
+    Intent, MetaValue, PayloadValue, ProtocolId, RequestOptions, RoutedResult, TransportMeta,
 };
 
 use crate::{
-    BridgeFault, BridgeFaultCategory, BridgeMessage, BridgePayload, BridgePlannerError,
-    BridgeResult, BridgeRoute, BridgeTransportMeta, planner,
+    BridgeFault, BridgeFaultCategory, BridgeMessage, BridgeOutcome, BridgePlannerError, Route,
+    planner,
 };
 
 #[test]
 fn payload_roundtrip_preserves_binary_and_structure() {
-    let payload = PayloadValue::Map(
-        vec![
-            (
-                "text".to_string().into(),
-                PayloadValue::String("hello".to_string().into()),
-            ),
-            (
-                "bytes".to_string().into(),
-                PayloadValue::Bytes(vec![1, 2, 3].into()),
-            ),
-        ]
-        .into(),
-    );
+    let payload = PayloadValue::Map(vec![
+        (
+            "text".to_string().into(),
+            PayloadValue::String("hello".to_string().into()),
+        ),
+        (
+            "bytes".to_string().into(),
+            PayloadValue::Bytes(vec![1, 2, 3].into()),
+        ),
+    ]);
 
-    let bridge = BridgePayload::from(payload.clone());
-    let roundtrip = PayloadValue::from(bridge);
+    let roundtrip = payload.as_borrowed().into_owned();
 
     assert_eq!(roundtrip, payload);
 }
@@ -35,18 +31,18 @@ fn payload_roundtrip_preserves_binary_and_structure() {
 #[test]
 fn request_response_planner_preserves_correlation_and_resource() {
     let command = Command {
-        id: "cmd-1".to_string(),
-        source_device_id: Some("src".to_string()),
-        target_device_id: "dst".to_string(),
+        id: "cmd-1".into(),
+        source_device_id: Some("src".into()),
+        target_device_id: "dst".into(),
         intent: Intent::Write {
-            resource: "setpoint".to_string(),
+            resource: "setpoint".into(),
             payload: PayloadValue::Bytes(vec![9, 1].into()),
             options: RequestOptions::default(),
         },
-        correlation: Some(Correlation {
-            request_id: "root".to_string().into(),
-            reply_to: Some(Address::Resource("/reply".to_string().into())),
-        }),
+        correlation: Some(Correlation::new(
+            "root".to_string().into(),
+            Some(Address::Resource("/reply".to_string().into())),
+        )),
     };
 
     let BridgeMessage::Command(message) = planner::command_to_request_response(command).unwrap()
@@ -56,7 +52,7 @@ fn request_response_planner_preserves_correlation_and_resource() {
 
     assert!(matches!(
         message.route,
-        BridgeRoute::RequestResponse { resource, .. } if resource == "setpoint"
+        Route::RequestResponse { resource, .. } if resource == "setpoint"
     ));
     assert_eq!(
         message
@@ -67,28 +63,32 @@ fn request_response_planner_preserves_correlation_and_resource() {
     );
     assert_eq!(
         message.payload,
-        Some(BridgePayload::Binary(vec![9, 1].into()))
+        Some(PayloadValue::Bytes(vec![9, 1].into()))
     );
 }
 
 #[test]
-fn messaging_planner_preserves_topic_and_correlation_id() {
+fn messaging_planner_preserves_topic_and_extension_capture() {
+    let mut extensions = TransportMeta::new(ProtocolId::MQTT);
+    extensions.set("response-topic", MetaValue::Str("topic/reply".into()));
+    extensions.headers = Some(ferredge_core::prelude::Headers::from(vec![(
+        "trace".to_string(),
+        "abc".to_string(),
+    )]));
     let command = Command {
-        id: "cmd-2".to_string(),
+        id: "cmd-2".into(),
         source_device_id: None,
-        target_device_id: "mqtt".to_string(),
+        target_device_id: "mqtt".into(),
         intent: Intent::Send {
             channel: ferredge_core::prelude::BrokerAddress {
-                name: "topic/a".to_string(),
+                name: "topic/a".into(),
                 kind: None,
             },
             payload: PayloadValue::String("hello".to_string().into()),
             options: ferredge_core::prelude::BrokerMessageOptions {
                 delivery: Some(DeliveryGuarantee::AtLeastOnce),
-                headers: Vec::new(),
-                reply_to: Some("topic/reply".to_string()),
-                correlation_id: Some("corr-1".to_string()),
-                protocol: None,
+                headers: Default::default(),
+                extensions: Some(extensions),
             },
         },
         correlation: None,
@@ -100,26 +100,27 @@ fn messaging_planner_preserves_topic_and_correlation_id() {
 
     assert!(matches!(
         message.route,
-        BridgeRoute::Messaging { topic } if topic == "topic/a"
+        Route::Messaging { topic } if topic == "topic/a"
     ));
-    let BridgeTransportMeta::Mqtt(transport) = message.transport.expect("mqtt transport expected")
-    else {
-        panic!("expected mqtt transport");
-    };
-    assert_eq!(transport.correlation_data.as_deref(), Some("corr-1"));
-    assert_eq!(transport.response_topic.as_deref(), Some("topic/reply"));
-    assert!(message.headers.is_none());
+    let transport = message.transport.expect("mqtt transport expected");
+    assert_eq!(transport.protocol, ProtocolId::MQTT);
+    assert_eq!(transport.get_str("response-topic"), Some("topic/reply"));
+    assert!(transport.headers.is_none());
+    let headers = message
+        .headers
+        .expect("capture headers become envelope headers");
+    assert_eq!(headers.get("trace"), Some("abc"));
 }
 
 #[test]
 fn planners_reject_unsupported_intents() {
     let subscribe_command = Command {
-        id: "cmd-unsupported".to_string(),
+        id: "cmd-unsupported".into(),
         source_device_id: None,
-        target_device_id: "dst".to_string(),
+        target_device_id: "dst".into(),
         intent: Intent::Subscribe {
             channel: BrokerAddress {
-                name: "alerts".to_string(),
+                name: "alerts".into(),
                 kind: None,
             },
             options: Default::default(),
@@ -127,11 +128,11 @@ fn planners_reject_unsupported_intents() {
         correlation: None,
     };
     let read_command = Command {
-        id: "cmd-read-unsupported".to_string(),
+        id: "cmd-read-unsupported".into(),
         source_device_id: None,
-        target_device_id: "dst".to_string(),
+        target_device_id: "dst".into(),
         intent: Intent::Read {
-            resource: "temp".to_string(),
+            resource: "temp".into(),
             options: RequestOptions::default(),
         },
         correlation: None,
@@ -144,11 +145,7 @@ fn planners_reject_unsupported_intents() {
     assert_eq!(
         planner::command_to_register_access(
             subscribe_command,
-            crate::AddressedAccessMeta {
-                address: 1,
-                domain: "holding-register".into(),
-                quantity: None,
-            },
+            crate::AddressedAccessMeta::new(1, "holding-register".into(), None),
             1,
         )
         .unwrap_err(),
@@ -162,102 +159,96 @@ fn planners_reject_unsupported_intents() {
 
 #[test]
 fn routed_result_to_bridge_preserves_progress_success_and_failure() {
-    let source = EndpointRef {
-        device_id: "mqtt-1".to_string(),
-        protocol: DeviceProtocol::MQTT,
-    };
-    let correlation = Some(Correlation {
-        request_id: "corr-1".to_string().into(),
-        reply_to: Some(Address::Channel("reply/topic".to_string().into())),
-    });
+    let source = EndpointRef::new("mqtt-1".into(), ProtocolId::MQTT);
+    let correlation = Some(Correlation::new(
+        "corr-1".to_string().into(),
+        Some(Address::Channel("reply/topic".to_string().into())),
+    ));
 
-    let progress = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-progress".to_string(),
-            device_id: "mqtt-1".to_string(),
-            state: ferredge_core::prelude::DeliveryState::Accepted,
-            payload: None,
-            error: None,
-            correlation: correlation.clone(),
-        },
-        transport: None,
-    };
-    let success = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-success".to_string(),
-            device_id: "mqtt-1".to_string(),
-            state: ferredge_core::prelude::DeliveryState::Completed,
-            payload: Some(PayloadValue::Bytes(vec![4, 2].into())),
-            error: None,
-            correlation: correlation.clone(),
-        },
-        transport: None,
-    };
-    let rejected = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-rejected".to_string(),
-            device_id: "mqtt-1".to_string(),
-            state: ferredge_core::prelude::DeliveryState::Rejected,
-            payload: Some(PayloadValue::String("partial".to_string().into())),
-            error: Some("denied".to_string().into()),
-            correlation: correlation.clone(),
-        },
-        transport: None,
-    };
-    let timed_out = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-timeout".to_string(),
-            device_id: "mqtt-1".to_string(),
-            state: ferredge_core::prelude::DeliveryState::TimedOut,
-            payload: None,
-            error: Some("timed out".to_string().into()),
+    let progress = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-progress".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::Accepted,
+            None,
+            None,
+            correlation.clone(),
+        ),
+        None,
+    );
+    let success = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-success".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::Completed,
+            Some(PayloadValue::Bytes(vec![4, 2].into())),
+            None,
+            correlation.clone(),
+        ),
+        None,
+    );
+    let rejected = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-rejected".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::Rejected,
+            Some(PayloadValue::String("partial".to_string().into())),
+            Some("denied".to_string().into()),
+            correlation.clone(),
+        ),
+        None,
+    );
+    let timed_out = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-timeout".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::TimedOut,
+            None,
+            Some("timed out".to_string().into()),
             correlation,
-        },
-        transport: None,
-    };
+        ),
+        None,
+    );
 
     let BridgeMessage::Result(progress) = planner::routed_result_to_bridge(progress) else {
         panic!("expected bridge result");
     };
     assert!(matches!(
-        progress,
-        BridgeResult::Progress {
-            command_id,
+        progress.outcome,
+        BridgeOutcome::Progress {
             state: ferredge_core::prelude::DeliveryState::Accepted,
-            correlation: Some(_),
-            ..
-        } if command_id == "cmd-progress"
+        }
     ));
+    assert_eq!(progress.meta.command_id, "cmd-progress");
+    assert!(progress.meta.correlation.is_some());
 
     let BridgeMessage::Result(success) = planner::routed_result_to_bridge(success) else {
         panic!("expected bridge result");
     };
+    assert_eq!(success.meta.command_id, "cmd-success");
     assert!(matches!(
-        success,
-        BridgeResult::Success {
-            command_id,
-            payload: Some(BridgePayload::Binary(bytes)),
-            ..
-        } if command_id == "cmd-success" && bytes == vec![4, 2]
+        success.outcome,
+        BridgeOutcome::Success {
+            payload: Some(PayloadValue::Bytes(bytes)),
+        } if bytes == vec![4, 2]
     ));
 
     let BridgeMessage::Result(rejected) = planner::routed_result_to_bridge(rejected) else {
         panic!("expected bridge result");
     };
-    match rejected {
-        BridgeResult::Failure {
-            command_id,
+    assert_eq!(rejected.meta.command_id, "cmd-rejected");
+    assert!(rejected.meta.correlation.is_some());
+    match rejected.outcome {
+        BridgeOutcome::Failure {
             state,
             error,
             fault,
-            correlation,
             ..
         } => {
-            assert_eq!(command_id, "cmd-rejected");
             assert_eq!(state, ferredge_core::prelude::DeliveryState::Rejected);
             assert_eq!(error.as_deref(), Some("denied"));
             assert_eq!(fault.category, BridgeFaultCategory::Rejected);
@@ -265,32 +256,30 @@ fn routed_result_to_bridge_preserves_progress_success_and_failure() {
             assert!(!fault.retryable);
             assert_eq!(
                 fault.source.and_then(|source| source.protocol),
-                Some(DeviceProtocol::MQTT)
+                Some(ProtocolId::MQTT)
             );
-            assert!(correlation.is_some());
         }
-        other => panic!("expected failure bridge result, got {other:?}"),
+        other => panic!("expected failure bridge outcome, got {other:?}"),
     }
 
     let BridgeMessage::Result(timed_out) = planner::routed_result_to_bridge(timed_out) else {
         panic!("expected bridge result");
     };
-    match timed_out {
-        BridgeResult::Failure {
-            command_id,
+    assert_eq!(timed_out.meta.command_id, "cmd-timeout");
+    match timed_out.outcome {
+        BridgeOutcome::Failure {
             state,
             error,
             fault,
             ..
         } => {
-            assert_eq!(command_id, "cmd-timeout");
             assert_eq!(state, ferredge_core::prelude::DeliveryState::TimedOut);
             assert_eq!(error.as_deref(), Some("timed out"));
             assert_eq!(fault.category, BridgeFaultCategory::Timeout);
             assert_eq!(fault.detail.as_deref(), Some("timed out"));
             assert!(fault.retryable);
         }
-        other => panic!("expected failure bridge result, got {other:?}"),
+        other => panic!("expected failure bridge outcome, got {other:?}"),
     }
 }
 
@@ -299,7 +288,7 @@ fn bridge_fault_preserves_category_code_and_retryability() {
     let fault = BridgeFault::protocol(
         "0x02",
         true,
-        DeviceProtocol::Modbus,
+        ProtocolId::MODBUS,
         Some("illegal data address".to_string()),
     );
 
