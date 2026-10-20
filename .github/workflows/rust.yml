@@ -21,6 +21,11 @@ jobs:
       with:
         toolchain: stable
         override: true
+
+    - uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+      with:
+        tool: cargo-nextest
+
     - name: Cache modbusdriver tools
       id: cache-modbusdriver-tools
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.2.3
@@ -55,8 +60,10 @@ jobs:
 
         ./scripts/install-modbusdriver.sh
 
+    # nextest runs one process per test: the pty-backed diagslave tests are
+    # sensitive to in-process thread contention under plain `cargo test`.
     - name: Run integration tests
-      run: cargo test --workspace --verbose --features integration
+      run: cargo nextest run --workspace --features integration
 
   embedded:
     runs-on: ubuntu-latest
