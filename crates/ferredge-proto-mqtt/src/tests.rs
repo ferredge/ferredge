@@ -46,7 +46,7 @@ const TEST_KEEPALIVE_ASSERT_DELAY_MS: u64 = 1_500;
 
 fn make_driver(broker: String, supported_versions: Vec<MqttProtocolVersion>) -> MqttDriver {
     MqttDriver::new(Device {
-        id: "mqtt-device-1".to_string(),
+        id: "mqtt-device-1".into(),
         name: "MQTT Device".to_string(),
         status: DeviceStatus::Online,
         endpoint: MqttEndpointConfig {
@@ -1331,7 +1331,7 @@ fn inbound_publish_packet_converts_to_routed_event() {
     let message = routed_message_from_packet(
         &mut HashMap::new(),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Publish(publish),
     )
     .expect("publish packet should convert");
@@ -1392,11 +1392,11 @@ fn inbound_reply_publish_converts_to_routed_result_when_correlation_matches() {
         &mut HashMap::from([(
             "corr-77".to_string(),
             crate::runtime::PendingReplyRoute {
-                command_id: "cmd-77".to_string(),
+                command_id: "cmd-77".into(),
                 reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
             },
         )]),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Publish(publish),
     )
     .expect("reply publish should convert");
@@ -1443,14 +1443,14 @@ fn inbound_reply_publish_consumes_pending_reply_route_once() {
     let mut pending_reply_routes = HashMap::from([(
         "corr-once".to_string(),
         crate::runtime::PendingReplyRoute {
-            command_id: "cmd-once".to_string(),
+            command_id: "cmd-once".into(),
             reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
         },
     )]);
     let first = routed_message_from_packet(
         &mut HashMap::new(),
         &mut pending_reply_routes,
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Publish(publish.clone()),
     )
     .expect("first reply should convert");
@@ -1460,7 +1460,7 @@ fn inbound_reply_publish_consumes_pending_reply_route_once() {
     let second = routed_message_from_packet(
         &mut HashMap::new(),
         &mut pending_reply_routes,
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Publish(publish),
     )
     .expect("second publish should convert");
@@ -1476,9 +1476,9 @@ fn v5_puback_failure_converts_to_rejected_result_with_reason_codes() {
         .unwrap();
 
     let message = routed_message_from_packet(
-        &mut HashMap::from([(42u16, "cmd-42".to_string())]),
+        &mut HashMap::from([(42u16, "cmd-42".into())]),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Puback(puback),
     )
     .expect("puback packet should convert");
@@ -1509,9 +1509,9 @@ fn v5_puback_success_converts_to_completed_result() {
         .unwrap();
 
     let message = routed_message_from_packet(
-        &mut HashMap::from([(41u16, "cmd-41".to_string())]),
+        &mut HashMap::from([(41u16, "cmd-41".into())]),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Puback(puback),
     )
     .expect("puback packet should convert");
@@ -1541,9 +1541,9 @@ fn v5_suback_partial_failure_converts_to_rejected_result_with_reason_codes() {
         .unwrap();
 
     let message = routed_message_from_packet(
-        &mut HashMap::from([(7u16, "cmd-sub-7".to_string())]),
+        &mut HashMap::from([(7u16, "cmd-sub-7".into())]),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Suback(suback),
     )
     .expect("suback packet should convert");
@@ -1576,9 +1576,9 @@ fn v5_suback_success_converts_to_completed_result() {
         .unwrap();
 
     let message = routed_message_from_packet(
-        &mut HashMap::from([(6u16, "cmd-sub-6".to_string())]),
+        &mut HashMap::from([(6u16, "cmd-sub-6".into())]),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Suback(suback),
     )
     .expect("suback packet should convert");
@@ -1605,9 +1605,9 @@ fn v5_unsuback_failure_converts_to_rejected_result_with_reason_codes() {
         .unwrap();
 
     let message = routed_message_from_packet(
-        &mut HashMap::from([(8u16, "cmd-unsub-8".to_string())]),
+        &mut HashMap::from([(8u16, "cmd-unsub-8".into())]),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Unsuback(unsuback),
     )
     .expect("unsuback packet should convert");
@@ -1638,7 +1638,7 @@ fn v5_disconnect_failure_converts_to_rejected_transport_result() {
     let message = routed_message_from_packet(
         &mut HashMap::new(),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Disconnect(disconnect),
     )
     .expect("disconnect packet should convert");
@@ -1669,7 +1669,7 @@ fn v5_disconnect_normal_converts_to_completed_transport_result() {
     let message = routed_message_from_packet(
         &mut HashMap::new(),
         &mut HashMap::new(),
-        "mqtt-device-1",
+        &"mqtt-device-1".into(),
         mqtt::packet::Packet::V5_0Disconnect(disconnect),
     )
     .expect("disconnect packet should convert");
@@ -2016,7 +2016,7 @@ fn mqtt_listener_keeps_running_with_ping_response() {
         return;
     };
     let driver = MqttDriver::new(Device {
-        id: "mqtt-device-keepalive".to_string(),
+        id: "mqtt-device-keepalive".into(),
         name: "MQTT Keepalive Device".to_string(),
         status: DeviceStatus::Online,
         endpoint: MqttEndpointConfig {

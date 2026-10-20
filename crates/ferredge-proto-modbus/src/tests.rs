@@ -196,7 +196,7 @@ fn make_driver(endpoint: ModbusEndpoint) -> ModbusDriver {
     );
 
     ModbusDriver::new(Device {
-        id: "dvc-1".to_string(),
+        id: "dvc-1".into(),
         name: "modbus-test".to_string(),
         status: DeviceStatus::Online,
         endpoint,

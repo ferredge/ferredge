@@ -342,7 +342,7 @@ impl ProtocolPlanner<NativeOutbound> for ModbusCommandPlanner<'_> {
 
         Ok(ModbusNativePlan {
             register: register_meta(&resource_def.resource_attributes),
-            resource,
+            resource: resource.into(),
             action,
             payload,
             unit_id,
@@ -392,8 +392,8 @@ where
         Ok(RoutedMessage::Result(RoutedResult::new(
             EndpointRef::new(self_.device.id.clone(), ProtocolId::MODBUS),
             CommandResult::new(
-                Cow::Borrowed(self_.command.id.as_ref()),
-                Cow::Borrowed(self_.device.id.as_str()),
+                self_.command.id.clone(),
+                self_.device.id.clone(),
                 DeliveryState::Completed,
                 Some(self_.response.payload()?),
                 None,
@@ -409,7 +409,7 @@ where
             RoutedMessage::Result(mut result) => {
                 result.result.correlation = result.result.correlation.or_else(|| {
                     Some(Correlation::new(
-                        Cow::Borrowed(self_.command.id.as_ref()),
+                        self_.command.id.clone(),
                         Some(Address::Resource(Cow::Borrowed(resource))),
                     ))
                 });

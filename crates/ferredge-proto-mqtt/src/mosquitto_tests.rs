@@ -75,7 +75,7 @@ fn make_driver_with_config(
     session_expiry_secs: Option<u32>,
 ) -> MqttDriver {
     MqttDriver::new(Device {
-        id: device_id,
+        id: device_id.into(),
         name: "MQTT Mosquitto Device".to_string(),
         status: DeviceStatus::Online,
         endpoint: MqttEndpointConfig {

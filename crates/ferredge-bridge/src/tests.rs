@@ -159,7 +159,7 @@ fn planners_reject_unsupported_intents() {
 
 #[test]
 fn routed_result_to_bridge_preserves_progress_success_and_failure() {
-    let source = EndpointRef::new("mqtt-1".to_string(), ProtocolId::MQTT);
+    let source = EndpointRef::new("mqtt-1".into(), ProtocolId::MQTT);
     let correlation = Some(Correlation::new(
         "corr-1".to_string().into(),
         Some(Address::Channel("reply/topic".to_string().into())),

@@ -42,7 +42,7 @@ pub async fn run(spawner: Spawner, runtime: &EmbassyRuntime) {
 
     let driver = MqttDriver::with_stack(
         Device {
-            id: "mqtt-device-1".to_string(),
+            id: "mqtt-device-1".into(),
             name: "MQTT Device".to_string(),
             status: DeviceStatus::Online,
             endpoint: MqttEndpointConfig {

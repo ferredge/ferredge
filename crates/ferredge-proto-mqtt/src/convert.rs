@@ -77,7 +77,7 @@ fn mqtt_payload_bytes(payload: &PayloadValue) -> Result<Vec<u8>, MqttCommandConv
 }
 
 struct PublishView<'a> {
-    command_id: &'a str,
+    command_id: &'a CommandId,
     topic: &'a str,
     payload: Vec<u8>,
     delivery: Option<DeliveryGuarantee>,
@@ -94,7 +94,7 @@ struct PublishView<'a> {
 }
 
 struct SubscribeView<'a> {
-    command_id: &'a str,
+    command_id: &'a CommandId,
     topic: &'a str,
     delivery: Option<DeliveryGuarantee>,
     durable_name: Option<&'a str>,
@@ -137,7 +137,7 @@ fn publish_view_from_bridge<'a>(
     };
     let mqtt = mqtt_capture_view(bridge.transport.as_ref())?;
     Ok(PublishView {
-        command_id: bridge.id.as_ref(),
+        command_id: &bridge.id,
         topic,
         payload: mqtt_payload_bytes(
             bridge
@@ -181,7 +181,7 @@ fn subscription_view_from_bridge<'a>(
     };
     let mqtt = mqtt_capture_view(bridge.transport.as_ref())?;
     Ok(SubscribeView {
-        command_id: bridge.id.as_ref(),
+        command_id: &bridge.id,
         topic: channel,
         delivery: operation.delivery,
         durable_name: operation.durable_name.as_deref(),
@@ -228,7 +228,7 @@ fn publish_view_from_native_plan<'a>(
         topic_alias: *topic_alias,
         reply_to: reply_to.as_ref().and_then(channel_reply_to),
         response_topic: response_topic.as_deref().map(Cow::Borrowed),
-        correlation_id: correlation_id.as_deref().map(ToString::to_string),
+        correlation_id: correlation_id.clone().map(String::from),
         correlation_data: correlation_data.as_deref().map(<[u8]>::to_vec),
         projected_user_properties: user_properties
             .iter()
@@ -378,7 +378,7 @@ fn build_publish_packet(
             builder
                 .build()
                 .map(|packet| MqttPacketRequest {
-                    command_id: publish.command_id.to_string(),
+                    command_id: publish.command_id.clone(),
                     packet: MqttWirePacket::V5Publish(packet),
                 })
                 .map_err(Into::into)
@@ -396,7 +396,7 @@ fn build_publish_packet(
             builder
                 .build()
                 .map(|packet| MqttPacketRequest {
-                    command_id: publish.command_id.to_string(),
+                    command_id: publish.command_id.clone(),
                     packet: MqttWirePacket::V3Publish(packet),
                 })
                 .map_err(Into::into)
@@ -427,7 +427,7 @@ fn build_subscribe_packet(
                 .props(props)
                 .build()
                 .map(|packet| MqttPacketRequest {
-                    command_id: subscription.command_id.to_string(),
+                    command_id: subscription.command_id.clone(),
                     packet: MqttWirePacket::V5Subscribe(packet),
                 })
                 .map_err(Into::into)
@@ -439,7 +439,7 @@ fn build_subscribe_packet(
                 .entries(vec![entry])
                 .build()
                 .map(|packet| MqttPacketRequest {
-                    command_id: subscription.command_id.to_string(),
+                    command_id: subscription.command_id.clone(),
                     packet: MqttWirePacket::V3Subscribe(packet),
                 })
                 .map_err(Into::into)
@@ -462,7 +462,7 @@ fn build_unsubscribe_packet(
                 .props(props)
                 .build()
                 .map(|packet| MqttPacketRequest {
-                    command_id: subscription.command_id.to_string(),
+                    command_id: subscription.command_id.clone(),
                     packet: MqttWirePacket::V5Unsubscribe(packet),
                 })
                 .map_err(Into::into)
@@ -474,7 +474,7 @@ fn build_unsubscribe_packet(
                 .entries(vec![topic.as_str()])?
                 .build()
                 .map(|packet| MqttPacketRequest {
-                    command_id: subscription.command_id.to_string(),
+                    command_id: subscription.command_id.clone(),
                     packet: MqttWirePacket::V3Unsubscribe(packet),
                 })
                 .map_err(Into::into)
@@ -541,7 +541,7 @@ fn build_v5_publish_props(
             .map(|value| value.as_bytes().to_vec())
             .or_else(|| {
                 if publish.reply_to.is_some() || publish.response_topic.is_some() {
-                    Some(publish.command_id.as_bytes().to_vec())
+                    Some(publish.command_id.as_str().as_bytes().to_vec())
                 } else {
                     None
                 }
@@ -586,7 +586,7 @@ fn build_v5_unsubscribe_props(
 ) -> Result<mqtt::packet::Properties, MqttCommandConversionError> {
     let mut props = mqtt::packet::Properties::new();
     props.push(mqtt::packet::Property::UserProperty(
-        mqtt::packet::UserProperty::new("ferredge-command-id", subscription.command_id)?,
+        mqtt::packet::UserProperty::new("ferredge-command-id", subscription.command_id.as_str())?,
     ));
     Ok(props)
 }

@@ -7,6 +7,7 @@ extern crate std;
 mod command;
 mod device;
 mod headers;
+mod id;
 mod maybe;
 mod meta;
 #[cfg(feature = "net")]
@@ -26,6 +27,7 @@ pub mod prelude {
     pub use crate::command::*;
     pub use crate::device::*;
     pub use crate::headers::*;
+    pub use crate::id::*;
     pub use crate::maybe::*;
     pub use crate::meta::*;
     #[cfg(feature = "net")]

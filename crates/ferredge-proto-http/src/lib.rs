@@ -251,15 +251,18 @@ impl ProtocolPlanner<NativeOutbound> for HttpCommandPlanner {
 
     fn plan<'a>(&self, command: Command<'a>) -> Result<HttpNativePlan<'a>, Self::Error> {
         let (resource, action, payload, options) = match command.intent {
-            Intent::Read { resource, options } => {
-                (resource, RequestResponseAction::Read, None, options)
-            }
+            Intent::Read { resource, options } => (
+                Cow::from(resource),
+                RequestResponseAction::Read,
+                None,
+                options,
+            ),
             Intent::Write {
                 resource,
                 payload,
                 options,
             } => (
-                resource,
+                Cow::from(resource),
                 RequestResponseAction::Write,
                 Some(payload),
                 options,
@@ -268,7 +271,12 @@ impl ProtocolPlanner<NativeOutbound> for HttpCommandPlanner {
                 operation,
                 args,
                 options,
-            } => (operation, RequestResponseAction::Invoke, args, options),
+            } => (
+                Cow::from(operation),
+                RequestResponseAction::Invoke,
+                args,
+                options,
+            ),
             _ => return Err(HttpCommandConversionError::UnsupportedIntent),
         };
 
@@ -281,9 +289,12 @@ impl ProtocolPlanner<NativeOutbound> for HttpCommandPlanner {
             resource,
             action,
             payload,
-            method: options.method.or(capture.method),
-            path: options.path.or(capture.path),
-            content_type: options.content_type.or(capture.content_type),
+            method: options.method.map(Cow::Owned).or(capture.method),
+            path: options.path.map(Cow::Owned).or(capture.path),
+            content_type: options
+                .content_type
+                .map(Cow::Owned)
+                .or(capture.content_type),
             headers: headers
                 .0
                 .into_iter()
@@ -433,8 +444,8 @@ where
         Ok(RoutedMessage::Result(RoutedResult::new(
             EndpointRef::new(self_.device.id.clone(), ProtocolId::HTTP),
             CommandResult::new(
-                Cow::Borrowed(self_.command.id.as_ref()),
-                Cow::Borrowed(self_.device.id.as_str()),
+                self_.command.id.clone(),
+                self_.device.id.clone(),
                 if self_.response.status_code < 400 {
                     DeliveryState::Completed
                 } else {
@@ -442,7 +453,7 @@ where
                 },
                 Some(payload),
                 (self_.response.status_code >= 400)
-                    .then(|| Cow::Owned(format!("http status {}", self_.response.status_code))),
+                    .then(|| format!("http status {}", self_.response.status_code)),
                 self_
                     .command
                     .correlation
@@ -450,7 +461,7 @@ where
                     .map(Correlation::as_borrowed)
                     .or_else(|| {
                         Some(Correlation::new(
-                            Cow::Borrowed(self_.command.id.as_ref()),
+                            self_.command.id.clone(),
                             Some(Address::Resource(Cow::Borrowed(resource))),
                         ))
                     }),
@@ -500,9 +511,13 @@ impl<'a> TryFrom<&BridgeMessage<'a>> for HttpNativePlan<'a> {
             resource: resource.clone(),
             action: operation.action.clone(),
             payload: command.payload.clone(),
-            method: operation.method.clone().or(capture.method),
+            method: operation.method.clone().map(Cow::Owned).or(capture.method),
             path: path.clone().or(capture.path),
-            content_type: operation.content_type.clone().or(capture.content_type),
+            content_type: operation
+                .content_type
+                .clone()
+                .map(Cow::Owned)
+                .or(capture.content_type),
             headers: command
                 .headers
                 .as_ref()
@@ -647,7 +662,7 @@ mod tests {
         );
 
         HttpDriver::new(Device {
-            id: "device-1".to_string(),
+            id: "device-1".into(),
             name: "HTTP Device".to_string(),
             status: DeviceStatus::Online,
             endpoint: HttpEndpointConfig {

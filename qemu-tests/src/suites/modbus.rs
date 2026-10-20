@@ -21,7 +21,7 @@ pub async fn run(runtime: &EmbassyRuntime) {
 
     let driver = ModbusDriver::with_transport(
         Device {
-            id: "modbus-device-1".to_string(),
+            id: "modbus-device-1".into(),
             name: "Modbus Device".to_string(),
             status: DeviceStatus::Online,
             endpoint: ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {

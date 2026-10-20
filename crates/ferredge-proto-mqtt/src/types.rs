@@ -23,9 +23,9 @@ impl DeviceResourceAttributes for MqttResourceAttributes {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MqttPublishRequest {
     /// Original routed command identifier.
-    pub command_id: String,
+    pub command_id: CommandId,
     /// Broker channel derived from routed command.
-    pub channel: BrokerAddress<'static>,
+    pub channel: BrokerAddress,
     /// Raw message payload.
     pub payload: Vec<u8>,
     /// Delivery guarantee requested by routed command.
@@ -58,9 +58,9 @@ pub struct MqttPublishRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MqttSubscriptionRequest {
     /// Original routed command identifier.
-    pub command_id: String,
+    pub command_id: CommandId,
     /// Broker channel to subscribe to.
-    pub channel: BrokerAddress<'static>,
+    pub channel: BrokerAddress,
     /// Delivery guarantee requested by routed command.
     pub delivery: Option<DeliveryGuarantee>,
     /// Optional durable name for brokers that support it.
@@ -84,7 +84,7 @@ pub struct MqttSubscriptionRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MqttNativePlan<'a> {
     Publish {
-        command_id: Cow<'a, str>,
+        command_id: CommandId,
         topic: Cow<'a, str>,
         payload: PayloadValue<'a>,
         delivery: Option<DeliveryGuarantee>,
@@ -96,15 +96,15 @@ pub enum MqttNativePlan<'a> {
         user_properties: Vec<(Cow<'a, str>, Cow<'a, str>)>,
         reply_to: Option<Address<'a>>,
         response_topic: Option<Cow<'a, str>>,
-        correlation_id: Option<Cow<'a, str>>,
+        correlation_id: Option<CommandId>,
         correlation_data: Option<Cow<'a, [u8]>>,
     },
     Subscribe {
-        command_id: Cow<'a, str>,
+        command_id: CommandId,
         topic: Cow<'a, str>,
         delivery: Option<DeliveryGuarantee>,
-        durable_name: Option<Cow<'a, str>>,
-        shared_group: Option<Cow<'a, str>>,
+        durable_name: Option<String>,
+        shared_group: Option<String>,
         no_local: bool,
         retain_as_published: bool,
         retain_handling: Option<MqttRetainHandling>,
@@ -112,7 +112,7 @@ pub enum MqttNativePlan<'a> {
         user_properties: Vec<(Cow<'a, str>, Cow<'a, str>)>,
     },
     Unsubscribe {
-        command_id: Cow<'a, str>,
+        command_id: CommandId,
         topic: Cow<'a, str>,
     },
 }
@@ -136,7 +136,7 @@ impl MqttNativePlan<'_> {
                 correlation_id,
                 correlation_data,
             } => MqttNativePlan::Publish {
-                command_id: Cow::Owned(command_id.into_owned()),
+                command_id,
                 topic: Cow::Owned(topic.into_owned()),
                 payload: payload.into_owned(),
                 delivery,
@@ -153,7 +153,7 @@ impl MqttNativePlan<'_> {
                     .collect(),
                 reply_to: reply_to.map(Address::into_owned),
                 response_topic: response_topic.map(|value| Cow::Owned(value.into_owned())),
-                correlation_id: correlation_id.map(|value| Cow::Owned(value.into_owned())),
+                correlation_id,
                 correlation_data: correlation_data.map(|value| Cow::Owned(value.into_owned())),
             },
             MqttNativePlan::Subscribe {
@@ -168,11 +168,11 @@ impl MqttNativePlan<'_> {
                 subscription_identifier,
                 user_properties,
             } => MqttNativePlan::Subscribe {
-                command_id: Cow::Owned(command_id.into_owned()),
+                command_id,
                 topic: Cow::Owned(topic.into_owned()),
                 delivery,
-                durable_name: durable_name.map(|value| Cow::Owned(value.into_owned())),
-                shared_group: shared_group.map(|value| Cow::Owned(value.into_owned())),
+                durable_name,
+                shared_group,
                 no_local,
                 retain_as_published,
                 retain_handling,
@@ -185,7 +185,7 @@ impl MqttNativePlan<'_> {
                     .collect(),
             },
             MqttNativePlan::Unsubscribe { command_id, topic } => MqttNativePlan::Unsubscribe {
-                command_id: Cow::Owned(command_id.into_owned()),
+                command_id,
                 topic: Cow::Owned(topic.into_owned()),
             },
         }
@@ -213,7 +213,7 @@ pub enum MqttWirePacket {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MqttPacketRequest {
     /// Original routed command identifier.
-    pub command_id: String,
+    pub command_id: CommandId,
     /// Concrete MQTT packet to send.
     pub packet: MqttWirePacket,
 }

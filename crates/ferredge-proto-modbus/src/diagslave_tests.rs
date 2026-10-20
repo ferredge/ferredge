@@ -130,7 +130,7 @@ fn make_driver(endpoint: ModbusEndpoint) -> ModbusDriver {
     );
 
     ModbusDriver::new(Device {
-        id: "diag-1".to_string(),
+        id: "diag-1".into(),
         name: "diagslave".to_string(),
         status: DeviceStatus::Online,
         endpoint,

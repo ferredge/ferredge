@@ -40,15 +40,15 @@ pub(crate) struct MqttClientSession {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingReplyRoute {
-    pub(crate) command_id: String,
+    pub(crate) command_id: CommandId,
     pub(crate) reply_to: Option<Address<'static>>,
 }
 
 /// Stateful MQTT inbound decoder that preserves packet-id and reply-route correlation.
 #[derive(Debug)]
 pub struct MqttInboundDecoder {
-    device_id: String,
-    pending_command_ids: RefCell<Map<u16, String>>,
+    device_id: DeviceId,
+    pending_command_ids: RefCell<Map<u16, CommandId>>,
     pending_reply_routes: RefCell<Map<String, PendingReplyRoute>>,
 }
 
@@ -61,7 +61,7 @@ pub enum MqttDecodedInbound {
 }
 
 impl MqttInboundDecoder {
-    pub fn new(device_id: impl Into<String>) -> Self {
+    pub fn new(device_id: impl Into<DeviceId>) -> Self {
         Self {
             device_id: device_id.into(),
             pending_command_ids: RefCell::new(Map::new()),
@@ -224,13 +224,13 @@ impl TryFrom<MqttDecodedInbound> for BridgeMessage<'static> {
 
 #[allow(dead_code)]
 pub(crate) fn routed_message_from_packet(
-    pending_command_ids: &mut Map<u16, String>,
+    pending_command_ids: &mut Map<u16, CommandId>,
     pending_reply_routes: &mut Map<String, PendingReplyRoute>,
-    device_id: &str,
+    device_id: &DeviceId,
     packet: mqtt::packet::Packet,
 ) -> Option<RoutedMessage<'static>> {
     let decoder = MqttInboundDecoder {
-        device_id: device_id.to_string(),
+        device_id: device_id.clone(),
         pending_command_ids: RefCell::new(core::mem::take(pending_command_ids)),
         pending_reply_routes: RefCell::new(core::mem::take(pending_reply_routes)),
     };
@@ -413,7 +413,7 @@ fn publish_requires_packet_id(packet: &MqttWirePacket) -> bool {
 pub(crate) async fn send_packet_request_async(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
     request: MqttPacketRequest,
 ) -> Result<(), String> {
     let request = assign_runtime_packet_id(session, request)?;
@@ -544,7 +544,7 @@ fn rebuild_with_packet_id(
 pub(crate) async fn read_from_session_async(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
     negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
     auth_handler: Option<&Shared<RuntimeMutex<Option<Shared<dyn MqttAuthProvider>>>>>,
     timeout: Option<Duration>,
@@ -583,7 +583,7 @@ pub(crate) async fn read_from_session_async(
 pub(crate) async fn handle_connection_events_async(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    _device_id: &str,
+    _device_id: &DeviceId,
     negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
     auth_handler: Option<&Shared<RuntimeMutex<Option<Shared<dyn MqttAuthProvider>>>>>,
     events: Vec<mqtt::connection::Event>,
@@ -827,7 +827,9 @@ pub(crate) async fn disconnect_session(
             session.connection.checked_send(disconnect)
         }
     };
-    let _ = handle_connection_events_async(runtime, session, "", None, None, events).await?;
+    let _ =
+        handle_connection_events_async(runtime, session, &DeviceId::from(""), None, None, events)
+            .await?;
     session
         .stream
         .close()
@@ -838,7 +840,7 @@ pub(crate) async fn disconnect_session(
 async fn send_keepalive_ping_if_due(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
 ) -> Result<(), String> {
     let Some(keepalive_secs) = session.keepalive_secs else {
         return Ok(());
@@ -1155,12 +1157,12 @@ pub(crate) fn pending_reply_route_from_packet(
     }
 }
 
-pub(crate) fn mqtt_source(device_id: &str) -> EndpointRef {
-    EndpointRef::new(device_id.to_string(), ProtocolId::MQTT)
+pub(crate) fn mqtt_source(device_id: &DeviceId) -> EndpointRef {
+    EndpointRef::new(device_id.clone(), ProtocolId::MQTT)
 }
 
 pub(crate) fn routed_event_from_v5_publish<'a>(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &'a mqtt::packet::v5_0::Publish,
 ) -> RoutedEvent<'a> {
     let mut correlation_id = None;
@@ -1236,7 +1238,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
         payload,
         if correlation_id.is_some() || reply_to.is_some() {
             Some(Correlation::new(
-                correlation_id.unwrap_or_else(|| Cow::Borrowed("")),
+                CommandId::new(correlation_id.unwrap_or_default()),
                 reply_to,
             ))
         } else {
@@ -1248,7 +1250,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
 
 fn routed_reply_or_event_from_v5_publish(
     pending_reply_routes: &mut Map<String, PendingReplyRoute>,
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Publish,
 ) -> Option<RoutedMessage<'static>> {
     let mut correlation_key = None;
@@ -1267,7 +1269,7 @@ fn routed_reply_or_event_from_v5_publish(
             mqtt_source(device_id),
             CommandResult::new(
                 route.command_id.clone().into(),
-                device_id.to_string().into(),
+                device_id.clone(),
                 DeliveryState::Completed,
                 Some(
                     payload_value_from_mqtt_bytes(
@@ -1277,10 +1279,7 @@ fn routed_reply_or_event_from_v5_publish(
                     .into_owned(),
                 ),
                 None,
-                Some(Correlation::new(
-                    Cow::Owned(route.command_id),
-                    route.reply_to,
-                )),
+                Some(Correlation::new(route.command_id, route.reply_to)),
             ),
             Some(mqtt_meta_from_v5_publish(packet, Some(correlation_key))),
         )));
@@ -1293,7 +1292,7 @@ fn routed_reply_or_event_from_v5_publish(
 }
 
 pub(crate) fn routed_event_from_v3_publish<'a>(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &'a mqtt::packet::v3_1_1::Publish,
 ) -> RoutedEvent<'a> {
     RoutedEvent::new(
@@ -1343,8 +1342,8 @@ fn payload_value_from_mqtt_bytes<'a>(
 }
 
 fn routed_result_from_v5_puback(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Puback,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1361,7 +1360,7 @@ fn routed_result_from_v5_puback(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         true,
         Some(mqtt_result_meta(
             Some(packet.packet_id()),
@@ -1375,8 +1374,8 @@ fn routed_result_from_v5_puback(
 }
 
 fn routed_result_from_v5_pubrec(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Pubrec,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1393,7 +1392,7 @@ fn routed_result_from_v5_pubrec(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         false,
         Some(mqtt_result_meta(
             Some(packet.packet_id()),
@@ -1407,8 +1406,8 @@ fn routed_result_from_v5_pubrec(
 }
 
 fn routed_result_from_v5_pubrel(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Pubrel,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1425,7 +1424,7 @@ fn routed_result_from_v5_pubrel(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         false,
         Some(mqtt_result_meta(
             Some(packet.packet_id()),
@@ -1439,8 +1438,8 @@ fn routed_result_from_v5_pubrel(
 }
 
 fn routed_result_from_v5_pubcomp(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Pubcomp,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1457,7 +1456,7 @@ fn routed_result_from_v5_pubcomp(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         true,
         Some(mqtt_result_meta(
             Some(packet.packet_id()),
@@ -1471,8 +1470,8 @@ fn routed_result_from_v5_pubcomp(
 }
 
 fn routed_result_from_v5_suback(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Suback,
 ) -> RoutedResult<'static> {
     let reason_codes = packet.reason_codes();
@@ -1493,7 +1492,7 @@ fn routed_result_from_v5_suback(
         if failed_codes.is_empty() {
             None
         } else {
-            Some(Cow::Owned(failed_codes.join(",")))
+            Some(failed_codes.join(","))
         },
         true,
         Some(mqtt_result_meta(
@@ -1508,8 +1507,8 @@ fn routed_result_from_v5_suback(
 }
 
 fn routed_result_from_v5_unsuback(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Unsuback,
 ) -> RoutedResult<'static> {
     let reason_codes = packet.reason_codes();
@@ -1530,7 +1529,7 @@ fn routed_result_from_v5_unsuback(
         if failed_codes.is_empty() {
             None
         } else {
-            Some(Cow::Owned(failed_codes.join(",")))
+            Some(failed_codes.join(","))
         },
         true,
         Some(mqtt_result_meta(
@@ -1545,7 +1544,7 @@ fn routed_result_from_v5_unsuback(
 }
 
 fn routed_result_from_v5_disconnect(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Disconnect,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1562,11 +1561,11 @@ fn routed_result_from_v5_disconnect(
         mqtt_source(device_id),
         CommandResult::new(
             "__mqtt_disconnect__".into(),
-            device_id.to_string().into(),
+            device_id.clone(),
             state.clone(),
             None,
             if state == DeliveryState::Rejected {
-                reason_code_text.clone().map(Cow::Owned)
+                reason_code_text.clone()
             } else {
                 None
             },
@@ -1581,7 +1580,7 @@ fn routed_result_from_v5_disconnect(
 }
 
 fn routed_result_from_v5_auth(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Auth,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1597,11 +1596,11 @@ fn routed_result_from_v5_auth(
         mqtt_source(device_id),
         CommandResult::new(
             "__mqtt_auth__".into(),
-            device_id.to_string().into(),
+            device_id.clone(),
             state.clone(),
             None,
             if state == DeliveryState::Rejected {
-                reason_code_text.clone().map(Cow::Owned)
+                reason_code_text.clone()
             } else {
                 None
             },
@@ -1630,8 +1629,8 @@ fn mqtt_result_meta(
 }
 
 pub(crate) fn routed_result_from_packet_id(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet_id: u16,
     state: DeliveryState,
     remove: bool,
@@ -1648,29 +1647,29 @@ pub(crate) fn routed_result_from_packet_id(
 }
 
 fn routed_result_from_packet_id_with_transport(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet_id: u16,
     state: DeliveryState,
-    error: Option<Cow<'static, str>>,
+    error: Option<String>,
     remove: bool,
     transport: Option<TransportMeta<'static>>,
 ) -> RoutedResult<'static> {
     let command_id = if remove {
         pending_command_ids
             .remove(&packet_id)
-            .unwrap_or_else(|| packet_id.to_string())
+            .unwrap_or_else(|| packet_id.to_string().into())
     } else {
         pending_command_ids
             .get(&packet_id)
             .cloned()
-            .unwrap_or_else(|| packet_id.to_string())
+            .unwrap_or_else(|| packet_id.to_string().into())
     };
     RoutedResult::new(
         mqtt_source(device_id),
         CommandResult::new(
             command_id.into(),
-            device_id.to_string().into(),
+            device_id.clone(),
             state,
             None,
             error,

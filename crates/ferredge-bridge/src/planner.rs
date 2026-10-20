@@ -1,8 +1,9 @@
-use alloc::{borrow::Cow, string::ToString};
+use alloc::borrow::Cow;
 
 use ferredge_core::prelude::{
-    AddressedAccessMeta, Command, CommandResult, Correlation, DeliveryState, EndpointRef, Headers,
-    Intent, PayloadValue, Route, RoutedEvent, RoutedResult, TransportMeta,
+    AddressedAccessMeta, Command, CommandId, CommandResult, Correlation, DeliveryState, DeviceId,
+    EndpointRef, Headers, Intent, PayloadValue, ResourceName, Route, RoutedEvent, RoutedResult,
+    TransportMeta,
 };
 
 use crate::{
@@ -24,15 +25,18 @@ pub fn command_to_request_response<'a>(
         correlation,
     } = command;
     let (resource, options, action, payload) = match intent {
-        Intent::Read { resource, options } => {
-            (resource, options, RequestResponseAction::Read, None)
-        }
+        Intent::Read { resource, options } => (
+            Cow::from(resource),
+            options,
+            RequestResponseAction::Read,
+            None,
+        ),
         Intent::Write {
             resource,
             payload,
             options,
         } => (
-            resource,
+            Cow::from(resource),
             options,
             RequestResponseAction::Write,
             Some(payload),
@@ -41,7 +45,12 @@ pub fn command_to_request_response<'a>(
             operation,
             args,
             options,
-        } => (operation, options, RequestResponseAction::Invoke, args),
+        } => (
+            Cow::from(operation),
+            options,
+            RequestResponseAction::Invoke,
+            args,
+        ),
         _ => return Err(BridgePlannerError::UnsupportedIntent),
     };
     let ferredge_core::prelude::RequestOptions {
@@ -66,7 +75,10 @@ pub fn command_to_request_response<'a>(
             content_type,
         }),
         payload,
-        route: Route::RequestResponse { resource, path },
+        route: Route::RequestResponse {
+            resource,
+            path: path.map(Cow::Owned),
+        },
         transport,
         headers,
         correlation,
@@ -111,7 +123,7 @@ pub fn command_to_messaging<'a>(
                 }),
                 payload: Some(payload),
                 route: Route::Messaging {
-                    topic: channel.name,
+                    topic: channel.name.into(),
                 },
                 transport,
                 headers,
@@ -141,7 +153,7 @@ pub fn command_to_messaging<'a>(
                 }),
                 payload: None,
                 route: Route::Messaging {
-                    topic: channel.name,
+                    topic: channel.name.into(),
                 },
                 transport,
                 headers,
@@ -163,7 +175,7 @@ pub fn command_to_messaging<'a>(
             }),
             payload: None,
             route: Route::Messaging {
-                topic: channel.name,
+                topic: channel.name.into(),
             },
             transport: None,
             headers: None,
@@ -221,7 +233,6 @@ pub fn inbound_messaging_event<'a>(
     topic: Cow<'a, str>,
     payload: PayloadValue<'a>,
     correlation: Option<Correlation<'a>>,
-    _content_type: Option<Cow<'a, str>>,
 ) -> RoutedEvent<'a> {
     RoutedEvent::new(
         source,
@@ -271,7 +282,7 @@ pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a
             } else {
                 (BridgeFaultCategory::Rejected, false)
             };
-            let fault_detail = error.as_ref().map(|value| value.to_string());
+            let fault_detail = error.clone();
             BridgeOutcome::Failure {
                 state,
                 payload,
@@ -327,10 +338,10 @@ pub fn routed_event_to_bridge<'a>(event: RoutedEvent<'a>) -> BridgeMessage<'a> {
 }
 
 fn bridge_register_command<'a>(
-    id: Cow<'a, str>,
-    source_device_id: Option<Cow<'a, str>>,
-    target_device_id: Cow<'a, str>,
-    resource: Cow<'a, str>,
+    id: CommandId,
+    source_device_id: Option<DeviceId>,
+    target_device_id: DeviceId,
+    resource: ResourceName,
     register: AddressedAccessMeta,
     unit_id: u8,
     action: RegisterAccessAction,
@@ -347,7 +358,7 @@ fn bridge_register_command<'a>(
         operation: BridgeOp::RegisterAccess(RegisterAccessOp { action }),
         payload,
         route: Route::AddressedAccess {
-            resource,
+            resource: resource.into(),
             access: register,
             node_id: Some(u32::from(unit_id)),
         },

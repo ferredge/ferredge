@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     command::{Command, CommandResult, Correlation, PayloadValue},
-    device::DeviceId,
+    id::DeviceId,
     meta::{ProtocolId, TransportMeta},
     owned::IntoOwned,
     route::Route,

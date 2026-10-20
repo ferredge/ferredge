@@ -760,7 +760,7 @@ async fn broadcast_listener_status_to_subscribers(
 async fn process_session_command(
     runtime: &StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
     auth_handler: &Shared<RuntimeMutex<Option<MqttAuthHandler>>>,
     command: SessionCommand,
 ) -> Result<(), String> {
@@ -1462,7 +1462,7 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
                 let mut mqtt_view = split_mqtt_extensions(extensions)?;
                 let user_properties = merged_user_properties(headers, mqtt_view.headers.take());
                 let topic = match channel.kind {
-                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(BrokerChannelKind::Topic) | None => Cow::from(channel.name),
                     Some(kind) => {
                         return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
                     }
@@ -1497,7 +1497,7 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
                 let user_properties =
                     merged_user_properties(Headers::default(), mqtt_view.headers.take());
                 let topic = match channel.kind {
-                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(BrokerChannelKind::Topic) | None => Cow::from(channel.name),
                     Some(kind) => {
                         return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
                     }
@@ -1517,7 +1517,7 @@ impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
             }
             Intent::Unsubscribe { channel } => {
                 let topic = match channel.kind {
-                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(BrokerChannelKind::Topic) | None => Cow::from(channel.name),
                     Some(kind) => {
                         return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
                     }

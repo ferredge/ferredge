@@ -7,6 +7,7 @@ use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
 use crate::command::BrokerAddress;
+use crate::id::DeviceId;
 use crate::meta::ProtocolId;
 
 #[cfg(feature = "std")]
@@ -17,9 +18,6 @@ pub use hashbrown::collections::{HashMap as Map, VecDeque};
 
 #[cfg(not(any(feature = "std", feature = "hashbrown")))]
 pub use alloc::collections::{BTreeMap as Map, VecDeque};
-
-/// Stable identifier for registered device.
-pub type DeviceId = String;
 
 /// High-level device liveness and availability state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +247,7 @@ pub struct DeviceMessageEndpoint {
     /// Human-readable endpoint name.
     pub name: String,
     /// Concrete broker address such as topic, queue, subject, or stream.
-    pub address: BrokerAddress<'static>,
+    pub address: BrokerAddress,
     /// Optional transport-agnostic broker metadata entries.
     pub metadata: Option<Map<String, String>>,
     /// Optional allowed operations for this broker endpoint.

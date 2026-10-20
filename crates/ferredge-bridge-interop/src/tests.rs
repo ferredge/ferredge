@@ -309,7 +309,7 @@ fn make_http_driver(endpoint: String) -> HttpDriver {
     );
 
     HttpDriver::new(Device {
-        id: "http-interop-device".to_string(),
+        id: "http-interop-device".into(),
         name: "HTTP Interop Device".to_string(),
         status: DeviceStatus::Online,
         endpoint: HttpEndpointConfig { url: endpoint },
@@ -327,7 +327,7 @@ fn make_mqtt_driver(
     supported_versions: Vec<MqttProtocolVersion>,
 ) -> MqttDriver {
     MqttDriver::new(Device {
-        id: device_id.to_string(),
+        id: device_id.into(),
         name: "MQTT Interop Device".to_string(),
         status: DeviceStatus::Online,
         endpoint: MqttEndpointConfig {
@@ -414,7 +414,7 @@ fn make_modbus_driver(port: u16) -> ModbusDriver {
     );
 
     ModbusDriver::new(Device {
-        id: "modbus-interop-device".to_string(),
+        id: "modbus-interop-device".into(),
         name: "Modbus Interop Device".to_string(),
         status: DeviceStatus::Online,
         endpoint: ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
@@ -457,7 +457,7 @@ fn http_write_command(payload: &str) -> Command {
 }
 
 fn mqtt_publish_command(
-    target_device_id: &str,
+    target_device_id: &DeviceId,
     topic: &str,
     payload: PayloadValue<'static>,
     options: BrokerMessageOptions<'static>,
@@ -465,7 +465,7 @@ fn mqtt_publish_command(
     Command {
         id: format!("mqtt-publish-{topic}").into(),
         source_device_id: Some("interop-source".into()),
-        target_device_id: target_device_id.to_string().into(),
+        target_device_id: target_device_id.clone(),
         intent: Intent::Send {
             channel: BrokerAddress {
                 name: topic.to_string().into(),
@@ -478,11 +478,11 @@ fn mqtt_publish_command(
     }
 }
 
-fn mqtt_subscribe_command(target_device_id: &str, topic: &str) -> Command<'static> {
+fn mqtt_subscribe_command(target_device_id: &DeviceId, topic: &str) -> Command<'static> {
     Command {
         id: format!("mqtt-subscribe-{topic}").into(),
         source_device_id: None,
-        target_device_id: target_device_id.to_string().into(),
+        target_device_id: target_device_id.clone(),
         intent: Intent::Subscribe {
             channel: BrokerAddress {
                 name: topic.to_string().into(),
@@ -602,15 +602,15 @@ fn modbus_message_from_command(
 }
 
 fn mqtt_source_ref(device_id: &str) -> EndpointRef {
-    EndpointRef::new(device_id.to_string(), ProtocolId::MQTT)
+    EndpointRef::new(device_id.into(), ProtocolId::MQTT)
 }
 
 fn http_source_ref() -> EndpointRef {
-    EndpointRef::new("http-interop-device".to_string(), ProtocolId::HTTP)
+    EndpointRef::new("http-interop-device".into(), ProtocolId::HTTP)
 }
 
 fn modbus_source_ref() -> EndpointRef {
-    EndpointRef::new("modbus-interop-device".to_string(), ProtocolId::MODBUS)
+    EndpointRef::new("modbus-interop-device".into(), ProtocolId::MODBUS)
 }
 
 fn routed_result(

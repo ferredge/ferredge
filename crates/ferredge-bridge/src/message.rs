@@ -1,7 +1,8 @@
-use alloc::borrow::Cow;
+use alloc::string::String;
 
 use ferredge_core::prelude::{
-    Correlation, DeliveryState, EndpointRef, Headers, IntoOwned, PayloadValue, Route, TransportMeta,
+    CommandId, Correlation, DeliveryState, DeviceId, EndpointRef, Headers, IntoOwned, PayloadValue,
+    Route, TransportMeta,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,15 +24,15 @@ pub enum BridgeMessage<'a> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeCommand<'a> {
     /// Stable command identifier.
-    pub id: Cow<'a, str>,
+    pub id: CommandId,
     /// Optional originating device.
-    pub source_device_id: Option<Cow<'a, str>>,
+    pub source_device_id: Option<DeviceId>,
     /// Target device receiving the command.
-    pub target_device_id: Cow<'a, str>,
+    pub target_device_id: DeviceId,
     /// Capability family required by the command.
     pub capability: BridgeCapability,
     /// Semantic operation to perform.
-    pub operation: BridgeOp<'a>,
+    pub operation: BridgeOp,
     /// Optional payload carried by the command.
     pub payload: Option<PayloadValue<'a>>,
     /// Logical routing information required by the transport codec.
@@ -52,7 +53,7 @@ pub struct BridgeEvent<'a> {
     /// Capability family associated with the event.
     pub capability: BridgeCapability,
     /// Semantic operation represented by the event.
-    pub operation: BridgeOp<'a>,
+    pub operation: BridgeOp,
     /// Event payload.
     pub payload: PayloadValue<'a>,
     /// Logical routing information preserved for the event.
@@ -71,11 +72,11 @@ pub struct BridgeMessageMeta<'a> {
     /// Source endpoint that produced the result.
     pub source: EndpointRef,
     /// Identifier of the command this result belongs to.
-    pub command_id: Cow<'a, str>,
+    pub command_id: CommandId,
     /// Optional capability context for the result.
     pub capability: Option<BridgeCapability>,
     /// Optional operation context for the result.
-    pub operation: Option<BridgeOp<'a>>,
+    pub operation: Option<BridgeOp>,
     /// Optional typed transport metadata.
     pub transport: Option<TransportMeta<'a>>,
     /// Optional arbitrary headers or properties.
@@ -114,7 +115,7 @@ pub enum BridgeOutcome<'a> {
         /// Optional result payload.
         payload: Option<PayloadValue<'a>>,
         /// Optional human-readable error detail.
-        error: Option<Cow<'a, str>>,
+        error: Option<String>,
         /// Normalized fault metadata for the failure.
         fault: BridgeFault,
     },
@@ -149,11 +150,11 @@ impl IntoOwned for BridgeCommand<'_> {
     type Owned = BridgeCommand<'static>;
     fn into_owned(self) -> Self::Owned {
         BridgeCommand {
-            id: IntoOwned::into_owned(self.id),
-            source_device_id: self.source_device_id.into_owned(),
-            target_device_id: IntoOwned::into_owned(self.target_device_id),
+            id: self.id,
+            source_device_id: self.source_device_id,
+            target_device_id: self.target_device_id,
             capability: self.capability,
-            operation: self.operation.into_owned(),
+            operation: self.operation,
             payload: self.payload.into_owned(),
             route: self.route.into_owned(),
             transport: self.transport.into_owned(),
@@ -176,7 +177,7 @@ impl IntoOwned for BridgeEvent<'_> {
         BridgeEvent {
             source: self.source,
             capability: self.capability,
-            operation: self.operation.into_owned(),
+            operation: self.operation,
             payload: self.payload.into_owned(),
             route: self.route.into_owned(),
             transport: self.transport.into_owned(),
@@ -198,9 +199,9 @@ impl IntoOwned for BridgeMessageMeta<'_> {
     fn into_owned(self) -> Self::Owned {
         BridgeMessageMeta {
             source: self.source,
-            command_id: IntoOwned::into_owned(self.command_id),
+            command_id: self.command_id,
             capability: self.capability,
-            operation: self.operation.into_owned(),
+            operation: self.operation,
             transport: self.transport.into_owned(),
             headers: self.headers.into_owned(),
             correlation: self.correlation.into_owned(),
@@ -248,7 +249,7 @@ impl IntoOwned for BridgeOutcome<'_> {
             } => BridgeOutcome::Failure {
                 state,
                 payload: payload.into_owned(),
-                error: error.into_owned(),
+                error,
                 fault,
             },
         }
