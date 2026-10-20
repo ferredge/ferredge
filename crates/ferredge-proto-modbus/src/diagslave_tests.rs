@@ -194,13 +194,13 @@ fn make_rtu_driver(path: String, options: ModbusClientOptions) -> ModbusDriver {
     }))
 }
 
-fn write_command(resource: &str, payload: PayloadValue<'static>) -> Command {
+fn write_command(resource: &str, payload: PayloadValue<'static>) -> Command<'static> {
     Command {
-        id: format!("write-{resource}"),
+        id: format!("write-{resource}").into(),
         source_device_id: None,
-        target_device_id: "diag-1".to_string(),
+        target_device_id: "diag-1".to_string().into(),
         intent: Intent::Write {
-            resource: resource.to_string(),
+            resource: resource.to_string().into(),
             payload,
             options: RequestOptions::default(),
         },
@@ -208,13 +208,13 @@ fn write_command(resource: &str, payload: PayloadValue<'static>) -> Command {
     }
 }
 
-fn read_command(resource: &str) -> Command {
+fn read_command(resource: &str) -> Command<'static> {
     Command {
-        id: format!("read-{resource}"),
+        id: format!("read-{resource}").into(),
         source_device_id: None,
-        target_device_id: "diag-1".to_string(),
+        target_device_id: "diag-1".to_string().into(),
         intent: Intent::Read {
-            resource: resource.to_string(),
+            resource: resource.to_string().into(),
             options: RequestOptions::default(),
         },
         correlation: None,
