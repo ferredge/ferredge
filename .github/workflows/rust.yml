@@ -47,7 +47,7 @@ jobs:
       run: cargo build --workspace --verbose
 
     - name: Run general tests
-      run: cargo test --workspace --verbose
+      run: cargo nextest run --workspace --verbose
 
     - name: Setup for integration tests
       run: |
@@ -59,9 +59,6 @@ jobs:
           socat
 
         ./scripts/install-modbusdriver.sh
-
-    # nextest runs one process per test: the pty-backed diagslave tests are
-    # sensitive to in-process thread contention under plain `cargo test`.
     - name: Run integration tests
       run: cargo nextest run --workspace --features integration
 
