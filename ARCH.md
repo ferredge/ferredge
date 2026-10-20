@@ -188,6 +188,11 @@ entire pipeline per protocol and make cross-protocol bridging — the whole
 point — impossible to express in one message type. `dyn Any` would lose
 `no_std`-friendly serialization, equality, and lossless pass-through.
 
+The same openness governs the rest of the public surface: the message-model
+enums and structs are `#[non_exhaustive]` so they can grow without breaking
+external protocol crates — see the [API stability
+contract](#api-stability-contract) at the end of the extension guide.
+
 ### Typed views (`ProtocolMeta`)
 
 Raw string-keyed captures are for transport; protocol crates own ergonomic
@@ -503,3 +508,26 @@ That's the whole surface: one endpoint config, one attributes struct, one
 typed meta view, three codec trait impls, and the capability traits your
 transport supports. Existing MQTT/HTTP/Modbus devices can immediately
 bridge to the new protocol through the shared IR.
+
+### API stability contract
+
+The message-model types your crate consumes are built to grow without
+breaking you, and your code is expected to meet them halfway:
+
+- **Enums are `#[non_exhaustive]`.** Every public core/bridge enum a
+  protocol crate matches on — `Intent`, `PayloadValue`, `MetaValue`,
+  `Route`, `RoutedMessage`, `Address`, the `Bridge*` family, the error
+  enums — can gain variants in a minor release. Cross-crate matches must
+  carry a wildcard arm. Route the fallback to your unsupported/fault path
+  (the `UnsupportedIntent` / `InvalidBridgeMessage` pattern the built-in
+  planners use), not to a silent default that changes wire behavior.
+- **Runtime message structs are `#[non_exhaustive]`.** `EndpointRef`,
+  `RoutedEvent`, `RoutedResult`, `CommandResult`, `Correlation`, and
+  `AddressedAccessMeta` are constructed through `new(...)` and
+  destructured with a trailing `..`. Their fields stay `pub`, so reads
+  and field mutation keep working when fields are added.
+- **Wire compatibility is one-directional.** `PayloadValue` and the other
+  serde-carried enums use the default externally tagged representation: a
+  writer on a newer core stays decodable for every variant an older
+  reader knows, but unknown tags fail that reader's deserialization.
+  Version-skewed deployments should negotiate down to shared variants.
