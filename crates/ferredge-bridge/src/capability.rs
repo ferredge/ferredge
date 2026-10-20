@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Capability family expressed by a bridge message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BridgeCapability {
     /// Topic or channel oriented message exchange.
     Messaging(MessagingCapability),

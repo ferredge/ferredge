@@ -39,10 +39,10 @@ fn request_response_planner_preserves_correlation_and_resource() {
             payload: PayloadValue::Bytes(vec![9, 1].into()),
             options: RequestOptions::default(),
         },
-        correlation: Some(Correlation {
-            request_id: "root".to_string().into(),
-            reply_to: Some(Address::Resource("/reply".to_string().into())),
-        }),
+        correlation: Some(Correlation::new(
+            "root".to_string().into(),
+            Some(Address::Resource("/reply".to_string().into())),
+        )),
     };
 
     let BridgeMessage::Command(message) = planner::command_to_request_response(command).unwrap()
@@ -145,11 +145,7 @@ fn planners_reject_unsupported_intents() {
     assert_eq!(
         planner::command_to_register_access(
             subscribe_command,
-            crate::AddressedAccessMeta {
-                address: 1,
-                domain: "holding-register".into(),
-                quantity: None,
-            },
+            crate::AddressedAccessMeta::new(1, "holding-register".into(), None),
             1,
         )
         .unwrap_err(),
@@ -163,63 +159,60 @@ fn planners_reject_unsupported_intents() {
 
 #[test]
 fn routed_result_to_bridge_preserves_progress_success_and_failure() {
-    let source = EndpointRef {
-        device_id: "mqtt-1".to_string(),
-        protocol: ProtocolId::MQTT,
-    };
-    let correlation = Some(Correlation {
-        request_id: "corr-1".to_string().into(),
-        reply_to: Some(Address::Channel("reply/topic".to_string().into())),
-    });
+    let source = EndpointRef::new("mqtt-1".to_string(), ProtocolId::MQTT);
+    let correlation = Some(Correlation::new(
+        "corr-1".to_string().into(),
+        Some(Address::Channel("reply/topic".to_string().into())),
+    ));
 
-    let progress = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-progress".into(),
-            device_id: "mqtt-1".into(),
-            state: ferredge_core::prelude::DeliveryState::Accepted,
-            payload: None,
-            error: None,
-            correlation: correlation.clone(),
-        },
-        transport: None,
-    };
-    let success = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-success".into(),
-            device_id: "mqtt-1".into(),
-            state: ferredge_core::prelude::DeliveryState::Completed,
-            payload: Some(PayloadValue::Bytes(vec![4, 2].into())),
-            error: None,
-            correlation: correlation.clone(),
-        },
-        transport: None,
-    };
-    let rejected = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-rejected".into(),
-            device_id: "mqtt-1".into(),
-            state: ferredge_core::prelude::DeliveryState::Rejected,
-            payload: Some(PayloadValue::String("partial".to_string().into())),
-            error: Some("denied".to_string().into()),
-            correlation: correlation.clone(),
-        },
-        transport: None,
-    };
-    let timed_out = RoutedResult {
-        source: source.clone(),
-        result: CommandResult {
-            command_id: "cmd-timeout".into(),
-            device_id: "mqtt-1".into(),
-            state: ferredge_core::prelude::DeliveryState::TimedOut,
-            payload: None,
-            error: Some("timed out".to_string().into()),
+    let progress = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-progress".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::Accepted,
+            None,
+            None,
+            correlation.clone(),
+        ),
+        None,
+    );
+    let success = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-success".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::Completed,
+            Some(PayloadValue::Bytes(vec![4, 2].into())),
+            None,
+            correlation.clone(),
+        ),
+        None,
+    );
+    let rejected = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-rejected".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::Rejected,
+            Some(PayloadValue::String("partial".to_string().into())),
+            Some("denied".to_string().into()),
+            correlation.clone(),
+        ),
+        None,
+    );
+    let timed_out = RoutedResult::new(
+        source.clone(),
+        CommandResult::new(
+            "cmd-timeout".into(),
+            "mqtt-1".into(),
+            ferredge_core::prelude::DeliveryState::TimedOut,
+            None,
+            Some("timed out".to_string().into()),
             correlation,
-        },
-        transport: None,
-    };
+        ),
+        None,
+    );
 
     let BridgeMessage::Result(progress) = planner::routed_result_to_bridge(progress) else {
         panic!("expected bridge result");

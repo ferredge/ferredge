@@ -449,10 +449,10 @@ fn http_write_command(payload: &str) -> Command {
                 extensions: None,
             },
         },
-        correlation: Some(Correlation {
-            request_id: "http-corr-1".to_string().into(),
-            reply_to: Some(Address::Channel("ferredge/http/reply".to_string().into())),
-        }),
+        correlation: Some(Correlation::new(
+            "http-corr-1".to_string().into(),
+            Some(Address::Channel("ferredge/http/reply".to_string().into())),
+        )),
     }
 }
 
@@ -516,10 +516,7 @@ fn modbus_write_resource_command(
             payload,
             options: RequestOptions::default(),
         },
-        correlation: Some(Correlation {
-            request_id: "modbus-corr-1".to_string().into(),
-            reply_to: None,
-        }),
+        correlation: Some(Correlation::new("modbus-corr-1".to_string().into(), None)),
     }
 }
 
@@ -536,10 +533,7 @@ fn modbus_read_resource_command(id: &str, resource: &str) -> Command<'static> {
             resource: resource.to_string().into(),
             options: RequestOptions::default(),
         },
-        correlation: Some(Correlation {
-            request_id: "modbus-corr-2".to_string().into(),
-            reply_to: None,
-        }),
+        correlation: Some(Correlation::new("modbus-corr-2".to_string().into(), None)),
     }
 }
 
@@ -608,24 +602,15 @@ fn modbus_message_from_command(
 }
 
 fn mqtt_source_ref(device_id: &str) -> EndpointRef {
-    EndpointRef {
-        device_id: device_id.to_string(),
-        protocol: ProtocolId::MQTT,
-    }
+    EndpointRef::new(device_id.to_string(), ProtocolId::MQTT)
 }
 
 fn http_source_ref() -> EndpointRef {
-    EndpointRef {
-        device_id: "http-interop-device".to_string(),
-        protocol: ProtocolId::HTTP,
-    }
+    EndpointRef::new("http-interop-device".to_string(), ProtocolId::HTTP)
 }
 
 fn modbus_source_ref() -> EndpointRef {
-    EndpointRef {
-        device_id: "modbus-interop-device".to_string(),
-        protocol: ProtocolId::MODBUS,
-    }
+    EndpointRef::new("modbus-interop-device".to_string(), ProtocolId::MODBUS)
 }
 
 fn routed_result(
@@ -633,18 +618,18 @@ fn routed_result(
     command_id: &str,
     payload: PayloadValue<'static>,
 ) -> RoutedResult<'static> {
-    RoutedResult {
+    RoutedResult::new(
         source,
-        result: CommandResult {
-            command_id: command_id.to_string().into(),
-            device_id: "interop-device".into(),
-            state: DeliveryState::Completed,
-            payload: Some(payload),
-            error: None,
-            correlation: None,
-        },
-        transport: None,
-    }
+        CommandResult::new(
+            command_id.to_string().into(),
+            "interop-device".into(),
+            DeliveryState::Completed,
+            Some(payload),
+            None,
+            None,
+        ),
+        None,
+    )
 }
 
 fn routed_rejected_result(
@@ -652,18 +637,18 @@ fn routed_rejected_result(
     command_id: &str,
     error: &str,
 ) -> RoutedResult<'static> {
-    RoutedResult {
+    RoutedResult::new(
         source,
-        result: CommandResult {
-            command_id: command_id.to_string().into(),
-            device_id: "interop-device".into(),
-            state: DeliveryState::Rejected,
-            payload: None,
-            error: Some(error.to_string().into()),
-            correlation: None,
-        },
-        transport: None,
-    }
+        CommandResult::new(
+            command_id.to_string().into(),
+            "interop-device".into(),
+            DeliveryState::Rejected,
+            None,
+            Some(error.to_string().into()),
+            None,
+        ),
+        None,
+    )
 }
 
 #[test]
@@ -795,10 +780,10 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
             ..BrokerMessageOptions::default()
         },
     );
-    mqtt_command.correlation = Some(Correlation {
-        request_id: "corr-http-mqtt-v5".to_string().into(),
-        reply_to: Some(Address::Channel("ferredge/http/reply".to_string().into())),
-    });
+    mqtt_command.correlation = Some(Correlation::new(
+        "corr-http-mqtt-v5".to_string().into(),
+        Some(Address::Channel("ferredge/http/reply".to_string().into())),
+    ));
     let mqtt_message = mqtt_message_from_command(mqtt_command);
     let mqtt_packet = ProtocolEncoder::encode(&MqttBridgeCodec::new(&publisher.dvc), mqtt_message)
         .expect("mqtt publish should encode");
@@ -817,10 +802,10 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
     assert_eq!(event.payload, PayloadValue::from(b"41".as_slice()));
     assert_eq!(
         event.correlation,
-        Some(Correlation {
-            request_id: "corr-http-mqtt-v5".to_string().into(),
-            reply_to: Some(Address::Channel("ferredge/http/reply".to_string().into())),
-        })
+        Some(Correlation::new(
+            "corr-http-mqtt-v5".to_string().into(),
+            Some(Address::Channel("ferredge/http/reply".to_string().into())),
+        ))
     );
     {
         let transport = event.transport.as_ref().expect("mqtt transport capture");
@@ -860,19 +845,17 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
         other => panic!("expected bridge event, got {other:?}"),
     }
 
-    let http_result = RoutedResult {
-        source: http_source_ref(),
-        result: CommandResult {
-            command_id: "http-write-1".into(),
-            device_id: "http-interop-device".into(),
-            state: DeliveryState::Completed,
-            payload: Some(
-                PayloadValue::from(parse_http_response_body(&http_response.body)).into_owned(),
-            ),
-            error: None,
-            correlation: None,
-        },
-        transport: Some(
+    let http_result = RoutedResult::new(
+        http_source_ref(),
+        CommandResult::new(
+            "http-write-1".into(),
+            "http-interop-device".into(),
+            DeliveryState::Completed,
+            Some(PayloadValue::from(parse_http_response_body(&http_response.body)).into_owned()),
+            None,
+            None,
+        ),
+        Some(
             HttpMeta {
                 method: Some("POST".to_string().into()),
                 path: Some("/interop/setpoint".to_string().into()),
@@ -888,7 +871,7 @@ fn http_to_mqtt_v5_bridge_roundtrip() {
             }
             .into_transport_meta(),
         ),
-    };
+    );
     let http_result_bridge = planner::routed_result_to_bridge(http_result);
     let (result_transport, result_headers) = match &http_result_bridge {
         BridgeMessage::Result(BridgeResult {
@@ -1052,14 +1035,14 @@ fn http_to_mqtt_v3_bridge_roundtrip() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "19");
 
-    let inbound_event = RoutedEvent {
-        source: mqtt_source_ref("mqtt-http-v3-publisher"),
-        route: Route::Messaging {
+    let inbound_event = RoutedEvent::new(
+        mqtt_source_ref("mqtt-http-v3-publisher"),
+        Route::Messaging {
             topic: topic.to_string().into(),
         },
-        payload: PayloadValue::String("19".to_string().into()),
-        correlation: None,
-        transport: Some(
+        PayloadValue::String("19".to_string().into()),
+        None,
+        Some(
             MqttMeta {
                 topic: Some(topic.to_string().into()),
                 qos: Some(0),
@@ -1067,7 +1050,7 @@ fn http_to_mqtt_v3_bridge_roundtrip() {
             }
             .into_transport_meta(),
         ),
-    };
+    );
     let inbound_bridge = planner::routed_event_to_bridge(inbound_event);
     assert!(matches!(inbound_bridge, BridgeMessage::Event(_)));
 }

@@ -12,6 +12,7 @@ use crate::{
 
 /// Identifies concrete source or target transport endpoint inside router graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EndpointRef {
     /// Device identifier registered with router.
     pub device_id: DeviceId,
@@ -19,8 +20,19 @@ pub struct EndpointRef {
     pub protocol: ProtocolId,
 }
 
+impl EndpointRef {
+    /// Creates an endpoint reference for the given device and protocol.
+    pub fn new(device_id: DeviceId, protocol: ProtocolId) -> Self {
+        Self {
+            device_id,
+            protocol,
+        }
+    }
+}
+
 /// Normalized inbound event emitted by one protocol adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RoutedEvent<'a> {
     /// Source endpoint that emitted this event.
     pub source: EndpointRef,
@@ -34,7 +46,24 @@ pub struct RoutedEvent<'a> {
     pub transport: Option<TransportMeta<'a>>,
 }
 
-impl RoutedEvent<'_> {
+impl<'a> RoutedEvent<'a> {
+    /// Creates a routed event from the given source over the given route.
+    pub fn new(
+        source: EndpointRef,
+        route: Route<'a>,
+        payload: PayloadValue<'a>,
+        correlation: Option<Correlation<'a>>,
+        transport: Option<TransportMeta<'a>>,
+    ) -> Self {
+        Self {
+            source,
+            route,
+            payload,
+            correlation,
+            transport,
+        }
+    }
+
     /// Materializes an owned routed event for queues or persistence.
     pub fn into_owned(self) -> RoutedEvent<'static> {
         IntoOwned::into_owned(self)
@@ -56,6 +85,7 @@ impl IntoOwned for RoutedEvent<'_> {
 
 /// Normalized command result or transport completion emitted by one adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RoutedResult<'a> {
     /// Source endpoint that produced this result.
     pub source: EndpointRef,
@@ -65,7 +95,20 @@ pub struct RoutedResult<'a> {
     pub transport: Option<TransportMeta<'a>>,
 }
 
-impl RoutedResult<'_> {
+impl<'a> RoutedResult<'a> {
+    /// Creates a routed result from the given source.
+    pub fn new(
+        source: EndpointRef,
+        result: CommandResult<'a>,
+        transport: Option<TransportMeta<'a>>,
+    ) -> Self {
+        Self {
+            source,
+            result,
+            transport,
+        }
+    }
+
     /// Materializes an owned routed result for queues or persistence.
     pub fn into_owned(self) -> RoutedResult<'static> {
         IntoOwned::into_owned(self)
@@ -85,6 +128,7 @@ impl IntoOwned for RoutedResult<'_> {
 
 /// Unified message envelope accepted by router and bridge layers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RoutedMessage<'a> {
     /// Routed command envelope.
     Command(Command<'a>),

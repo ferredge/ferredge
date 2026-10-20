@@ -664,7 +664,8 @@ impl MqttDriver {
                 Err(ChannelError::Closed) => {
                     return Err("MQTT listener command response channel closed".to_string());
                 }
-                Err(ChannelError::Full | ChannelError::RuntimeUnavailable) => {
+                // Forward-compat: treat channel errors added later as unavailable.
+                Err(_) => {
                     return Err("MQTT listener command response unavailable".to_string());
                 }
             }
@@ -1234,11 +1235,7 @@ impl EventSource for MqttDriver {
                                 break 'listen;
                             }
                         }
-                        Err(ChannelError::Empty) => break,
-                        Err(ChannelError::Closed) => break,
-                        Err(ChannelError::Full | ChannelError::RuntimeUnavailable) => {
-                            break;
-                        }
+                        Err(_) => break,
                     }
                 }
 

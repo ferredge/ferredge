@@ -389,32 +389,29 @@ where
             _ => return Err(ModbusCommandConversionError::UnsupportedIntent),
         };
 
-        Ok(RoutedMessage::Result(RoutedResult {
-            source: EndpointRef {
-                device_id: self_.device.id.clone(),
-                protocol: ProtocolId::MODBUS,
-            },
-            result: CommandResult {
-                command_id: Cow::Borrowed(self_.command.id.as_ref()),
-                device_id: Cow::Borrowed(self_.device.id.as_str()),
-                state: DeliveryState::Completed,
-                payload: Some(self_.response.payload()?),
-                error: None,
-                correlation: self_
+        Ok(RoutedMessage::Result(RoutedResult::new(
+            EndpointRef::new(self_.device.id.clone(), ProtocolId::MODBUS),
+            CommandResult::new(
+                Cow::Borrowed(self_.command.id.as_ref()),
+                Cow::Borrowed(self_.device.id.as_str()),
+                DeliveryState::Completed,
+                Some(self_.response.payload()?),
+                None,
+                self_
                     .command
                     .correlation
                     .as_ref()
                     .map(Correlation::as_borrowed),
-            },
-            transport: None,
-        }))
+            ),
+            None,
+        )))
         .map(|message| match message {
             RoutedMessage::Result(mut result) => {
                 result.result.correlation = result.result.correlation.or_else(|| {
-                    Some(Correlation {
-                        request_id: Cow::Borrowed(self_.command.id.as_ref()),
-                        reply_to: Some(Address::Resource(Cow::Borrowed(resource))),
-                    })
+                    Some(Correlation::new(
+                        Cow::Borrowed(self_.command.id.as_ref()),
+                        Some(Address::Resource(Cow::Borrowed(resource))),
+                    ))
                 });
                 RoutedMessage::Result(result)
             }
@@ -485,14 +482,14 @@ impl ModbusResponse {
 }
 
 fn register_meta(attributes: &ModbusResourceAttributes) -> ferredge_bridge::AddressedAccessMeta {
-    ferredge_bridge::AddressedAccessMeta {
-        address: u32::from(attributes.address),
-        domain: match attributes.register_kind {
+    ferredge_bridge::AddressedAccessMeta::new(
+        u32::from(attributes.address),
+        match attributes.register_kind {
             crate::attributes::ModbusRegisterKind::Coil => "coil".into(),
             crate::attributes::ModbusRegisterKind::DiscreteInput => "discrete-input".into(),
             crate::attributes::ModbusRegisterKind::HoldingRegister => "holding-register".into(),
             crate::attributes::ModbusRegisterKind::InputRegister => "input-register".into(),
         },
-        quantity: attributes.quantity,
-    }
+        attributes.quantity,
+    )
 }

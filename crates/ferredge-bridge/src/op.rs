@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Semantic operation family represented by a bridge message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BridgeOp<'a> {
     /// Request/response operation.
     RequestResponse(RequestResponseOp<'a>),
@@ -63,6 +64,7 @@ impl IntoOwned for RequestResponseOp<'_> {
 
 /// Concrete request/response action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RequestResponseAction {
     /// Read a resource.
     Read,
@@ -106,6 +108,7 @@ impl IntoOwned for MessagingOp<'_> {
 
 /// Concrete messaging action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MessagingAction {
     /// Publish or send a message.
     Publish,
@@ -124,6 +127,7 @@ pub struct RegisterAccessOp {
 
 /// Concrete register-access action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RegisterAccessAction {
     /// Read a register or field.
     Read,

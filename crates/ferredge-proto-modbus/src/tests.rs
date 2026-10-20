@@ -728,10 +728,10 @@ fn native_modbus_roundtrip_decodes_to_routed_result() {
             assert_eq!(result.result.payload, Some(PayloadValue::U64(0x1234)));
             assert_eq!(
                 result.result.correlation,
-                Some(Correlation {
-                    request_id: "cmd-1".to_string().into(),
-                    reply_to: Some(Address::Resource("holding_u16".to_string().into())),
-                })
+                Some(Correlation::new(
+                    "cmd-1".to_string().into(),
+                    Some(Address::Resource("holding_u16".to_string().into())),
+                ))
             );
         }
         other => panic!("expected routed result, got {other:?}"),

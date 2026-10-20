@@ -9,6 +9,7 @@ use crate::{capability::BridgeCapability, fault::BridgeFault, op::BridgeOp};
 
 /// Top-level bridge message envelope shared across protocols.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BridgeMessage<'a> {
     /// Outbound bridge command.
     Command(BridgeCommand<'a>),
@@ -94,6 +95,7 @@ pub struct BridgeResult<'a> {
 
 /// Lifecycle outcome carried by a bridge result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BridgeOutcome<'a> {
     /// Delivery-progress update that has not completed yet.
     Progress {

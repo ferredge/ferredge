@@ -23,6 +23,7 @@ pub type DeviceId = String;
 
 /// High-level device liveness and availability state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeviceStatus {
     Online,
     Offline,
@@ -54,6 +55,7 @@ pub struct TlsConfig {
 
 /// Strategy used to compute delay between broker reconnect attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BackoffStrategy {
     /// Use the same delay for every reconnect attempt.
     Fixed,

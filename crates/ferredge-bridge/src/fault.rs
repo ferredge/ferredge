@@ -20,6 +20,7 @@ pub struct BridgeFault {
 
 /// High-level bridge fault category.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BridgeFaultCategory {
     /// The requested mapping or operation is unsupported.
     Unsupported,

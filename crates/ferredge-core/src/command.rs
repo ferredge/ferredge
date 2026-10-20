@@ -13,6 +13,7 @@ pub type CommandId = String;
 
 /// High-level lifecycle state for command delivery and completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeliveryState {
     /// Transport accepted command for further processing.
     Accepted,
@@ -28,6 +29,7 @@ pub enum DeliveryState {
 
 /// Correlates async replies or completion events with original request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Correlation<'a> {
     /// Identifier of original command or request.
     pub request_id: Cow<'a, str>,
@@ -35,7 +37,15 @@ pub struct Correlation<'a> {
     pub reply_to: Option<Address<'a>>,
 }
 
-impl Correlation<'_> {
+impl<'a> Correlation<'a> {
+    /// Creates correlation metadata for the given request with an optional reply destination.
+    pub fn new(request_id: Cow<'a, str>, reply_to: Option<Address<'a>>) -> Self {
+        Self {
+            request_id,
+            reply_to,
+        }
+    }
+
     /// Re-borrows this correlation without forcing ownership changes.
     pub fn as_borrowed(&self) -> Correlation<'_> {
         Correlation {
@@ -62,6 +72,7 @@ impl IntoOwned for Correlation<'_> {
 
 /// Protocol-neutral logical address used by routed messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Address<'a> {
     /// Resource-oriented address such as HTTP path or Modbus register alias.
     Resource(Cow<'a, str>),
@@ -103,6 +114,7 @@ impl IntoOwned for Address<'_> {
 
 /// Common delivery guarantees shared by broker-style protocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeliveryGuarantee {
     /// Delivery may be dropped without retry.
     BestEffort,
@@ -236,6 +248,7 @@ impl IntoOwned for BrokerAddress<'_> {
 
 /// Common broker channel categories used by transport-neutral routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BrokerChannelKind {
     /// Topic-like fan-out destination.
     Topic,
@@ -251,6 +264,7 @@ pub enum BrokerChannelKind {
 ///
 /// **Note:** f64 doesn't support `Eq` trait due to `NaN` semantics, so `PayloadValue` either.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PayloadValue<'a> {
     /// Explicit absence of payload content.
     Null,
@@ -360,6 +374,7 @@ impl fmt::Display for PayloadValue<'_> {
 
 /// Protocol-neutral operation intent routed between adapters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Intent<'a> {
     /// Reads current state from named resource.
     Read {
@@ -483,6 +498,7 @@ impl IntoOwned for Command<'_> {
 
 /// Represents the result of command execution or delivery.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CommandResult<'a> {
     /// Identifier of command this result belongs to.
     pub command_id: Cow<'a, str>,
@@ -498,7 +514,26 @@ pub struct CommandResult<'a> {
     pub correlation: Option<Correlation<'a>>,
 }
 
-impl CommandResult<'_> {
+impl<'a> CommandResult<'a> {
+    /// Creates a result for the given command and device in the given delivery state.
+    pub fn new(
+        command_id: Cow<'a, str>,
+        device_id: Cow<'a, str>,
+        state: DeliveryState,
+        payload: Option<PayloadValue<'a>>,
+        error: Option<Cow<'a, str>>,
+        correlation: Option<Correlation<'a>>,
+    ) -> Self {
+        Self {
+            command_id,
+            device_id,
+            state,
+            payload,
+            error,
+            correlation,
+        }
+    }
+
     /// Materializes an owned command result for long-lived boundaries.
     pub fn into_owned(self) -> CommandResult<'static> {
         IntoOwned::into_owned(self)

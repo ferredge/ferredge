@@ -1109,10 +1109,10 @@ fn mqtt_v5_publish_maps_reply_and_correlation_properties() {
                 ..BrokerMessageOptions::default()
             },
         },
-        correlation: Some(Correlation {
-            request_id: "corr-123".to_string().into(),
-            reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
-        }),
+        correlation: Some(Correlation::new(
+            "corr-123".to_string().into(),
+            Some(Address::Channel("rpc/reply".to_string().into())),
+        )),
     };
 
     let packet = packet_request(&driver, &command);
@@ -1247,10 +1247,10 @@ fn mqtt_v5_publish_registers_pending_reply_route() {
             payload: PayloadValue::Bytes(b"{}".to_vec().into()),
             options: BrokerMessageOptions::default(),
         },
-        correlation: Some(Correlation {
-            request_id: "corr-route-1".to_string().into(),
-            reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
-        }),
+        correlation: Some(Correlation::new(
+            "corr-route-1".to_string().into(),
+            Some(Address::Channel("rpc/reply".to_string().into())),
+        )),
     };
 
     let route = pending_reply_route_from_packet(&packet_request(&driver, &command))
@@ -1347,10 +1347,10 @@ fn inbound_publish_packet_converts_to_routed_event() {
             assert_eq!(event.payload, PayloadValue::Bytes(b"42".to_vec().into()));
             assert_eq!(
                 event.correlation,
-                Some(Correlation {
-                    request_id: "corr-42".to_string().into(),
-                    reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
-                })
+                Some(Correlation::new(
+                    "corr-42".to_string().into(),
+                    Some(Address::Channel("rpc/reply".to_string().into())),
+                ))
             );
             let transport = event.transport.expect("expected mqtt transport capture");
             assert_eq!(transport.protocol, ProtocolId::MQTT);
@@ -1414,10 +1414,10 @@ fn inbound_reply_publish_converts_to_routed_result_when_correlation_matches() {
             );
             assert_eq!(
                 result.result.correlation,
-                Some(Correlation {
-                    request_id: "cmd-77".to_string().into(),
-                    reply_to: Some(Address::Channel("rpc/reply".to_string().into())),
-                })
+                Some(Correlation::new(
+                    "cmd-77".to_string().into(),
+                    Some(Address::Channel("rpc/reply".to_string().into())),
+                ))
             );
         }
         other => panic!("expected routed result, got {other:?}"),

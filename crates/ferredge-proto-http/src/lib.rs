@@ -336,18 +336,12 @@ impl<'p> ProtocolEncoder<NativeOutbound, HttpNativePlan<'p>, HttpRequest>
             .ok_or_else(|| {
                 HttpCommandConversionError::UnknownResource(planned.resource.to_string())
             })?;
-        let body = match planned.action {
-            RequestResponseAction::Read | RequestResponseAction::Invoke => planned
-                .payload
-                .as_ref()
-                .map(http_body_from_payload)
-                .transpose()?,
-            RequestResponseAction::Write => planned
-                .payload
-                .as_ref()
-                .map(http_body_from_payload)
-                .transpose()?,
-        };
+        // Every action encodes an optional payload body the same way, known or future.
+        let body = planned
+            .payload
+            .as_ref()
+            .map(http_body_from_payload)
+            .transpose()?;
         let mut method = resource_def.resource_attributes.method.clone();
         let request_path = planned
             .path
@@ -436,36 +430,33 @@ where
         }
         .into_transport_meta();
 
-        Ok(RoutedMessage::Result(RoutedResult {
-            source: EndpointRef {
-                device_id: self_.device.id.clone(),
-                protocol: ProtocolId::HTTP,
-            },
-            result: CommandResult {
-                command_id: Cow::Borrowed(self_.command.id.as_ref()),
-                device_id: Cow::Borrowed(self_.device.id.as_str()),
-                state: if self_.response.status_code < 400 {
+        Ok(RoutedMessage::Result(RoutedResult::new(
+            EndpointRef::new(self_.device.id.clone(), ProtocolId::HTTP),
+            CommandResult::new(
+                Cow::Borrowed(self_.command.id.as_ref()),
+                Cow::Borrowed(self_.device.id.as_str()),
+                if self_.response.status_code < 400 {
                     DeliveryState::Completed
                 } else {
                     DeliveryState::Rejected
                 },
-                payload: Some(payload),
-                error: (self_.response.status_code >= 400)
+                Some(payload),
+                (self_.response.status_code >= 400)
                     .then(|| Cow::Owned(format!("http status {}", self_.response.status_code))),
-                correlation: self_
+                self_
                     .command
                     .correlation
                     .as_ref()
                     .map(Correlation::as_borrowed)
                     .or_else(|| {
-                        Some(Correlation {
-                            request_id: Cow::Borrowed(self_.command.id.as_ref()),
-                            reply_to: Some(Address::Resource(Cow::Borrowed(resource))),
-                        })
+                        Some(Correlation::new(
+                            Cow::Borrowed(self_.command.id.as_ref()),
+                            Some(Address::Resource(Cow::Borrowed(resource))),
+                        ))
                     }),
-            },
-            transport: Some(transport),
-        }))
+            ),
+            Some(transport),
+        )))
     }
 }
 
@@ -1215,10 +1206,10 @@ mod tests {
                 );
                 assert_eq!(
                     result.result.correlation,
-                    Some(Correlation {
-                        request_id: "cmd-roundtrip".to_string().into(),
-                        reply_to: Some(Address::Resource("temp".to_string().into())),
-                    })
+                    Some(Correlation::new(
+                        "cmd-roundtrip".to_string().into(),
+                        Some(Address::Resource("temp".to_string().into())),
+                    ))
                 );
                 let transport = result.transport.expect("expected http transport capture");
                 assert_eq!(transport.protocol, ProtocolId::HTTP);

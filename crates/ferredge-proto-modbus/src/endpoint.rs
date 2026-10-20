@@ -78,6 +78,8 @@ impl ModbusReconnectConfig {
                     millis.min(u128::from(u64::MAX)) as u64
                 ))
             }
+            // Forward-compat: strategies added later fall back to a fixed delay.
+            _ => Some(initial_delay.min(max_delay)),
         }
     }
 }

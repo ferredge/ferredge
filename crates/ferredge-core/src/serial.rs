@@ -6,6 +6,7 @@ use crate::maybe::{MaybeSend, MaybeSync};
 
 /// Error returned by abstract async serial operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SerialError {
     /// Remote endpoint or device closed the serial session.
     #[error("serial port is closed")]

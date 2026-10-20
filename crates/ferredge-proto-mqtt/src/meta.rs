@@ -74,6 +74,8 @@ pub fn qos_from_delivery(delivery: DeliveryGuarantee) -> u8 {
         DeliveryGuarantee::BestEffort => 0,
         DeliveryGuarantee::AtLeastOnce => 1,
         DeliveryGuarantee::ExactlyOnce => 2,
+        // Forward-compat: guarantees added later degrade to QoS 0, like convert::qos_from_delivery.
+        _ => 0,
     }
 }
 

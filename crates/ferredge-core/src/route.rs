@@ -8,6 +8,7 @@ use crate::{command::Address, owned::IntoOwned};
 
 /// Typed addressed-access metadata used by addressed field/register planners and codecs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AddressedAccessMeta {
     /// Protocol-defined base address or offset.
     pub address: u32,
@@ -17,8 +18,20 @@ pub struct AddressedAccessMeta {
     pub quantity: Option<u16>,
 }
 
+impl AddressedAccessMeta {
+    /// Creates addressed-access metadata for the given address in the given domain.
+    pub fn new(address: u32, domain: Cow<'static, str>, quantity: Option<u16>) -> Self {
+        Self {
+            address,
+            domain,
+            quantity,
+        }
+    }
+}
+
 /// Lossless logical route carried by routed and bridge envelopes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Route<'a> {
     /// Resource-oriented route such as HTTP request/response.
     RequestResponse {

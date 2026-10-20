@@ -302,6 +302,8 @@ fn packet_semantics_from_bridge<'a>(
         MessagingAction::Unsubscribe => Ok(PacketSemantics::Unsubscribe(
             subscription_view_from_bridge(message)?,
         )),
+        // Forward-compat: actions added later are not supported by this codec.
+        _ => Err(MqttCommandConversionError::InvalidBridgeMessage),
     }
 }
 
@@ -350,7 +352,7 @@ pub fn packet_id_for_qos(qos: mqtt::packet::Qos) -> Option<u16> {
 fn channel_reply_to(address: &Address) -> Option<String> {
     match address {
         Address::Channel(value) => Some(value.to_string()),
-        Address::Resource(_) => None,
+        _ => None,
     }
 }
 

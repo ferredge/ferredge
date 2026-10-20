@@ -513,10 +513,10 @@ fn mosquitto_v5_complex_property_roundtrip() {
                 ),
                 ..BrokerMessageOptions::default()
             },
-            Correlation {
-                request_id: "corr-v5-123".to_string().into(),
-                reply_to: Some(Address::Channel("ferredge/it/reply".to_string().into())),
-            },
+            Correlation::new(
+                "corr-v5-123".to_string().into(),
+                Some(Address::Channel("ferredge/it/reply".to_string().into())),
+            ),
         )),
     )
     .expect("publisher should publish");
@@ -531,10 +531,10 @@ fn mosquitto_v5_complex_property_roundtrip() {
     assert_eq!(event.payload, br#"{"ok":true}"#.as_slice().into());
     assert_eq!(
         event.correlation,
-        Some(Correlation {
-            request_id: "corr-v5-123".to_string().into(),
-            reply_to: Some(Address::Channel("ferredge/it/reply".to_string().into())),
-        })
+        Some(Correlation::new(
+            "corr-v5-123".to_string().into(),
+            Some(Address::Channel("ferredge/it/reply".to_string().into())),
+        ))
     );
 
     let transport = event.transport.expect("expected mqtt transport capture");

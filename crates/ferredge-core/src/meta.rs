@@ -37,6 +37,7 @@ impl fmt::Display for ProtocolId {
 
 /// Typed value stored in one open transport metadata entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MetaValue<'a> {
     /// Boolean flag value.
     Bool(bool),

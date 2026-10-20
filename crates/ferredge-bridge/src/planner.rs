@@ -223,13 +223,13 @@ pub fn inbound_messaging_event<'a>(
     correlation: Option<Correlation<'a>>,
     _content_type: Option<Cow<'a, str>>,
 ) -> RoutedEvent<'a> {
-    RoutedEvent {
+    RoutedEvent::new(
         source,
-        route: Route::Messaging { topic },
+        Route::Messaging { topic },
         payload,
         correlation,
-        transport: None,
-    }
+        None,
+    )
 }
 
 /// Wraps a routed core result in the bridge result envelope.
@@ -238,14 +238,15 @@ pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a
         source,
         result,
         transport,
+        ..
     } = result;
     let CommandResult {
         command_id,
-        device_id: _,
         state,
         payload,
         error,
         correlation,
+        ..
     } = result;
     let (transport, headers) = split_capture_headers(transport);
     let protocol = source.protocol.clone();
@@ -287,6 +288,8 @@ pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a
                 },
             }
         }
+        // Forward-compat: delivery states added later surface as in-flight progress.
+        state => BridgeOutcome::Progress { state },
     };
 
     BridgeMessage::Result(BridgeResult { meta, outcome })
@@ -300,6 +303,7 @@ pub fn routed_event_to_bridge<'a>(event: RoutedEvent<'a>) -> BridgeMessage<'a> {
         payload,
         correlation,
         transport,
+        ..
     } = event;
     let (transport, headers) = split_capture_headers(transport);
 

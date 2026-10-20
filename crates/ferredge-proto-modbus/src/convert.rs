@@ -56,6 +56,8 @@ impl<'a> ModbusBridgeCodec<'a> {
                 let payload = payload.ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?;
                 build_write_request(resource.as_ref(), attributes, payload, proto, options)
             }
+            // Forward-compat: actions added later are not supported by this codec.
+            _ => Err(ModbusCommandConversionError::InvalidBridgeMessage),
         }
     }
 }
