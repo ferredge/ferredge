@@ -24,7 +24,7 @@ pub async fn rtu(runtime: &EmbassyRuntime) {
 
     let driver = ModbusDriver::with_transport(
         Device {
-            id: "harness-modbus".to_string(),
+            id: "harness-modbus".into(),
             name: "diagslave".to_string(),
             status: DeviceStatus::Online,
             endpoint: ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
@@ -80,7 +80,7 @@ pub async fn rtu(runtime: &EmbassyRuntime) {
 pub async fn tcp(runtime: &EmbassyRuntime, net: EmbassyNet) {
     let driver = ModbusDriver::with_transport(
         Device {
-            id: "harness-modbus-tcp".to_string(),
+            id: "harness-modbus-tcp".into(),
             name: "diagslave-tcp".to_string(),
             status: DeviceStatus::Online,
             endpoint: ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {

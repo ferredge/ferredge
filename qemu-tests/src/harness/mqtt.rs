@@ -33,7 +33,7 @@ impl EventSink for CollectSink {
 
 fn mqtt_device(id: &str, client_id: &str) -> MqttDevice {
     Device {
-        id: id.to_string(),
+        id: id.into(),
         name: "mosquitto".to_string(),
         status: DeviceStatus::Online,
         endpoint: MqttEndpointConfig {

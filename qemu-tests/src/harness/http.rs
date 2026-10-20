@@ -12,7 +12,7 @@ use super::HOST_ADDR;
 pub async fn run(runtime: &EmbassyRuntime, net: EmbassyNet) {
     let driver = HttpDriver::with_stack(
         Device {
-            id: "harness-http".to_string(),
+            id: "harness-http".into(),
             name: "http.server".to_string(),
             status: DeviceStatus::Online,
             endpoint: HttpEndpointConfig {
