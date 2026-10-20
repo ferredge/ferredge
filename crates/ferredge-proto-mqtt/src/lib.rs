@@ -79,8 +79,8 @@ use runtime::{
 
 pub use convert::MqttBridgeCodec;
 pub use endpoint::{
-    MqttConnackProperties, MqttConnectProperties, MqttDevice, MqttEndpointConfig,
-    MqttProtocolVersion, MqttWillConfig,
+    MqttAuthConfig, MqttConnackProperties, MqttConnectProperties, MqttDevice, MqttEndpointConfig,
+    MqttProtocolVersion, MqttTlsConfig, MqttWillConfig,
 };
 pub use meta::{
     KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_DUPLICATE, KEY_DURABLE_NAME,

@@ -29,28 +29,6 @@ pub enum DeviceStatus {
     Unknown,
 }
 
-/// Optional credential set for protocol endpoints.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthConfig {
-    /// Username or principal used for authentication.
-    pub username: Option<String>,
-    /// Password or secret associated with username.
-    pub password: Option<String>,
-}
-
-/// TLS material and flags associated with secure protocol endpoints.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TlsConfig {
-    /// Whether TLS is enabled for endpoint.
-    pub enabled: bool,
-    /// Optional PEM-encoded CA certificate.
-    pub ca_certificate_pem: Option<String>,
-    /// Optional PEM-encoded client certificate.
-    pub client_certificate_pem: Option<String>,
-    /// Optional PEM-encoded private key for client certificate.
-    pub client_key_pem: Option<String>,
-}
-
 /// Strategy used to compute delay between broker reconnect attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

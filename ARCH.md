@@ -323,9 +323,11 @@ Resource attributes likewise: `HttpResourceAttributes`,
 `ModbusResourceAttributes`, `MqttResourceAttributes` each implement the
 `DeviceResourceAttributes` marker in their crate.
 
-Core keeps only protocol-neutral shared config: `AuthConfig`, `TlsConfig`,
-`SerialPortConfig` + serial enums, `BrokerReconnectConfig`,
-`BackoffStrategy` (all in `core/src/device.rs`).
+Core keeps only protocol-neutral shared config: `SerialPortConfig` + serial
+enums, `BrokerReconnectConfig`, `BackoffStrategy` (all in
+`core/src/device.rs`). Credentials and TLS material are endpoint concerns
+and live with each protocol's endpoint config (e.g. `MqttAuthConfig` /
+`MqttTlsConfig` in `proto-mqtt/src/endpoint.rs`).
 
 The Modbus driver is additionally generic over `ModbusTransport`
 (`proto-modbus/src/transport.rs`), so a device carries only the transport
@@ -352,7 +354,7 @@ pub type CoapDevice = Device<CoapResourceAttributes, CoapEndpointConfig>;
 pub struct CoapEndpointConfig {
     pub host: String,
     pub port: u16,
-    pub dtls: Option<TlsConfig>, // reuse core's neutral config where it fits
+    pub dtls: Option<CoapDtlsConfig>, // endpoint security config lives in your crate
 }
 
 impl DeviceEndpoint for CoapEndpointConfig {

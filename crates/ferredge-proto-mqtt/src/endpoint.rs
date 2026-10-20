@@ -3,8 +3,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 
 use ferredge_core::prelude::{
-    AuthConfig, BrokerReconnectConfig, DeliveryGuarantee, Device, DeviceEndpoint, ProtocolId,
-    TlsConfig,
+    BrokerReconnectConfig, DeliveryGuarantee, Device, DeviceEndpoint, ProtocolId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +12,28 @@ use crate::types::MqttResourceAttributes;
 
 /// Device definition bound to the MQTT endpoint and resource model.
 pub type MqttDevice = Device<MqttResourceAttributes, MqttEndpointConfig>;
+
+/// Optional credential set for the broker connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqttAuthConfig {
+    /// Username or principal used for authentication.
+    pub username: Option<String>,
+    /// Password or secret associated with username.
+    pub password: Option<String>,
+}
+
+/// TLS material and flags for the broker connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqttTlsConfig {
+    /// Whether TLS is enabled for endpoint.
+    pub enabled: bool,
+    /// Optional PEM-encoded CA certificate.
+    pub ca_certificate_pem: Option<String>,
+    /// Optional PEM-encoded client certificate.
+    pub client_certificate_pem: Option<String>,
+    /// Optional PEM-encoded private key for client certificate.
+    pub client_key_pem: Option<String>,
+}
 
 /// MQTT last-will publish configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -115,9 +136,9 @@ pub struct MqttEndpointConfig {
     /// MQTT client identifier.
     pub client_id: String,
     /// Optional username/password authentication.
-    pub auth: Option<AuthConfig>,
+    pub auth: Option<MqttAuthConfig>,
     /// Optional TLS configuration.
-    pub tls: Option<TlsConfig>,
+    pub tls: Option<MqttTlsConfig>,
     /// Optional keepalive interval in seconds.
     pub keepalive_secs: Option<u16>,
     /// Whether session starts clean on new connection.
