@@ -429,7 +429,7 @@ fn make_modbus_driver(port: u16) -> ModbusDriver {
     })
 }
 
-fn http_write_command(payload: &str) -> Command {
+fn http_write_command(payload: &str) -> Command<'static> {
     Command {
         id: "http-write-1".into(),
         source_device_id: Some("interop-source".into()),
