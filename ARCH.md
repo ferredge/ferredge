@@ -18,8 +18,11 @@ Workspace crates (`crates/`):
 | `ferredge-test-support` | Shared test helpers |
 
 `ferredge-core` and `ferredge-bridge` are `no_std` + `alloc` (`std` is an
-opt-in feature). All model types use `Cow`-based borrowing with explicit
-lifetimes; nothing in the model layer requires a heap-owned copy up front.
+opt-in feature). Identity and name fields are owned newtypes (`CommandId`,
+`DeviceId`, `ResourceName`, `OperationName`, `ChannelName` in
+`core/src/id.rs`); payloads, routes, and transport captures use `Cow`-based
+borrowing with explicit lifetimes, so no payload byte requires a heap-owned
+copy up front.
 The embassy runtime additionally enables core's `local` feature, which
 relaxes `Send`/`Sync` bounds (`MaybeSend`/`MaybeSync` in `core/src/maybe.rs`)
 for single-executor targets.
@@ -64,6 +67,7 @@ envelope and vocabulary on top. There are no duplicate leaf definitions.
 
 | Type | Defined in | Role |
 |---|---|---|
+| `CommandId`, `DeviceId`, `ResourceName`, `OperationName`, `ChannelName` | `core/src/id.rs` | Owned, `#[serde(transparent)]` identifier newtypes |
 | `PayloadValue<'a>` | `core/src/command.rs` | Typed payload: scalars, `String`/`Bytes` (`Cow`, zero-copy), `List`/`Map` (`Vec`) |
 | `Correlation<'a>`, `Address<'a>` | `core/src/command.rs` | Reply correlation; `Address` survives as the type of `Correlation.reply_to` |
 | `Header<'a>`, `Headers<'a>` | `core/src/headers.rs` | Ordered protocol header/property pairs |
@@ -73,18 +77,23 @@ envelope and vocabulary on top. There are no duplicate leaf definitions.
 | `Command<'a>`, `Intent<'a>`, `CommandResult<'a>`, option structs | `core/src/command.rs` | Protocol-neutral command layer |
 | `RoutedEvent<'a>`, `RoutedResult<'a>`, `RoutedMessage<'a>`, `EndpointRef` | `core/src/routed.rs` | Normalized inbound envelopes |
 | `BridgeMessage<'a>` and friends | `bridge/src/message.rs` | Bridge IR envelope |
-| `BridgeCapability`, `BridgeOp<'a>`, `BridgeFault` | `bridge/src/{capability,op,fault}.rs` | Bridge-level vocabulary |
+| `BridgeCapability`, `BridgeOp`, `BridgeFault` | `bridge/src/{capability,op,fault}.rs` | Bridge-level vocabulary (lifetime-free) |
 
 ### Command layer (core)
 
-`Command<'a>` carries `id`, optional `source_device_id`, `target_device_id`,
-an `Intent<'a>`, and `correlation: Option<Correlation<'a>>` — the single
-source of correlation truth; nothing else in the pipeline re-derives it.
+`Command<'a>` carries `id: CommandId`, optional `source_device_id` and
+`target_device_id` (`DeviceId`), an `Intent<'a>`, and
+`correlation: Option<Correlation<'a>>` — the single source of correlation
+truth; nothing else in the pipeline re-derives it. Identifier fields are
+owned newtypes, never raw strings: command and device ids cannot be swapped
+at a call site, and `From<&str>`/`From<String>` keep construction ergonomic.
 
 `Intent<'a>` covers `Read`/`Write`/`Invoke` (request/response style, with
-`RequestOptions<'a>`) and `Send`/`Subscribe`/`Unsubscribe` (broker style,
-with `BrokerMessageOptions<'a>` / `BrokerSubscriptionOptions<'a>` and
-`BrokerAddress<'a>`). Every options struct ends with
+`ResourceName`/`OperationName` targets and `RequestOptions<'a>`) and
+`Send`/`Subscribe`/`Unsubscribe` (broker style, with
+`BrokerMessageOptions<'a>` / `BrokerSubscriptionOptions<'a>` and the
+lifetime-free `BrokerAddress` holding a `ChannelName`). Every options
+struct ends with
 `extensions: Option<TransportMeta<'a>>` — the open replacement for the old
 closed per-protocol option enums. Protocol-specific option builders such as
 `MqttMessageOptions` / `MqttSubscriptionOptions` live in `proto-mqtt/src/meta.rs`
@@ -94,10 +103,11 @@ and encode themselves into the capture via `into_transport_meta()`.
 
 `BridgeMessage<'a>` (`bridge/src/message.rs`) is a three-way envelope:
 
-- `Command(BridgeCommand<'a>)` — normalized outbound command: `capability`
-  (`BridgeCapability`), `operation` (`BridgeOp<'a>`), optional payload,
-  `route: Route<'a>`, optional `transport: TransportMeta<'a>`,
-  `headers: Option<Headers<'a>>`, correlation.
+- `Command(BridgeCommand<'a>)` — normalized outbound command: typed ids
+  (`CommandId`/`DeviceId`), `capability` (`BridgeCapability`), `operation`
+  (`BridgeOp`, lifetime-free), optional payload, `route: Route<'a>`,
+  optional `transport: TransportMeta<'a>`, `headers: Option<Headers<'a>>`,
+  correlation.
 - `Event(BridgeEvent<'a>)` — normalized inbound event with the same shape
   plus a source `EndpointRef`.
 - `Result(BridgeResult<'a>)` — `{ meta: BridgeMessageMeta<'a>, outcome:
@@ -249,20 +259,30 @@ first-match — a read convenience, unrelated to wire preservation.
 
 ## Zero-copy and ownership
 
-Every model type is lifetimed; leaf strings and bytes are `Cow`s. The
-discipline:
+Borrowing is scoped to where inbound decode actually borrows: the payload
+(`PayloadValue`), the transport capture cluster
+(`TransportMeta`/`MetaValue`/`Headers`), `Route`, and reply addresses
+(`Address`). Identity and name fields (`CommandId`, `DeviceId`,
+`ResourceName`, `OperationName`, `ChannelName`) and free-form options
+strings are plain owned values — they were never borrowed from wire buffers
+in practice, and small owned ids cost less than lifetime plumbing on every
+envelope. `BrokerAddress`, `RequestResponseOp`, `MessagingOp`, and
+`BridgeOp` carry no lifetime at all. The discipline for what remains
+lifetimed:
 
 - **Through the pipeline, move — don't clone.** `plan` consumes
   `Command<'a>` and produces `Planned<'a>`; encoders consume the plan. Cows
   are moved field-to-field, so a payload borrowed from an inbound buffer
-  stays borrowed all the way to the outbound encoder.
+  stays borrowed all the way to the outbound encoder; owned ids move for
+  free alongside them.
 - **`IntoOwned` (`core/src/owned.rs`)** converts any borrowed model value to
   its `'static` counterpart. It is implemented for the Cows, `Option`,
-  `Vec`, and tuples, and every model type wires it up (plus an inherent
-  `into_owned()` convenience). `as_borrowed()` gives the reverse view: leaf
-  `Cow`s re-borrow for free, while list-shaped values (`U64List`, `StrList`,
-  `Pairs`) clone their `Vec` spines — the values inside are typically small,
-  but it is not free.
+  `Vec`, and tuples, and every lifetimed model type wires it up (plus an
+  inherent `into_owned()` convenience); owned newtype fields pass through
+  untouched. `as_borrowed()` gives the reverse view: leaf `Cow`s re-borrow
+  for free, while list-shaped values (`U64List`, `StrList`, `Pairs`) clone
+  their `Vec` spines and owned id fields clone — the values are typically
+  small, but it is not free.
 - **Sanctioned owned boundaries** — the only places `.into_owned()` is
   expected, exactly once each:
   1. `PubSub::subscribe` (`core/src/router.rs`) requires
@@ -453,7 +473,7 @@ impl ProtocolPlanner<NativeOutbound> for CoapCommandPlanner {
     type Planned<'a> = CoapNativePlan<'a>;
 
     fn plan<'a>(&self, command: Command<'a>) -> Result<CoapNativePlan<'a>, Self::Error> {
-        // destructure command.intent, move Cows into the plan — no clones
+        // destructure command.intent, move the typed ids and payload Cow into the plan — no clones
         unimplemented!()
     }
 }
@@ -526,6 +546,11 @@ breaking you, and your code is expected to meet them halfway:
   `AddressedAccessMeta` are constructed through `new(...)` and
   destructured with a trailing `..`. Their fields stay `pub`, so reads
   and field mutation keep working when fields are added.
+- **Identifier newtypes are `#[serde(transparent)]` and deliberately NOT
+  `#[non_exhaustive]`.** `CommandId`, `DeviceId`, `ResourceName`,
+  `OperationName`, and `ChannelName` (`core/src/id.rs`) are structurally
+  fixed single-field wrappers: they serialize as plain strings and are
+  constructed via `new(...)`/`From<&str>`/`From<String>`.
 - **Wire compatibility is one-directional.** `PayloadValue` and the other
   serde-carried enums use the default externally tagged representation: a
   writer on a newer core stays decodable for every variant an older
