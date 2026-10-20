@@ -14,9 +14,9 @@ use crate::{
 };
 
 /// Plans a core command into a request/response bridge command.
-pub fn command_to_request_response<'a>(
-    command: Command<'a>,
-) -> Result<BridgeMessage<'a>, BridgePlannerError> {
+pub fn command_to_request_response(
+    command: Command<'_>,
+) -> Result<BridgeMessage<'_>, BridgePlannerError> {
     let Command {
         id,
         source_device_id,
@@ -86,9 +86,7 @@ pub fn command_to_request_response<'a>(
 }
 
 /// Plans a core command into a messaging bridge command.
-pub fn command_to_messaging<'a>(
-    command: Command<'a>,
-) -> Result<BridgeMessage<'a>, BridgePlannerError> {
+pub fn command_to_messaging(command: Command<'_>) -> Result<BridgeMessage<'_>, BridgePlannerError> {
     let Command {
         id,
         source_device_id,
@@ -186,11 +184,11 @@ pub fn command_to_messaging<'a>(
 }
 
 /// Plans a core command into a register-access bridge command.
-pub fn command_to_register_access<'a>(
-    command: Command<'a>,
+pub fn command_to_register_access(
+    command: Command<'_>,
     register: AddressedAccessMeta,
     unit_id: u8,
-) -> Result<BridgeMessage<'a>, BridgePlannerError> {
+) -> Result<BridgeMessage<'_>, BridgePlannerError> {
     let Command {
         id,
         source_device_id,
@@ -244,7 +242,7 @@ pub fn inbound_messaging_event<'a>(
 }
 
 /// Wraps a routed core result in the bridge result envelope.
-pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a> {
+pub fn routed_result_to_bridge(result: RoutedResult<'_>) -> BridgeMessage<'_> {
     let RoutedResult {
         source,
         result,
@@ -307,7 +305,7 @@ pub fn routed_result_to_bridge<'a>(result: RoutedResult<'a>) -> BridgeMessage<'a
 }
 
 /// Wraps a routed core event in a bridge event envelope.
-pub fn routed_event_to_bridge<'a>(event: RoutedEvent<'a>) -> BridgeMessage<'a> {
+pub fn routed_event_to_bridge(event: RoutedEvent<'_>) -> BridgeMessage<'_> {
     let RoutedEvent {
         source,
         route,
@@ -369,9 +367,9 @@ fn bridge_register_command<'a>(
 }
 
 /// Splits the capture-carried headers away from the passthrough capture.
-fn split_capture_headers<'a>(
-    transport: Option<TransportMeta<'a>>,
-) -> (Option<TransportMeta<'a>>, Option<Headers<'a>>) {
+fn split_capture_headers(
+    transport: Option<TransportMeta<'_>>,
+) -> (Option<TransportMeta<'_>>, Option<Headers<'_>>) {
     match transport {
         Some(mut meta) => {
             let headers = meta.headers.take().filter(|headers| !headers.is_empty());

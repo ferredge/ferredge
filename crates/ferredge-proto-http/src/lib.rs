@@ -206,23 +206,23 @@ impl HttpDriver {
         Self { dvc, runtime, net }
     }
 
-    pub fn native_request<'a>(
+    pub fn native_request(
         &self,
-        command: Command<'a>,
+        command: Command<'_>,
     ) -> Result<HttpRequest, HttpCommandConversionError> {
         let planner = HttpCommandPlanner;
         let plan =
             <HttpCommandPlanner as ProtocolPlanner<NativeOutbound>>::plan(&planner, command)?;
         <HttpRequestEncoder<'_> as ProtocolEncoder<
             NativeOutbound,
-            HttpNativePlan<'a>,
+            HttpNativePlan<'_>,
             HttpRequest,
         >>::encode(&HttpRequestEncoder { device: &self.dvc }, plan)
     }
 
-    pub fn bridge_request<'a>(
+    pub fn bridge_request(
         &self,
-        command: Command<'a>,
+        command: Command<'_>,
     ) -> Result<HttpRequest, HttpCommandConversionError> {
         let planner = HttpCommandPlanner;
         let bridge =

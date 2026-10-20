@@ -197,21 +197,21 @@ impl MqttDriver {
         }
     }
 
-    pub fn bridge_packet_request<'a>(
+    pub fn bridge_packet_request(
         &self,
-        command: Command<'a>,
+        command: Command<'_>,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
         let message = planner_message_for_command(command)?;
         <MqttBridgeCodec<'_> as ProtocolEncoder<
             BridgeOutbound,
-            BridgeMessage<'a>,
+            BridgeMessage<'_>,
             MqttPacketRequest,
         >>::encode(&MqttBridgeCodec::new(&self.dvc), message)
     }
 
-    pub fn native_packet_request<'a>(
+    pub fn native_packet_request(
         &self,
-        command: Command<'a>,
+        command: Command<'_>,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
         let plan = <MqttCommandPlanner as ProtocolPlanner<NativeOutbound>>::plan(
             &MqttCommandPlanner,
@@ -219,7 +219,7 @@ impl MqttDriver {
         )?;
         <MqttBridgeCodec<'_> as ProtocolEncoder<
             NativeOutbound,
-            MqttNativePlan<'a>,
+            MqttNativePlan<'_>,
             MqttPacketRequest,
         >>::encode(&MqttBridgeCodec::new(&self.dvc), plan)
     }
