@@ -7,6 +7,7 @@ mod codec;
 mod convert;
 #[cfg(all(test, feature = "integration"))]
 mod diagslave_tests;
+mod endpoint;
 #[cfg(test)]
 mod tests;
 mod transport;
@@ -46,6 +47,11 @@ mod runtime_stack {
 pub(crate) use runtime_stack::{StackNet, StackRuntime, StackSerial};
 
 pub use convert::ModbusBridgeCodec;
+pub use endpoint::{
+    ModbusAsciiEndpointConfig, ModbusClientOptions, ModbusDevice, ModbusEndpoint,
+    ModbusReconnectConfig, ModbusRtuEndpointConfig, ModbusRtuOverTcpEndpointConfig,
+    ModbusTcpEndpointConfig, ModbusUdpEndpointConfig,
+};
 pub use transport::{
     ModbusTransport, SerialTransport, StackSession, StackTransport, TcpTransport, UdpTransport,
 };

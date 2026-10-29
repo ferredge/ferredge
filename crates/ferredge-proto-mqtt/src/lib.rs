@@ -5,6 +5,7 @@
 extern crate alloc;
 
 use alloc::{
+    borrow::Cow,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -16,6 +17,8 @@ use ferredge_bridge::{
 use ferredge_core::prelude::*;
 
 mod convert;
+mod endpoint;
+mod meta;
 mod runtime;
 mod types;
 #[cfg(any(
@@ -75,6 +78,19 @@ use runtime::{
 };
 
 pub use convert::MqttBridgeCodec;
+pub use endpoint::{
+    MqttAuthConfig, MqttConnackProperties, MqttConnectProperties, MqttDevice, MqttEndpointConfig,
+    MqttProtocolVersion, MqttTlsConfig, MqttWillConfig,
+};
+pub use meta::{
+    KEY_CONTENT_TYPE, KEY_CORRELATION_DATA, KEY_DUPLICATE, KEY_DURABLE_NAME,
+    KEY_MESSAGE_EXPIRY_INTERVAL_SECS, KEY_NO_LOCAL, KEY_PACKET_ID, KEY_PAYLOAD_FORMAT, KEY_QOS,
+    KEY_REASON_CODES, KEY_REASON_STRING, KEY_RESPONSE_TOPIC, KEY_RETAIN, KEY_RETAIN_AS_PUBLISHED,
+    KEY_RETAIN_HANDLING, KEY_SHARED_GROUP, KEY_SUBSCRIPTION_IDENTIFIERS, KEY_TOPIC,
+    KEY_TOPIC_ALIAS, MqttMessageOptions, MqttMeta, MqttPayloadFormat, MqttRetainHandling,
+    MqttSubscriptionOptions, mqtt_payload_format_from_name, mqtt_payload_format_name,
+    qos_from_delivery, retain_handling_code, retain_handling_from_code,
+};
 pub use runtime::{MqttDecodedInbound, MqttInboundDecoder};
 pub use types::{
     MqttAuthChallenge, MqttAuthFlowReason, MqttAuthProvider, MqttAuthResponse, MqttAuthStage,
@@ -114,7 +130,7 @@ pub enum MqttListenerStatus {
 #[derive(Clone)]
 pub struct MqttDriver {
     /// Device metadata and broker configuration served by this driver.
-    pub dvc: Device<MqttResourceAttributes>,
+    pub dvc: MqttDevice,
     /// Live MQTT client session used by the runtime transport.
     session: Shared<RuntimeMutex<Option<MqttClientSession>>>,
     /// Last negotiated CONNACK capabilities and identifiers observed from broker.
@@ -156,16 +172,12 @@ impl MqttDriver {
     /// embassy stack has no ambient executor or network stack — construct with
     /// [`MqttDriver::with_stack`] there.
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-    pub fn new(dvc: Device<MqttResourceAttributes>) -> Self {
+    pub fn new(dvc: MqttDevice) -> Self {
         Self::with_stack(dvc, StackRuntime::default(), StackNet::default())
     }
 
     /// Creates a new MQTT driver from device metadata plus an explicit runtime stack.
-    pub fn with_stack(
-        dvc: Device<MqttResourceAttributes>,
-        runtime: StackRuntime,
-        net: StackNet,
-    ) -> Self {
+    pub fn with_stack(dvc: MqttDevice, runtime: StackRuntime, net: StackNet) -> Self {
         let runtime = Shared::new(runtime);
 
         Self {
@@ -187,27 +199,27 @@ impl MqttDriver {
 
     pub fn bridge_packet_request(
         &self,
-        command: Command,
+        command: Command<'_>,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
         let message = planner_message_for_command(command)?;
         <MqttBridgeCodec<'_> as ProtocolEncoder<
             BridgeOutbound,
-            BridgeMessage<'static>,
+            BridgeMessage<'_>,
             MqttPacketRequest,
         >>::encode(&MqttBridgeCodec::new(&self.dvc), message)
     }
 
     pub fn native_packet_request(
         &self,
-        command: Command,
+        command: Command<'_>,
     ) -> Result<MqttPacketRequest, MqttCommandConversionError> {
-        let plan = <MqttCommandPlanner as ProtocolPlanner<
-            NativeOutbound,
-            MqttNativePlan<'static>,
-        >>::plan(&MqttCommandPlanner, command)?;
+        let plan = <MqttCommandPlanner as ProtocolPlanner<NativeOutbound>>::plan(
+            &MqttCommandPlanner,
+            command,
+        )?;
         <MqttBridgeCodec<'_> as ProtocolEncoder<
             NativeOutbound,
-            MqttNativePlan<'static>,
+            MqttNativePlan<'_>,
             MqttPacketRequest,
         >>::encode(&MqttBridgeCodec::new(&self.dvc), plan)
     }
@@ -247,10 +259,7 @@ impl MqttDriver {
             }
         }
 
-        let config = match &self.dvc.endpoint {
-            DeviceEndpoint::Mqtt(config) => config,
-            _ => return Err("device endpoint is not MQTT".to_string()),
-        };
+        let config = &self.dvc.endpoint;
 
         let mut stream = self
             .net
@@ -355,11 +364,8 @@ impl MqttDriver {
         self.runtime.block_on(self.negotiated_connack_async())
     }
 
-    fn reconnect_config(&self) -> Result<BrokerReconnectConfig, String> {
-        match &self.dvc.endpoint {
-            DeviceEndpoint::Mqtt(config) => Ok(config.reconnect.clone()),
-            _ => Err("device endpoint is not MQTT".to_string()),
-        }
+    fn reconnect_config(&self) -> BrokerReconnectConfig {
+        self.dvc.endpoint.reconnect.clone()
     }
 
     fn request_topic_key(request: &MqttPacketRequest) -> Option<String> {
@@ -406,7 +412,7 @@ impl MqttDriver {
     }
 
     async fn enqueue_recovery_request(&self, request: MqttPacketRequest) -> Result<(), String> {
-        let reconnect = self.reconnect_config()?;
+        let reconnect = self.reconnect_config();
         if !reconnect.queue_requests_while_disconnected {
             return Err("MQTT recovery queue is disabled".to_string());
         }
@@ -427,7 +433,7 @@ impl MqttDriver {
         &self,
         session: &mut MqttClientSession,
     ) -> Result<Vec<RoutedEvent<'static>>, String> {
-        let reconnect = self.reconnect_config()?;
+        let reconnect = self.reconnect_config();
         let result = async {
             let mut recovered_events = Vec::new();
             if reconnect.replay_subscriptions {
@@ -658,7 +664,8 @@ impl MqttDriver {
                 Err(ChannelError::Closed) => {
                     return Err("MQTT listener command response channel closed".to_string());
                 }
-                Err(ChannelError::Full | ChannelError::RuntimeUnavailable) => {
+                // Forward-compat: treat channel errors added later as unavailable.
+                Err(_) => {
                     return Err("MQTT listener command response unavailable".to_string());
                 }
             }
@@ -753,7 +760,7 @@ async fn broadcast_listener_status_to_subscribers(
 async fn process_session_command(
     runtime: &StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
     auth_handler: &Shared<RuntimeMutex<Option<MqttAuthHandler>>>,
     command: SessionCommand,
 ) -> Result<(), String> {
@@ -1062,7 +1069,7 @@ impl EventSource for MqttDriver {
         let device_id = self.dvc.id.clone();
         let driver = self.clone();
         let runtime = self.runtime.clone();
-        let reconnect = self.reconnect_config()?;
+        let reconnect = self.reconnect_config();
         let (command_tx, command_rx): (
             RuntimeSender<SessionCommand>,
             RuntimeReceiver<SessionCommand>,
@@ -1228,11 +1235,7 @@ impl EventSource for MqttDriver {
                                 break 'listen;
                             }
                         }
-                        Err(ChannelError::Empty) => break,
-                        Err(ChannelError::Closed) => break,
-                        Err(ChannelError::Full | ChannelError::RuntimeUnavailable) => {
-                            break;
-                        }
+                        Err(_) => break,
                     }
                 }
 
@@ -1388,107 +1391,140 @@ impl EventSource for MqttDriver {
     }
 }
 
-fn planner_message_for_command(
-    command: Command,
-) -> Result<ferredge_bridge::BridgeMessage<'static>, MqttCommandConversionError> {
+fn split_mqtt_extensions(
+    extensions: Option<TransportMeta<'_>>,
+) -> Result<MqttMeta<'_>, MqttCommandConversionError> {
+    match extensions {
+        Some(meta) => MqttMeta::try_from_transport_meta(meta),
+        None => Ok(MqttMeta::default()),
+    }
+}
+
+/// Appends capture-carried user properties after the envelope headers, preserving every pair verbatim.
+fn merged_user_properties<'a>(
+    mut headers: Headers<'a>,
+    capture_headers: Option<Headers<'a>>,
+) -> Vec<(Cow<'a, str>, Cow<'a, str>)> {
+    if let Some(capture_headers) = capture_headers {
+        headers.merge(capture_headers);
+    }
+    headers
+        .0
+        .into_iter()
+        .map(|header| (header.key, header.value))
+        .collect()
+}
+
+fn planner_message_for_command<'a>(
+    command: Command<'a>,
+) -> Result<ferredge_bridge::BridgeMessage<'a>, MqttCommandConversionError> {
     match &command.intent {
-        Intent::Send { .. } | Intent::Subscribe { .. } | Intent::Unsubscribe { .. } => {
+        Intent::Send { channel, .. }
+        | Intent::Subscribe { channel, .. }
+        | Intent::Unsubscribe { channel } => {
+            if let Some(kind) = channel.kind
+                && kind != BrokerChannelKind::Topic
+            {
+                return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
+            }
             planner::command_to_messaging(command).map_err(Into::into)
         }
         _ => Err(MqttCommandConversionError::UnsupportedIntent),
     }
 }
 
-impl ProtocolPlanner<ferredge_bridge::BridgeOutbound, BridgeMessage<'static>>
-    for MqttCommandPlanner
-{
+impl ProtocolPlanner<ferredge_bridge::BridgeOutbound> for MqttCommandPlanner {
     type Error = MqttCommandConversionError;
+    type Planned<'a> = BridgeMessage<'a>;
 
-    fn plan(&self, command: Command) -> Result<BridgeMessage<'static>, Self::Error> {
+    fn plan<'a>(&self, command: Command<'a>) -> Result<BridgeMessage<'a>, Self::Error> {
         planner_message_for_command(command)
     }
 }
 
-impl ProtocolPlanner<NativeOutbound, MqttNativePlan<'static>> for MqttCommandPlanner {
+impl ProtocolPlanner<NativeOutbound> for MqttCommandPlanner {
     type Error = MqttCommandConversionError;
+    type Planned<'a> = MqttNativePlan<'a>;
 
-    fn plan(&self, command: Command) -> Result<MqttNativePlan<'static>, Self::Error> {
+    fn plan<'a>(&self, command: Command<'a>) -> Result<MqttNativePlan<'a>, Self::Error> {
+        let correlation = command.correlation;
         match command.intent {
             Intent::Send {
                 channel,
                 payload,
                 options,
             } => {
-                let mqtt_options = match options.protocol {
-                    Some(BrokerMessageProtocolOptions::Mqtt(mqtt)) => mqtt,
-                    _ => MqttMessageOptions::default(),
-                };
+                let BrokerMessageOptions {
+                    delivery,
+                    headers,
+                    extensions,
+                } = options;
+                let mut mqtt_view = split_mqtt_extensions(extensions)?;
+                let user_properties = merged_user_properties(headers, mqtt_view.headers.take());
                 let topic = match channel.kind {
-                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(BrokerChannelKind::Topic) | None => Cow::from(channel.name),
                     Some(kind) => {
                         return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
                     }
                 };
                 Ok(MqttNativePlan::Publish {
-                    command_id: command.id.into(),
-                    topic: topic.into(),
-                    payload: ferredge_bridge::BridgePayload::from(payload).into_owned(),
-                    delivery: options.delivery,
-                    retain: mqtt_options.retain,
-                    payload_format: mqtt_options.payload_format,
-                    content_type: mqtt_options.content_type.map(Into::into),
-                    message_expiry_interval_secs: mqtt_options.message_expiry_interval_secs,
-                    topic_alias: mqtt_options.topic_alias,
-                    headers: Vec::new(),
-                    user_properties: mqtt_options
-                        .user_properties
-                        .into_iter()
-                        .map(|(key, value)| (key.into(), value.into()))
-                        .collect(),
-                    reply_to: options.reply_to.map(|value| Address::Channel(value.into())),
-                    response_topic: mqtt_options.response_topic.map(Into::into),
-                    correlation_id: options.correlation_id.map(Into::into),
-                    correlation_data: mqtt_options.correlation_data,
+                    command_id: command.id,
+                    topic,
+                    payload,
+                    delivery,
+                    retain: mqtt_view.retain,
+                    payload_format: mqtt_view.payload_format,
+                    content_type: mqtt_view.content_type,
+                    message_expiry_interval_secs: mqtt_view.message_expiry_interval_secs,
+                    topic_alias: mqtt_view.topic_alias,
+                    user_properties,
+                    reply_to: correlation
+                        .as_ref()
+                        .and_then(|correlation| correlation.reply_to.clone()),
+                    response_topic: mqtt_view.response_topic,
+                    correlation_id: correlation.map(|correlation| correlation.request_id),
+                    correlation_data: mqtt_view.correlation_data,
                 })
             }
             Intent::Subscribe { channel, options } => {
-                let mqtt_options = match options.protocol {
-                    Some(BrokerSubscriptionProtocolOptions::Mqtt(mqtt)) => mqtt,
-                    _ => MqttSubscriptionOptions::default(),
-                };
+                let BrokerSubscriptionOptions {
+                    delivery,
+                    durable_name,
+                    shared_group,
+                    extensions,
+                } = options;
+                let mut mqtt_view = split_mqtt_extensions(extensions)?;
+                let user_properties =
+                    merged_user_properties(Headers::default(), mqtt_view.headers.take());
                 let topic = match channel.kind {
-                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(BrokerChannelKind::Topic) | None => Cow::from(channel.name),
                     Some(kind) => {
                         return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
                     }
                 };
                 Ok(MqttNativePlan::Subscribe {
-                    command_id: command.id.into(),
-                    topic: topic.into(),
-                    delivery: options.delivery,
-                    durable_name: options.durable_name.map(Into::into),
-                    shared_group: options.shared_group.map(Into::into),
-                    no_local: mqtt_options.no_local,
-                    retain_as_published: mqtt_options.retain_as_published,
-                    retain_handling: mqtt_options.retain_handling,
-                    subscription_identifier: mqtt_options.subscription_identifier,
-                    user_properties: mqtt_options
-                        .user_properties
-                        .into_iter()
-                        .map(|(key, value)| (key.into(), value.into()))
-                        .collect(),
+                    command_id: command.id,
+                    topic,
+                    delivery,
+                    durable_name,
+                    shared_group,
+                    no_local: mqtt_view.no_local,
+                    retain_as_published: mqtt_view.retain_as_published,
+                    retain_handling: mqtt_view.retain_handling,
+                    subscription_identifier: mqtt_view.subscription_identifiers.first().copied(),
+                    user_properties,
                 })
             }
             Intent::Unsubscribe { channel } => {
                 let topic = match channel.kind {
-                    Some(BrokerChannelKind::Topic) | None => channel.name,
+                    Some(BrokerChannelKind::Topic) | None => Cow::from(channel.name),
                     Some(kind) => {
                         return Err(MqttCommandConversionError::UnsupportedChannelKind(kind));
                     }
                 };
                 Ok(MqttNativePlan::Unsubscribe {
-                    command_id: command.id.into(),
-                    topic: topic.into(),
+                    command_id: command.id,
+                    topic,
                 })
             }
             _ => Err(MqttCommandConversionError::UnsupportedIntent),

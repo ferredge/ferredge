@@ -7,6 +7,8 @@ use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
 use crate::command::BrokerAddress;
+use crate::id::DeviceId;
+use crate::meta::ProtocolId;
 
 #[cfg(feature = "std")]
 pub use std::collections::{HashMap as Map, VecDeque};
@@ -17,11 +19,9 @@ pub use hashbrown::collections::{HashMap as Map, VecDeque};
 #[cfg(not(any(feature = "std", feature = "hashbrown")))]
 pub use alloc::collections::{BTreeMap as Map, VecDeque};
 
-/// Stable identifier for registered device.
-pub type DeviceId = String;
-
 /// High-level device liveness and availability state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeviceStatus {
     Online,
     Offline,
@@ -29,66 +29,9 @@ pub enum DeviceStatus {
     Unknown,
 }
 
-/// Transport protocol supported by device endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeviceProtocol {
-    MQTT,
-    HTTP,
-    Modbus,
-    CoAP,
-}
-
-/// Optional credential set for protocol endpoints.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthConfig {
-    /// Username or principal used for authentication.
-    pub username: Option<String>,
-    /// Password or secret associated with username.
-    pub password: Option<String>,
-}
-
-/// TLS material and flags associated with secure protocol endpoints.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TlsConfig {
-    /// Whether TLS is enabled for endpoint.
-    pub enabled: bool,
-    /// Optional PEM-encoded CA certificate.
-    pub ca_certificate_pem: Option<String>,
-    /// Optional PEM-encoded client certificate.
-    pub client_certificate_pem: Option<String>,
-    /// Optional PEM-encoded private key for client certificate.
-    pub client_key_pem: Option<String>,
-}
-
-/// MQTT last-will publish configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct MqttWillConfig {
-    /// Topic where broker publishes will on unexpected disconnect.
-    pub topic: String,
-    /// Will payload bytes.
-    pub payload: Vec<u8>,
-    /// Delivery guarantee used for will publish.
-    pub delivery: Option<crate::command::DeliveryGuarantee>,
-    /// Whether will should be retained by broker.
-    pub retain: bool,
-    /// Optional MQTT v5 will delay interval in seconds.
-    pub delay_interval_secs: Option<u32>,
-    /// Optional MQTT v5 will payload format indicator.
-    pub payload_format: Option<crate::command::MqttPayloadFormat>,
-    /// Optional MQTT v5 will message expiry interval in seconds.
-    pub message_expiry_interval_secs: Option<u32>,
-    /// Optional MQTT v5 will content type.
-    pub content_type: Option<String>,
-    /// Optional MQTT v5 will response topic.
-    pub response_topic: Option<String>,
-    /// Optional MQTT v5 will correlation data.
-    pub correlation_data: Option<Vec<u8>>,
-    /// Optional MQTT v5 will user properties.
-    pub user_properties: Vec<(String, String)>,
-}
-
 /// Strategy used to compute delay between broker reconnect attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BackoffStrategy {
     /// Use the same delay for every reconnect attempt.
     Fixed,
@@ -167,242 +110,6 @@ impl BrokerReconnectConfig {
     }
 }
 
-/// Reconnect/retry policy for Modbus request transport failures.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModbusReconnectConfig {
-    /// Whether automatic retry attempts are enabled.
-    pub enabled: bool,
-    /// Delay before first retry attempt after request failure.
-    pub initial_delay: Option<Duration>,
-    /// Maximum retry delay cap. Falls back to `initial_delay` when omitted.
-    pub max_delay: Option<Duration>,
-    /// Backoff strategy used to compute retry delay.
-    pub strategy: BackoffStrategy,
-    /// Multiplier used by exponential backoff. Ignored for fixed backoff.
-    pub multiplier: u32,
-    /// Maximum number of retry attempts after initial failure.
-    pub max_attempts: u32,
-    /// Whether write requests may be retried automatically.
-    pub retry_writes: bool,
-}
-
-impl Default for ModbusReconnectConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            initial_delay: None,
-            max_delay: None,
-            strategy: BackoffStrategy::Fixed,
-            multiplier: 2,
-            max_attempts: 0,
-            retry_writes: false,
-        }
-    }
-}
-
-impl ModbusReconnectConfig {
-    /// Returns whether given 1-based retry attempt is permitted.
-    pub fn allows_attempt(&self, attempt: u32) -> bool {
-        self.enabled && attempt <= self.max_attempts
-    }
-
-    /// Returns retry delay for given 1-based retry attempt.
-    pub fn delay_for_attempt(&self, attempt: u32) -> Option<Duration> {
-        let initial_delay = self.initial_delay?;
-        if attempt <= 1 {
-            return Some(initial_delay);
-        }
-
-        let max_delay = self.max_delay.unwrap_or(initial_delay);
-        match self.strategy {
-            BackoffStrategy::Fixed => Some(initial_delay.min(max_delay)),
-            BackoffStrategy::Exponential => {
-                let multiplier = u128::from(self.multiplier.max(1));
-                let mut millis = initial_delay.as_millis().max(1);
-                let max_millis = max_delay.as_millis().max(1);
-                for _ in 1..attempt {
-                    millis = millis.saturating_mul(multiplier);
-                    if millis >= max_millis {
-                        millis = max_millis;
-                        break;
-                    }
-                }
-                Some(Duration::from_millis(
-                    millis.min(u128::from(u64::MAX)) as u64
-                ))
-            }
-        }
-    }
-}
-
-/// MQTT-specific endpoint configuration required for real broker connections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct MqttConnectProperties {
-    /// Client receive maximum requested during CONNECT.
-    pub receive_maximum: Option<u16>,
-    /// Maximum packet size client is willing to receive.
-    pub maximum_packet_size: Option<u32>,
-    /// Maximum topic alias value client supports for inbound traffic.
-    pub topic_alias_maximum: Option<u16>,
-    /// Whether broker should include response information in CONNACK when available.
-    pub request_response_information: Option<bool>,
-    /// Whether broker should include detailed problem information on failures.
-    pub request_problem_information: Option<bool>,
-    /// Optional session expiry interval override in seconds.
-    pub session_expiry_interval_secs: Option<u32>,
-    /// Optional enhanced authentication method.
-    pub authentication_method: Option<String>,
-    /// Optional enhanced authentication payload.
-    pub authentication_data: Option<Vec<u8>>,
-    /// Optional MQTT v5 user properties attached to CONNECT.
-    pub user_properties: Vec<(String, String)>,
-}
-
-/// Negotiated broker capabilities and identifiers learned from CONNACK.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct MqttConnackProperties {
-    /// Whether broker resumed an existing session.
-    pub session_present: bool,
-    /// MQTT v5 connect reason code returned by broker.
-    pub reason_code: Option<String>,
-    /// Optional human-readable connect reason string.
-    pub reason_string: Option<String>,
-    /// Broker-assigned client identifier, if one was returned.
-    pub assigned_client_identifier: Option<String>,
-    /// Response information string returned by broker when requested.
-    pub response_information: Option<String>,
-    /// Alternate server hint returned by broker.
-    pub server_reference: Option<String>,
-    /// Server-advertised receive maximum.
-    pub receive_maximum: Option<u16>,
-    /// Server-advertised maximum packet size.
-    pub maximum_packet_size: Option<u32>,
-    /// Server-advertised topic alias maximum.
-    pub topic_alias_maximum: Option<u16>,
-    /// Session expiry interval negotiated by broker.
-    pub session_expiry_interval_secs: Option<u32>,
-    /// Maximum QoS supported by server.
-    pub maximum_qos: Option<u8>,
-    /// Whether retained messages are supported by server.
-    pub retain_available: Option<bool>,
-    /// Server-requested keepalive interval override.
-    pub server_keep_alive: Option<u16>,
-    /// Whether wildcard subscriptions are supported by server.
-    pub wildcard_subscription_available: Option<bool>,
-    /// Whether subscription identifiers are supported by server.
-    pub subscription_identifier_available: Option<bool>,
-    /// Whether shared subscriptions are supported by server.
-    pub shared_subscription_available: Option<bool>,
-    /// Optional enhanced authentication method selected by broker.
-    pub authentication_method: Option<String>,
-    /// Optional enhanced authentication data returned by broker.
-    pub authentication_data: Option<Vec<u8>>,
-    /// MQTT v5 user properties returned on CONNACK.
-    pub user_properties: Vec<(String, String)>,
-}
-
-/// MQTT-specific endpoint configuration required for real broker connections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MqttEndpointConfig {
-    /// Broker host or address string.
-    pub broker: String,
-    /// MQTT client identifier.
-    pub client_id: String,
-    /// Optional username/password authentication.
-    pub auth: Option<AuthConfig>,
-    /// Optional TLS configuration.
-    pub tls: Option<TlsConfig>,
-    /// Optional keepalive interval in seconds.
-    pub keepalive_secs: Option<u16>,
-    /// Whether session starts clean on new connection.
-    pub clean_start: bool,
-    /// Optional session expiry interval in seconds.
-    pub session_expiry_secs: Option<u32>,
-    /// Optional default topic prefix or namespace.
-    pub topic_prefix: Option<String>,
-    /// Optional MQTT v5 CONNECT property set used during negotiation.
-    pub connect_properties: MqttConnectProperties,
-    /// Optional MQTT last-will configuration.
-    pub will: Option<MqttWillConfig>,
-    /// Reconnect policy shared with broker-oriented transports.
-    pub reconnect: BrokerReconnectConfig,
-    /// MQTT protocol versions supported by broker or deployment policy.
-    pub supported_versions: Vec<MqttProtocolVersion>,
-}
-
-/// MQTT protocol versions supported by core broker configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MqttProtocolVersion {
-    /// MQTT 3.1.1.
-    V3_1_1,
-    /// MQTT 5.0.
-    V5_0,
-}
-
-impl MqttEndpointConfig {
-    /// Returns highest-preference MQTT version available in config.
-    ///
-    /// Preference order is MQTT 5.0 first, then MQTT 3.1.1. If no explicit
-    /// versions are configured, MQTT 5.0 is assumed by default.
-    pub fn preferred_protocol_version(&self) -> MqttProtocolVersion {
-        if self.supported_versions.contains(&MqttProtocolVersion::V5_0) {
-            MqttProtocolVersion::V5_0
-        } else if self
-            .supported_versions
-            .contains(&MqttProtocolVersion::V3_1_1)
-        {
-            MqttProtocolVersion::V3_1_1
-        } else {
-            MqttProtocolVersion::V5_0
-        }
-    }
-
-    /// Returns whether broker config supports requested MQTT protocol version.
-    pub fn supports_protocol_version(&self, version: MqttProtocolVersion) -> bool {
-        self.supported_versions.is_empty() || self.supported_versions.contains(&version)
-    }
-}
-
-/// HTTP-specific endpoint configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpEndpointConfig {
-    /// Base URL or host:port target for device.
-    pub url: String,
-}
-
-/// Supported Modbus wire encodings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModbusWireMode {
-    Tcp,
-    Rtu,
-    Ascii,
-    Udp,
-}
-
-/// Shared Modbus client policy applied across transports.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModbusClientOptions {
-    /// Remote unit/slave identifier for addressed requests.
-    pub unit_id: u8,
-    /// Optional end-to-end request timeout.
-    pub request_timeout: Option<Duration>,
-    /// Whether TCP/serial sessions should be kept open and reused between requests.
-    pub persistent_session: bool,
-    /// Reconnect/retry policy for failed requests.
-    pub reconnect: ModbusReconnectConfig,
-}
-
-impl Default for ModbusClientOptions {
-    fn default() -> Self {
-        Self {
-            unit_id: 1,
-            request_timeout: None,
-            persistent_session: false,
-            reconnect: ModbusReconnectConfig::default(),
-        }
-    }
-}
-
 /// Number of data bits used by one serial frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SerialDataBits {
@@ -471,131 +178,10 @@ impl Default for SerialPortConfig {
     }
 }
 
-/// Modbus TCP-specific endpoint configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModbusTcpEndpointConfig {
-    /// Remote device address or hostname.
-    pub addr: String,
-    /// Remote Modbus TCP port.
-    pub port: u16,
-    /// Shared Modbus client policy for this endpoint.
-    pub options: ModbusClientOptions,
-}
-
-/// Modbus RTU-over-TCP endpoint configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModbusRtuOverTcpEndpointConfig {
-    /// Remote device address or hostname.
-    pub addr: String,
-    /// Remote TCP port carrying RTU frames.
-    pub port: u16,
-    /// Shared Modbus client policy for this endpoint.
-    pub options: ModbusClientOptions,
-}
-
-/// Modbus RTU-specific endpoint configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModbusRtuEndpointConfig {
-    /// Shared serial configuration for RTU line access.
-    pub serial: SerialPortConfig,
-    /// Shared Modbus client policy for this endpoint.
-    pub options: ModbusClientOptions,
-}
-
-/// Modbus ASCII-specific endpoint configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModbusAsciiEndpointConfig {
-    /// Shared serial configuration for ASCII line access.
-    pub serial: SerialPortConfig,
-    /// Shared Modbus client policy for this endpoint.
-    pub options: ModbusClientOptions,
-}
-
-/// Modbus UDP-specific endpoint configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModbusUdpEndpointConfig {
-    /// Remote device address or hostname.
-    pub addr: String,
-    /// Remote Modbus UDP port.
-    pub port: u16,
-    /// Shared Modbus client policy for this endpoint.
-    pub options: ModbusClientOptions,
-}
-
-/// CoAP-specific endpoint configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CoapEndpointConfig {
-    /// Base CoAP URL for device.
-    pub url: String,
-}
-
-/// Concrete connection endpoint for one device transport.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeviceEndpoint {
-    Http(HttpEndpointConfig),
-    Mqtt(MqttEndpointConfig),
-    ModbusTCP(ModbusTcpEndpointConfig),
-    ModbusRTUOverTCP(ModbusRtuOverTcpEndpointConfig),
-    ModbusRTU(ModbusRtuEndpointConfig),
-    ModbusASCII(ModbusAsciiEndpointConfig),
-    ModbusUDP(ModbusUdpEndpointConfig),
-    CoAP(CoapEndpointConfig),
-}
-
-impl DeviceEndpoint {
-    /// Creates an HTTP endpoint from dedicated config.
-    pub fn http(config: HttpEndpointConfig) -> Self {
-        Self::Http(config)
-    }
-
-    /// Creates an MQTT endpoint from dedicated config.
-    pub fn mqtt(config: MqttEndpointConfig) -> Self {
-        Self::Mqtt(config)
-    }
-
-    /// Creates a Modbus TCP endpoint from dedicated config.
-    pub fn modbus_tcp(config: ModbusTcpEndpointConfig) -> Self {
-        Self::ModbusTCP(config)
-    }
-
-    /// Creates a Modbus RTU-over-TCP endpoint from dedicated config.
-    pub fn modbus_rtu_over_tcp(config: ModbusRtuOverTcpEndpointConfig) -> Self {
-        Self::ModbusRTUOverTCP(config)
-    }
-
-    /// Creates a Modbus RTU endpoint from dedicated config.
-    pub fn modbus_rtu(config: ModbusRtuEndpointConfig) -> Self {
-        Self::ModbusRTU(config)
-    }
-
-    /// Creates a Modbus ASCII endpoint from dedicated config.
-    pub fn modbus_ascii(config: ModbusAsciiEndpointConfig) -> Self {
-        Self::ModbusASCII(config)
-    }
-
-    /// Creates a Modbus UDP endpoint from dedicated config.
-    pub fn modbus_udp(config: ModbusUdpEndpointConfig) -> Self {
-        Self::ModbusUDP(config)
-    }
-
-    /// Creates a CoAP endpoint from dedicated config.
-    pub fn coap(config: CoapEndpointConfig) -> Self {
-        Self::CoAP(config)
-    }
-
-    /// Returns protocol implied by endpoint variant.
-    pub fn protocol(&self) -> DeviceProtocol {
-        match self {
-            DeviceEndpoint::Http(_) => DeviceProtocol::HTTP,
-            DeviceEndpoint::Mqtt(_) => DeviceProtocol::MQTT,
-            DeviceEndpoint::ModbusTCP(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusRTUOverTCP(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusRTU(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusASCII(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::ModbusUDP(_) => DeviceProtocol::Modbus,
-            DeviceEndpoint::CoAP(_) => DeviceProtocol::CoAP,
-        }
-    }
+/// Protocol-owned device endpoint configuration.
+pub trait DeviceEndpoint: Clone + core::fmt::Debug + Serialize + for<'de> Deserialize<'de> {
+    /// Returns protocol identity for this endpoint configuration.
+    fn protocol(&self) -> ProtocolId;
 }
 
 /// Marker trait for protocol-specific device resource metadata.
@@ -648,15 +234,15 @@ pub struct DeviceMessageEndpoint {
 
 /// Represents the metadata and state of a connected device.
 #[derive(Debug, Clone)]
-pub struct Device<T: DeviceResourceAttributes> {
+pub struct Device<T: DeviceResourceAttributes, E: DeviceEndpoint> {
     /// Stable device identifier.
     pub id: DeviceId,
     /// Human-readable device name.
     pub name: String,
     /// Current reported device status.
     pub status: DeviceStatus,
-    /// Concrete transport endpoint details.
-    pub endpoint: DeviceEndpoint,
+    /// Protocol-owned transport endpoint configuration.
+    pub endpoint: E,
     /// Optional free-form metadata entries.
     pub metadata: Option<Map<String, String>>,
     /// Optional maximum concurrent connections supported by device.
@@ -669,127 +255,7 @@ pub struct Device<T: DeviceResourceAttributes> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{string::ToString, vec};
-
     use super::*;
-
-    #[test]
-    fn device_endpoint_creators_return_expected_protocols() {
-        assert_eq!(
-            DeviceEndpoint::http(HttpEndpointConfig {
-                url: "127.0.0.1:8080".to_string(),
-            })
-            .protocol(),
-            DeviceProtocol::HTTP
-        );
-        assert_eq!(
-            DeviceEndpoint::mqtt(MqttEndpointConfig {
-                broker: "mqtt://broker".to_string(),
-                client_id: "client-1".to_string(),
-                auth: None,
-                tls: None,
-                keepalive_secs: Some(30),
-                clean_start: true,
-                session_expiry_secs: None,
-                topic_prefix: None,
-                will: None,
-                connect_properties: MqttConnectProperties::default(),
-                reconnect: BrokerReconnectConfig::default(),
-                supported_versions: vec![MqttProtocolVersion::V5_0, MqttProtocolVersion::V3_1_1],
-            })
-            .protocol(),
-            DeviceProtocol::MQTT
-        );
-        assert_eq!(
-            DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
-                addr: "127.0.0.1".to_string(),
-                port: 502,
-                options: ModbusClientOptions::default(),
-            })
-            .protocol(),
-            DeviceProtocol::Modbus
-        );
-        assert_eq!(
-            DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
-                serial: SerialPortConfig {
-                    path: "/dev/ttyUSB0".to_string(),
-                    ..SerialPortConfig::default()
-                },
-                options: ModbusClientOptions::default(),
-            })
-            .protocol(),
-            DeviceProtocol::Modbus
-        );
-        assert_eq!(
-            DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
-                serial: SerialPortConfig {
-                    path: "/dev/ttyUSB1".to_string(),
-                    baudrate: 19_200,
-                    ..SerialPortConfig::default()
-                },
-                options: ModbusClientOptions::default(),
-            })
-            .protocol(),
-            DeviceProtocol::Modbus
-        );
-        assert_eq!(
-            DeviceEndpoint::modbus_udp(ModbusUdpEndpointConfig {
-                addr: "127.0.0.1".to_string(),
-                port: 502,
-                options: ModbusClientOptions::default(),
-            })
-            .protocol(),
-            DeviceProtocol::Modbus
-        );
-        assert_eq!(
-            DeviceEndpoint::coap(CoapEndpointConfig {
-                url: "coap://127.0.0.1".to_string(),
-            })
-            .protocol(),
-            DeviceProtocol::CoAP
-        );
-    }
-
-    #[test]
-    fn modbus_client_options_default_to_common_safe_values() {
-        assert_eq!(
-            ModbusClientOptions::default(),
-            ModbusClientOptions {
-                unit_id: 1,
-                request_timeout: None,
-                persistent_session: false,
-                reconnect: ModbusReconnectConfig::default(),
-            }
-        );
-    }
-
-    #[test]
-    fn modbus_reconnect_config_compute_retry_delay() {
-        let reconnect = ModbusReconnectConfig {
-            initial_delay: Some(Duration::from_millis(100)),
-            max_delay: Some(Duration::from_millis(500)),
-            strategy: BackoffStrategy::Exponential,
-            multiplier: 2,
-            ..ModbusReconnectConfig::default()
-        };
-
-        assert_eq!(
-            reconnect.delay_for_attempt(1),
-            Some(Duration::from_millis(100))
-        );
-        assert_eq!(
-            reconnect.delay_for_attempt(2),
-            Some(Duration::from_millis(200))
-        );
-        assert_eq!(
-            reconnect.delay_for_attempt(3),
-            Some(Duration::from_millis(400))
-        );
-        assert_eq!(
-            reconnect.delay_for_attempt(4),
-            Some(Duration::from_millis(500))
-        );
-    }
 
     #[test]
     fn serial_port_config_defaults_match_common_modbus_line_settings() {
@@ -806,49 +272,6 @@ mod tests {
                 write_timeout: None,
             }
         );
-    }
-
-    #[test]
-    fn mqtt_endpoint_prefers_v5_then_falls_back_to_v3() {
-        let preferred_v5 = MqttEndpointConfig {
-            broker: "mqtt://broker".to_string(),
-            client_id: "client-v5".to_string(),
-            auth: None,
-            tls: None,
-            keepalive_secs: Some(30),
-            clean_start: true,
-            session_expiry_secs: None,
-            topic_prefix: None,
-            connect_properties: MqttConnectProperties::default(),
-            reconnect: BrokerReconnectConfig::default(),
-            supported_versions: vec![MqttProtocolVersion::V3_1_1, MqttProtocolVersion::V5_0],
-            will: None,
-        };
-        assert_eq!(
-            preferred_v5.preferred_protocol_version(),
-            MqttProtocolVersion::V5_0
-        );
-
-        let fallback_v3 = MqttEndpointConfig {
-            broker: "mqtt://broker".to_string(),
-            client_id: "client-v3".to_string(),
-            auth: None,
-            tls: None,
-            keepalive_secs: Some(30),
-            clean_start: true,
-            session_expiry_secs: None,
-            topic_prefix: None,
-            connect_properties: MqttConnectProperties::default(),
-            reconnect: BrokerReconnectConfig::default(),
-            supported_versions: vec![MqttProtocolVersion::V3_1_1],
-            will: None,
-        };
-        assert_eq!(
-            fallback_v3.preferred_protocol_version(),
-            MqttProtocolVersion::V3_1_1
-        );
-        assert!(fallback_v3.supports_protocol_version(MqttProtocolVersion::V3_1_1));
-        assert!(!fallback_v3.supports_protocol_version(MqttProtocolVersion::V5_0));
     }
 
     #[test]

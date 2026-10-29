@@ -8,7 +8,8 @@ use alloc::{string::ToString, vec, vec::Vec};
 
 use ferredge_core::prelude::*;
 use ferredge_proto_modbus::{
-    ModbusDriver, ModbusParserSeed, ModbusRequest, ModbusResponseDecoder, SerialTransport,
+    ModbusClientOptions, ModbusDriver, ModbusEndpoint, ModbusParserSeed, ModbusRequest,
+    ModbusResponseDecoder, ModbusRtuEndpointConfig, SerialTransport,
 };
 use ferredge_runtime_embassy::{EmbassyRuntime, EmbassySerial};
 
@@ -20,10 +21,10 @@ pub async fn run(runtime: &EmbassyRuntime) {
 
     let driver = ModbusDriver::with_transport(
         Device {
-            id: "modbus-device-1".to_string(),
+            id: "modbus-device-1".into(),
             name: "Modbus Device".to_string(),
             status: DeviceStatus::Online,
-            endpoint: DeviceEndpoint::ModbusRTU(ModbusRtuEndpointConfig {
+            endpoint: ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
                 serial: SerialPortConfig {
                     path: "/dev/uart1".to_string(),
                     ..SerialPortConfig::default()

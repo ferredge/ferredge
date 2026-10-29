@@ -74,6 +74,8 @@ pub trait PubSub: MaybeSend + MaybeSync {
     ) -> impl Future<Output = Result<(), Self::Error>> + MaybeSend;
 
     /// Registers one subscription and forwards matching messages into provided sink.
+    ///
+    /// Sink events are deliberately `'static`: subscriptions outlive the borrowed inbound frame.
     fn subscribe<S>(
         &self,
         subscription: Self::Subscription,

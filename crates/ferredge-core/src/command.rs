@@ -3,14 +3,15 @@ extern crate alloc;
 use alloc::{borrow::Cow, string::String, vec::Vec};
 use core::fmt;
 
-use crate::device::DeviceId;
+use crate::headers::Headers;
+use crate::id::{ChannelName, CommandId, DeviceId, OperationName, ResourceName};
+use crate::meta::TransportMeta;
+use crate::owned::IntoOwned;
 use serde::{Deserialize, Serialize};
-
-/// Unique identifier for command lifecycle and correlation.
-pub type CommandId = String;
 
 /// High-level lifecycle state for command delivery and completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeliveryState {
     /// Transport accepted command for further processing.
     Accepted,
@@ -26,33 +27,50 @@ pub enum DeliveryState {
 
 /// Correlates async replies or completion events with original request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Correlation<'a> {
     /// Identifier of original command or request.
-    pub request_id: Cow<'a, str>,
+    pub request_id: CommandId,
     /// Optional logical reply destination such as topic or resource.
     pub reply_to: Option<Address<'a>>,
 }
 
-impl Correlation<'_> {
+impl<'a> Correlation<'a> {
+    /// Creates correlation metadata for the given request with an optional reply destination.
+    pub fn new(request_id: CommandId, reply_to: Option<Address<'a>>) -> Self {
+        Self {
+            request_id,
+            reply_to,
+        }
+    }
+
     /// Re-borrows this correlation without forcing ownership changes.
     pub fn as_borrowed(&self) -> Correlation<'_> {
         Correlation {
-            request_id: Cow::Borrowed(self.request_id.as_ref()),
+            request_id: self.request_id.clone(),
             reply_to: self.reply_to.as_ref().map(Address::as_borrowed),
         }
     }
 
     /// Materializes an owned correlation for async or persistent boundaries.
     pub fn into_owned(self) -> Correlation<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for Correlation<'_> {
+    type Owned = Correlation<'static>;
+    fn into_owned(self) -> Self::Owned {
         Correlation {
-            request_id: Cow::Owned(self.request_id.into_owned()),
-            reply_to: self.reply_to.map(Address::into_owned),
+            request_id: self.request_id,
+            reply_to: self.reply_to.into_owned(),
         }
     }
 }
 
 /// Protocol-neutral logical address used by routed messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Address<'a> {
     /// Resource-oriented address such as HTTP path or Modbus register alias.
     Resource(Cow<'a, str>),
@@ -71,10 +89,7 @@ impl Address<'_> {
 
     /// Materializes an owned address for long-lived boundaries.
     pub fn into_owned(self) -> Address<'static> {
-        match self {
-            Self::Resource(value) => Address::Resource(Cow::Owned(value.into_owned())),
-            Self::Channel(value) => Address::Channel(Cow::Owned(value.into_owned())),
-        }
+        IntoOwned::into_owned(self)
     }
 
     /// Returns the underlying string slice for either address family.
@@ -85,8 +100,19 @@ impl Address<'_> {
     }
 }
 
+impl IntoOwned for Address<'_> {
+    type Owned = Address<'static>;
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Self::Resource(value) => Address::Resource(IntoOwned::into_owned(value)),
+            Self::Channel(value) => Address::Channel(IntoOwned::into_owned(value)),
+        }
+    }
+}
+
 /// Common delivery guarantees shared by broker-style protocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeliveryGuarantee {
     /// Delivery may be dropped without retry.
     BestEffort,
@@ -96,128 +122,114 @@ pub enum DeliveryGuarantee {
     ExactlyOnce,
 }
 
-/// MQTT payload format indicator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MqttPayloadFormat {
-    /// Payload is arbitrary binary bytes.
-    Bytes,
-    /// Payload should be interpreted as UTF-8 text.
-    Utf8,
-}
-
-/// MQTT retained-message handling policy for subscriptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MqttRetainHandling {
-    /// Send retained messages when subscription is established.
-    SendRetained,
-    /// Send retained messages only when subscription does not already exist.
-    SendRetainedIfNotExists,
-    /// Do not send retained messages on subscribe.
-    DoNotSendRetained,
-}
-
 /// Protocol-neutral broker send options preserved in routed command layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct BrokerMessageOptions {
+pub struct BrokerMessageOptions<'a> {
     /// Optional delivery guarantee requested by caller.
     pub delivery: Option<DeliveryGuarantee>,
     /// Optional message headers or attributes.
-    pub headers: Vec<(String, String)>,
-    /// Optional logical reply channel.
-    pub reply_to: Option<String>,
-    /// Optional application-level correlation identifier.
-    pub correlation_id: Option<String>,
-    /// Optional protocol-specific broker extension.
-    pub protocol: Option<BrokerMessageProtocolOptions>,
+    pub headers: Headers<'a>,
+    /// Optional open protocol-specific metadata capture.
+    pub extensions: Option<TransportMeta<'a>>,
+}
+
+impl BrokerMessageOptions<'_> {
+    /// Materializes owned broker message options for long-lived boundaries.
+    pub fn into_owned(self) -> BrokerMessageOptions<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for BrokerMessageOptions<'_> {
+    type Owned = BrokerMessageOptions<'static>;
+    fn into_owned(self) -> Self::Owned {
+        BrokerMessageOptions {
+            delivery: self.delivery,
+            headers: self.headers.into_owned(),
+            extensions: self.extensions.into_owned(),
+        }
+    }
 }
 
 /// Protocol-neutral request options preserved for request/response transports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RequestOptions {
+pub struct RequestOptions<'a> {
     /// Optional dynamic headers attached to the request.
-    pub headers: Vec<(String, String)>,
+    pub headers: Headers<'a>,
     /// Optional declared content type.
     pub content_type: Option<String>,
     /// Optional method override for transports that support it.
     pub method: Option<String>,
     /// Optional path override for transports that support it.
     pub path: Option<String>,
+    /// Optional open protocol-specific metadata capture.
+    pub extensions: Option<TransportMeta<'a>>,
+}
+
+impl RequestOptions<'_> {
+    /// Materializes owned request options for long-lived boundaries.
+    pub fn into_owned(self) -> RequestOptions<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for RequestOptions<'_> {
+    type Owned = RequestOptions<'static>;
+    fn into_owned(self) -> Self::Owned {
+        RequestOptions {
+            headers: self.headers.into_owned(),
+            content_type: self.content_type,
+            method: self.method,
+            path: self.path,
+            extensions: self.extensions.into_owned(),
+        }
+    }
 }
 
 /// Protocol-neutral broker subscription options preserved in routed command layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct BrokerSubscriptionOptions {
+pub struct BrokerSubscriptionOptions<'a> {
     /// Optional delivery guarantee preference for consumed messages.
     pub delivery: Option<DeliveryGuarantee>,
     /// Optional durable consumer or subscription name.
     pub durable_name: Option<String>,
     /// Optional shared consumer group identifier.
     pub shared_group: Option<String>,
-    /// Optional protocol-specific subscription extension.
-    pub protocol: Option<BrokerSubscriptionProtocolOptions>,
+    /// Optional open protocol-specific metadata capture.
+    pub extensions: Option<TransportMeta<'a>>,
 }
 
-/// Tagged protocol-specific broker send options.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BrokerMessageProtocolOptions {
-    /// MQTT-specific publish options.
-    Mqtt(MqttMessageOptions),
+impl BrokerSubscriptionOptions<'_> {
+    /// Materializes owned broker subscription options for long-lived boundaries.
+    pub fn into_owned(self) -> BrokerSubscriptionOptions<'static> {
+        IntoOwned::into_owned(self)
+    }
 }
 
-/// MQTT-specific broker send options.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct MqttMessageOptions {
-    /// Whether broker should retain message for future subscribers.
-    pub retain: bool,
-    /// Optional MQTT v5 payload format indicator.
-    pub payload_format: Option<MqttPayloadFormat>,
-    /// Optional MQTT v5 content type.
-    pub content_type: Option<String>,
-    /// Optional MQTT v5 message expiry interval in seconds.
-    pub message_expiry_interval_secs: Option<u32>,
-    /// Optional MQTT v5 topic alias.
-    pub topic_alias: Option<u16>,
-    /// Optional MQTT v5 user properties.
-    pub user_properties: Vec<(String, String)>,
-    /// Optional MQTT v5 response topic. If omitted, generic `reply_to` is used when possible.
-    pub response_topic: Option<String>,
-    /// Optional raw MQTT v5 correlation data.
-    pub correlation_data: Option<Vec<u8>>,
-}
-
-/// Tagged protocol-specific broker subscription options.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BrokerSubscriptionProtocolOptions {
-    /// MQTT-specific subscribe options.
-    Mqtt(MqttSubscriptionOptions),
-}
-
-/// MQTT-specific broker subscription options.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct MqttSubscriptionOptions {
-    /// Prevent broker from sending messages published by same client.
-    pub no_local: bool,
-    /// Preserve original RETAIN flag on forwarded messages.
-    pub retain_as_published: bool,
-    /// Retained-message delivery policy when subscription starts.
-    pub retain_handling: Option<MqttRetainHandling>,
-    /// Optional MQTT v5 subscription identifier.
-    pub subscription_identifier: Option<u32>,
-    /// Optional MQTT v5 user properties.
-    pub user_properties: Vec<(String, String)>,
+impl IntoOwned for BrokerSubscriptionOptions<'_> {
+    type Owned = BrokerSubscriptionOptions<'static>;
+    fn into_owned(self) -> Self::Owned {
+        BrokerSubscriptionOptions {
+            delivery: self.delivery,
+            durable_name: self.durable_name,
+            shared_group: self.shared_group,
+            extensions: self.extensions.into_owned(),
+        }
+    }
 }
 
 /// Generic broker address used across topic, queue, subject, and stream transports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerAddress {
     /// Broker-specific destination or subscription name.
-    pub name: String,
+    pub name: ChannelName,
     /// Optional semantic classification of broker address.
     pub kind: Option<BrokerChannelKind>,
 }
 
 /// Common broker channel categories used by transport-neutral routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BrokerChannelKind {
     /// Topic-like fan-out destination.
     Topic,
@@ -233,6 +245,7 @@ pub enum BrokerChannelKind {
 ///
 /// **Note:** f64 doesn't support `Eq` trait due to `NaN` semantics, so `PayloadValue` either.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PayloadValue<'a> {
     /// Explicit absence of payload content.
     Null,
@@ -249,9 +262,9 @@ pub enum PayloadValue<'a> {
     /// Opaque binary payload.
     Bytes(Cow<'a, [u8]>),
     /// Ordered heterogeneous sequence payload.
-    List(Cow<'a, [PayloadValue<'a>]>),
+    List(Vec<PayloadValue<'a>>),
     /// Ordered object payload.
-    Map(Cow<'a, [(Cow<'a, str>, PayloadValue<'a>)]>),
+    Map(Vec<(Cow<'a, str>, PayloadValue<'a>)>),
 }
 
 impl PayloadValue<'_> {
@@ -265,42 +278,37 @@ impl PayloadValue<'_> {
             Self::F64(value) => PayloadValue::F64(*value),
             Self::String(value) => PayloadValue::String(Cow::Borrowed(value.as_ref())),
             Self::Bytes(value) => PayloadValue::Bytes(Cow::Borrowed(value.as_ref())),
-            Self::List(values) => PayloadValue::List(Cow::Owned(
-                values.iter().map(PayloadValue::as_borrowed).collect(),
-            )),
-            Self::Map(values) => PayloadValue::Map(Cow::Owned(
+            Self::List(values) => {
+                PayloadValue::List(values.iter().map(PayloadValue::as_borrowed).collect())
+            }
+            Self::Map(values) => PayloadValue::Map(
                 values
                     .iter()
                     .map(|(key, value)| (Cow::Borrowed(key.as_ref()), value.as_borrowed()))
                     .collect(),
-            )),
+            ),
         }
     }
 
     /// Materializes an owned payload for async or persistence boundaries.
     pub fn into_owned(self) -> PayloadValue<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for PayloadValue<'_> {
+    type Owned = PayloadValue<'static>;
+    fn into_owned(self) -> Self::Owned {
         match self {
             Self::Null => PayloadValue::Null,
             Self::Bool(value) => PayloadValue::Bool(value),
             Self::I64(value) => PayloadValue::I64(value),
             Self::U64(value) => PayloadValue::U64(value),
             Self::F64(value) => PayloadValue::F64(value),
-            Self::String(value) => PayloadValue::String(Cow::Owned(value.into_owned())),
-            Self::Bytes(value) => PayloadValue::Bytes(Cow::Owned(value.into_owned())),
-            Self::List(values) => PayloadValue::List(Cow::Owned(
-                values
-                    .into_owned()
-                    .into_iter()
-                    .map(PayloadValue::into_owned)
-                    .collect(),
-            )),
-            Self::Map(values) => PayloadValue::Map(Cow::Owned(
-                values
-                    .into_owned()
-                    .into_iter()
-                    .map(|(key, value)| (Cow::Owned(key.into_owned()), value.into_owned()))
-                    .collect(),
-            )),
+            Self::String(value) => PayloadValue::String(IntoOwned::into_owned(value)),
+            Self::Bytes(value) => PayloadValue::Bytes(IntoOwned::into_owned(value)),
+            Self::List(values) => PayloadValue::List(IntoOwned::into_owned(values)),
+            Self::Map(values) => PayloadValue::Map(IntoOwned::into_owned(values)),
         }
     }
 }
@@ -347,42 +355,94 @@ impl fmt::Display for PayloadValue<'_> {
 
 /// Protocol-neutral operation intent routed between adapters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Intent {
+#[non_exhaustive]
+pub enum Intent<'a> {
     /// Reads current state from named resource.
     Read {
-        resource: String,
-        options: RequestOptions,
+        resource: ResourceName,
+        options: RequestOptions<'a>,
     },
     /// Writes typed payload to named resource.
     Write {
-        resource: String,
-        payload: PayloadValue<'static>,
-        options: RequestOptions,
+        resource: ResourceName,
+        payload: PayloadValue<'a>,
+        options: RequestOptions<'a>,
     },
     /// Invokes operation with optional argument payload.
     Invoke {
-        operation: String,
-        args: Option<PayloadValue<'static>>,
-        options: RequestOptions,
+        operation: OperationName,
+        args: Option<PayloadValue<'a>>,
+        options: RequestOptions<'a>,
     },
     /// Sends typed payload to broker-oriented channel such as topic, subject, queue, or stream.
     Send {
         channel: BrokerAddress,
-        payload: PayloadValue<'static>,
-        options: BrokerMessageOptions,
+        payload: PayloadValue<'a>,
+        options: BrokerMessageOptions<'a>,
     },
     /// Subscribes to broker-oriented channel such as topic, subject, queue, or stream.
     Subscribe {
         channel: BrokerAddress,
-        options: BrokerSubscriptionOptions,
+        options: BrokerSubscriptionOptions<'a>,
     },
     /// Removes prior subscription for channel.
     Unsubscribe { channel: BrokerAddress },
 }
 
+impl Intent<'_> {
+    /// Materializes an owned intent for async or persistent boundaries.
+    pub fn into_owned(self) -> Intent<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for Intent<'_> {
+    type Owned = Intent<'static>;
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Self::Read { resource, options } => Intent::Read {
+                resource,
+                options: options.into_owned(),
+            },
+            Self::Write {
+                resource,
+                payload,
+                options,
+            } => Intent::Write {
+                resource,
+                payload: payload.into_owned(),
+                options: options.into_owned(),
+            },
+            Self::Invoke {
+                operation,
+                args,
+                options,
+            } => Intent::Invoke {
+                operation,
+                args: args.into_owned(),
+                options: options.into_owned(),
+            },
+            Self::Send {
+                channel,
+                payload,
+                options,
+            } => Intent::Send {
+                channel,
+                payload: payload.into_owned(),
+                options: options.into_owned(),
+            },
+            Self::Subscribe { channel, options } => Intent::Subscribe {
+                channel,
+                options: options.into_owned(),
+            },
+            Self::Unsubscribe { channel } => Intent::Unsubscribe { channel },
+        }
+    }
+}
+
 /// Represents a protocol-neutral command sent to a device or the core.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Command {
+pub struct Command<'a> {
     /// Stable command identifier.
     pub id: CommandId,
     /// Optional origin device when command was emitted by another device.
@@ -390,13 +450,34 @@ pub struct Command {
     /// Destination device identifier.
     pub target_device_id: DeviceId,
     /// Requested protocol-neutral operation.
-    pub intent: Intent,
+    pub intent: Intent<'a>,
     /// Optional async reply or completion correlation metadata.
-    pub correlation: Option<Correlation<'static>>,
+    pub correlation: Option<Correlation<'a>>,
+}
+
+impl Command<'_> {
+    /// Materializes an owned command for async or persistent boundaries.
+    pub fn into_owned(self) -> Command<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for Command<'_> {
+    type Owned = Command<'static>;
+    fn into_owned(self) -> Self::Owned {
+        Command {
+            id: self.id,
+            source_device_id: self.source_device_id,
+            target_device_id: self.target_device_id,
+            intent: self.intent.into_owned(),
+            correlation: self.correlation.into_owned(),
+        }
+    }
 }
 
 /// Represents the result of command execution or delivery.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CommandResult<'a> {
     /// Identifier of command this result belongs to.
     pub command_id: CommandId,
@@ -407,21 +488,47 @@ pub struct CommandResult<'a> {
     /// Optional payload returned by successful completion.
     pub payload: Option<PayloadValue<'a>>,
     /// Optional human-readable error description.
-    pub error: Option<Cow<'a, str>>,
+    pub error: Option<String>,
     /// Optional correlation metadata preserved from originating command.
     pub correlation: Option<Correlation<'a>>,
 }
 
-impl CommandResult<'_> {
+impl<'a> CommandResult<'a> {
+    /// Creates a result for the given command and device in the given delivery state.
+    pub fn new(
+        command_id: CommandId,
+        device_id: DeviceId,
+        state: DeliveryState,
+        payload: Option<PayloadValue<'a>>,
+        error: Option<String>,
+        correlation: Option<Correlation<'a>>,
+    ) -> Self {
+        Self {
+            command_id,
+            device_id,
+            state,
+            payload,
+            error,
+            correlation,
+        }
+    }
+
     /// Materializes an owned command result for long-lived boundaries.
     pub fn into_owned(self) -> CommandResult<'static> {
+        IntoOwned::into_owned(self)
+    }
+}
+
+impl IntoOwned for CommandResult<'_> {
+    type Owned = CommandResult<'static>;
+    fn into_owned(self) -> Self::Owned {
         CommandResult {
             command_id: self.command_id,
             device_id: self.device_id,
             state: self.state,
-            payload: self.payload.map(PayloadValue::into_owned),
-            error: self.error.map(|value| Cow::Owned(value.into_owned())),
-            correlation: self.correlation.map(Correlation::into_owned),
+            payload: self.payload.into_owned(),
+            error: self.error,
+            correlation: self.correlation.into_owned(),
         }
     }
 }

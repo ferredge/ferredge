@@ -14,6 +14,10 @@ use mqtt_protocol_core::mqtt::packet::GenericPacketTrait;
 use runtime_stack::StackSocket;
 
 use crate::convert::qos_from_delivery;
+use crate::endpoint::{
+    MqttConnackProperties, MqttEndpointConfig, MqttProtocolVersion, MqttWillConfig,
+};
+use crate::meta::{MqttMeta, MqttPayloadFormat};
 use crate::runtime_stack;
 use crate::types::{MqttPacketRequest, MqttWirePacket};
 use crate::{
@@ -36,15 +40,15 @@ pub(crate) struct MqttClientSession {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingReplyRoute {
-    pub(crate) command_id: String,
+    pub(crate) command_id: CommandId,
     pub(crate) reply_to: Option<Address<'static>>,
 }
 
 /// Stateful MQTT inbound decoder that preserves packet-id and reply-route correlation.
 #[derive(Debug)]
 pub struct MqttInboundDecoder {
-    device_id: String,
-    pending_command_ids: RefCell<Map<u16, String>>,
+    device_id: DeviceId,
+    pending_command_ids: RefCell<Map<u16, CommandId>>,
     pending_reply_routes: RefCell<Map<String, PendingReplyRoute>>,
 }
 
@@ -57,7 +61,7 @@ pub enum MqttDecodedInbound {
 }
 
 impl MqttInboundDecoder {
-    pub fn new(device_id: impl Into<String>) -> Self {
+    pub fn new(device_id: impl Into<DeviceId>) -> Self {
         Self {
             device_id: device_id.into(),
             pending_command_ids: RefCell::new(Map::new()),
@@ -96,6 +100,7 @@ impl ProtocolDecoder<mqtt::packet::Packet> for MqttInboundDecoder {
                 &self.device_id,
                 packet,
             ),
+            // Owned boundary: decoded events outlive the borrowed publish packet.
             mqtt::packet::Packet::V3_1_1Publish(packet) => Some(RoutedMessage::Event(
                 routed_event_from_v3_publish(&self.device_id, packet).into_owned(),
             )),
@@ -183,7 +188,8 @@ impl ProtocolDecoder<mqtt::packet::Packet> for MqttInboundDecoder {
         Ok(match decoded {
             Some(RoutedMessage::Event(event)) => MqttDecodedInbound::Event(event),
             Some(RoutedMessage::Result(result)) => MqttDecodedInbound::Result(result),
-            Some(RoutedMessage::Command(_)) | None => MqttDecodedInbound::Ignored,
+            // Forward-compat: commands and message kinds added later are ignored inbound.
+            _ => MqttDecodedInbound::Ignored,
         })
     }
 }
@@ -218,13 +224,13 @@ impl TryFrom<MqttDecodedInbound> for BridgeMessage<'static> {
 
 #[allow(dead_code)]
 pub(crate) fn routed_message_from_packet(
-    pending_command_ids: &mut Map<u16, String>,
+    pending_command_ids: &mut Map<u16, CommandId>,
     pending_reply_routes: &mut Map<String, PendingReplyRoute>,
-    device_id: &str,
+    device_id: &DeviceId,
     packet: mqtt::packet::Packet,
 ) -> Option<RoutedMessage<'static>> {
     let decoder = MqttInboundDecoder {
-        device_id: device_id.to_string(),
+        device_id: device_id.clone(),
         pending_command_ids: RefCell::new(core::mem::take(pending_command_ids)),
         pending_reply_routes: RefCell::new(core::mem::take(pending_reply_routes)),
     };
@@ -407,7 +413,7 @@ fn publish_requires_packet_id(packet: &MqttWirePacket) -> bool {
 pub(crate) async fn send_packet_request_async(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
     request: MqttPacketRequest,
 ) -> Result<(), String> {
     let request = assign_runtime_packet_id(session, request)?;
@@ -538,7 +544,7 @@ fn rebuild_with_packet_id(
 pub(crate) async fn read_from_session_async(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
     negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
     auth_handler: Option<&Shared<RuntimeMutex<Option<Shared<dyn MqttAuthProvider>>>>>,
     timeout: Option<Duration>,
@@ -577,7 +583,7 @@ pub(crate) async fn read_from_session_async(
 pub(crate) async fn handle_connection_events_async(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    _device_id: &str,
+    _device_id: &DeviceId,
     negotiated_connack: Option<&Shared<RuntimeMutex<Option<MqttConnackProperties>>>>,
     auth_handler: Option<&Shared<RuntimeMutex<Option<Shared<dyn MqttAuthProvider>>>>>,
     events: Vec<mqtt::connection::Event>,
@@ -607,6 +613,7 @@ pub(crate) async fn handle_connection_events_async(
                 }
                 let decoded = session.inbound_decoder.decode(&packet)?;
                 if let Ok(message) = RoutedMessage::try_from(decoded) {
+                    // Owned boundary: the routed queue outlives the borrowed inbound packet.
                     routed.push(message.into_owned());
                 }
             }
@@ -820,7 +827,9 @@ pub(crate) async fn disconnect_session(
             session.connection.checked_send(disconnect)
         }
     };
-    let _ = handle_connection_events_async(runtime, session, "", None, None, events).await?;
+    let _ =
+        handle_connection_events_async(runtime, session, &DeviceId::from(""), None, None, events)
+            .await?;
     session
         .stream
         .close()
@@ -831,7 +840,7 @@ pub(crate) async fn disconnect_session(
 async fn send_keepalive_ping_if_due(
     runtime: &runtime_stack::StackRuntime,
     session: &mut MqttClientSession,
-    device_id: &str,
+    device_id: &DeviceId,
 ) -> Result<(), String> {
     let Some(keepalive_secs) = session.keepalive_secs else {
         return Ok(());
@@ -1051,13 +1060,12 @@ fn reason_string_from_props_opt(props: &Option<mqtt::packet::Properties>) -> Opt
 fn mqtt_meta_from_v5_publish(
     packet: &mqtt::packet::v5_0::Publish,
     correlation_override: Option<String>,
-) -> MqttMeta<'static> {
+) -> TransportMeta<'static> {
     let mut content_type = None;
     let mut payload_format = None;
     let mut message_expiry_interval_secs = None;
     let mut response_topic = None;
-    let mut correlation_data = correlation_override.map(Cow::Owned);
-    let mut correlation_data_bytes = None;
+    let mut correlation_data = correlation_override.map(|value| Cow::Owned(value.into_bytes()));
     let mut topic_alias = None;
     let mut subscription_identifiers = Vec::new();
     let mut user_properties = Vec::new();
@@ -1068,7 +1076,11 @@ fn mqtt_meta_from_v5_publish(
                 content_type = Some(Cow::Owned(prop.val().to_string()))
             }
             mqtt::packet::Property::PayloadFormatIndicator(prop) => {
-                payload_format = Some(Cow::Owned(prop.val().to_string()))
+                payload_format = Some(if prop.val() == 1 {
+                    MqttPayloadFormat::Utf8
+                } else {
+                    MqttPayloadFormat::Bytes
+                })
             }
             mqtt::packet::Property::MessageExpiryInterval(prop) => {
                 message_expiry_interval_secs = Some(prop.val())
@@ -1078,10 +1090,8 @@ fn mqtt_meta_from_v5_publish(
             }
             mqtt::packet::Property::CorrelationData(prop) => {
                 if correlation_data.is_none() {
-                    correlation_data =
-                        Some(Cow::Owned(String::from_utf8_lossy(prop.val()).into_owned()));
+                    correlation_data = Some(Cow::Owned(prop.val().to_vec()));
                 }
-                correlation_data_bytes = Some(Cow::Owned(prop.val().to_vec()));
             }
             mqtt::packet::Property::TopicAlias(prop) => topic_alias = Some(prop.val()),
             mqtt::packet::Property::SubscriptionIdentifier(prop) => {
@@ -1096,8 +1106,8 @@ fn mqtt_meta_from_v5_publish(
     }
 
     MqttMeta {
-        topic: Cow::Owned(packet.topic_name().to_string()),
-        qos: packet.qos() as u8,
+        topic: Some(Cow::Owned(packet.topic_name().to_string())),
+        qos: Some(packet.qos() as u8),
         retain: packet.retain(),
         duplicate: packet.dup(),
         packet_id: packet.packet_id(),
@@ -1106,13 +1116,12 @@ fn mqtt_meta_from_v5_publish(
         message_expiry_interval_secs,
         response_topic,
         correlation_data,
-        correlation_data_bytes,
         topic_alias,
-        subscription_identifiers: subscription_identifiers.into(),
-        user_properties: user_properties.into(),
-        reason_codes: Vec::new().into(),
-        reason_string: None,
+        subscription_identifiers,
+        headers: (!user_properties.is_empty()).then(|| Headers::from(user_properties)),
+        ..MqttMeta::default()
     }
+    .into_transport_meta()
 }
 
 pub(crate) fn pending_reply_route_from_packet(
@@ -1148,19 +1157,16 @@ pub(crate) fn pending_reply_route_from_packet(
     }
 }
 
-pub(crate) fn mqtt_source(device_id: &str) -> EndpointRef {
-    EndpointRef {
-        device_id: device_id.to_string(),
-        protocol: DeviceProtocol::MQTT,
-    }
+pub(crate) fn mqtt_source(device_id: &DeviceId) -> EndpointRef {
+    EndpointRef::new(device_id.clone(), ProtocolId::MQTT)
 }
 
 pub(crate) fn routed_event_from_v5_publish<'a>(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &'a mqtt::packet::v5_0::Publish,
 ) -> RoutedEvent<'a> {
     let mut correlation_id = None;
-    let mut correlation_data_bytes = None;
+    let mut correlation_data = None;
     let mut reply_to = None;
     let mut content_type = None;
     let mut payload_format = None;
@@ -1171,7 +1177,7 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
     for prop in packet.props() {
         match prop {
             mqtt::packet::Property::CorrelationData(prop) => {
-                correlation_data_bytes = Some(Cow::Borrowed(prop.val()));
+                correlation_data = Some(Cow::Borrowed(prop.val()));
                 correlation_id = Some(String::from_utf8_lossy(prop.val()));
             }
             mqtt::packet::Property::ResponseTopic(prop) => {
@@ -1181,7 +1187,11 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
                 content_type = Some(Cow::Borrowed(prop.val()));
             }
             mqtt::packet::Property::PayloadFormatIndicator(prop) => {
-                payload_format = Some(Cow::Owned(prop.val().to_string()));
+                payload_format = Some(if prop.val() == 1 {
+                    MqttPayloadFormat::Utf8
+                } else {
+                    MqttPayloadFormat::Bytes
+                });
             }
             mqtt::packet::Property::MessageExpiryInterval(prop) => {
                 message_expiry_interval_secs = Some(prop.val());
@@ -1200,46 +1210,47 @@ pub(crate) fn routed_event_from_v5_publish<'a>(
     }
     let response_topic = reply_to.as_ref().and_then(|address| match address {
         Address::Channel(channel) => Some(channel.clone()),
-        Address::Resource(_) => None,
+        _ => None,
     });
-    let payload =
-        payload_value_from_mqtt_bytes(packet.payload().as_slice(), payload_format.as_deref());
-    RoutedEvent {
-        source: mqtt_source(device_id),
-        address: Address::Channel(Cow::Borrowed(packet.topic_name())),
+    let payload = payload_value_from_mqtt_bytes(packet.payload().as_slice(), payload_format);
+    let transport = MqttMeta {
+        topic: Some(Cow::Borrowed(packet.topic_name())),
+        qos: Some(packet.qos() as u8),
+        retain: packet.retain(),
+        duplicate: packet.dup(),
+        packet_id: packet.packet_id(),
+        content_type,
+        payload_format,
+        message_expiry_interval_secs,
+        response_topic,
+        correlation_data,
+        topic_alias,
+        subscription_identifiers,
+        headers: (!user_properties.is_empty()).then(|| Headers::from(user_properties)),
+        ..MqttMeta::default()
+    }
+    .into_transport_meta();
+    RoutedEvent::new(
+        mqtt_source(device_id),
+        Route::Messaging {
+            topic: Cow::Borrowed(packet.topic_name()),
+        },
         payload,
-        correlation: if correlation_id.is_some() || reply_to.is_some() {
-            Some(Correlation {
-                request_id: correlation_id.clone().unwrap_or_else(|| Cow::Borrowed("")),
+        if correlation_id.is_some() || reply_to.is_some() {
+            Some(Correlation::new(
+                CommandId::new(correlation_id.unwrap_or_default()),
                 reply_to,
-            })
+            ))
         } else {
             None
         },
-        transport: Some(TransportMeta::Mqtt(MqttMeta {
-            topic: Cow::Borrowed(packet.topic_name()),
-            qos: packet.qos() as u8,
-            retain: packet.retain(),
-            duplicate: packet.dup(),
-            packet_id: packet.packet_id(),
-            content_type,
-            payload_format,
-            message_expiry_interval_secs,
-            response_topic,
-            correlation_data: correlation_id.clone(),
-            correlation_data_bytes,
-            topic_alias,
-            subscription_identifiers: subscription_identifiers.into(),
-            user_properties: user_properties.into(),
-            reason_codes: Vec::new().into(),
-            reason_string: None,
-        })),
-    }
+        Some(transport),
+    )
 }
 
 fn routed_reply_or_event_from_v5_publish(
     pending_reply_routes: &mut Map<String, PendingReplyRoute>,
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Publish,
 ) -> Option<RoutedMessage<'static>> {
     let mut correlation_key = None;
@@ -1253,71 +1264,66 @@ fn routed_reply_or_event_from_v5_publish(
     if let Some(correlation_key) = correlation_key
         && let Some(route) = pending_reply_routes.remove(&correlation_key)
     {
-        return Some(RoutedMessage::Result(RoutedResult {
-            source: mqtt_source(device_id),
-            result: CommandResult {
-                command_id: route.command_id.clone(),
-                device_id: device_id.to_string(),
-                state: DeliveryState::Completed,
-                payload: Some(
+        // Owned boundary: the reply result outlives the borrowed publish packet.
+        return Some(RoutedMessage::Result(RoutedResult::new(
+            mqtt_source(device_id),
+            CommandResult::new(
+                route.command_id.clone().into(),
+                device_id.clone(),
+                DeliveryState::Completed,
+                Some(
                     payload_value_from_mqtt_bytes(
                         packet.payload().as_slice(),
-                        mqtt_payload_format(packet).as_deref(),
+                        mqtt_payload_format(packet),
                     )
                     .into_owned(),
                 ),
-                error: None,
-                correlation: Some(Correlation {
-                    request_id: Cow::Owned(route.command_id),
-                    reply_to: route.reply_to,
-                }),
-            },
-            transport: Some(TransportMeta::Mqtt(mqtt_meta_from_v5_publish(
-                packet,
-                Some(correlation_key),
-            ))),
-        }));
+                None,
+                Some(Correlation::new(route.command_id, route.reply_to)),
+            ),
+            Some(mqtt_meta_from_v5_publish(packet, Some(correlation_key))),
+        )));
     }
 
+    // Owned boundary: decoded events outlive the borrowed publish packet.
     Some(RoutedMessage::Event(
         routed_event_from_v5_publish(device_id, packet).into_owned(),
     ))
 }
 
 pub(crate) fn routed_event_from_v3_publish<'a>(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &'a mqtt::packet::v3_1_1::Publish,
 ) -> RoutedEvent<'a> {
-    RoutedEvent {
-        source: mqtt_source(device_id),
-        address: Address::Channel(Cow::Borrowed(packet.topic_name())),
-        payload: PayloadValue::Bytes(Cow::Borrowed(packet.payload().as_slice())),
-        correlation: None,
-        transport: Some(TransportMeta::Mqtt(MqttMeta {
+    RoutedEvent::new(
+        mqtt_source(device_id),
+        Route::Messaging {
             topic: Cow::Borrowed(packet.topic_name()),
-            qos: packet.qos() as u8,
-            retain: packet.retain(),
-            duplicate: packet.dup(),
-            packet_id: packet.packet_id(),
-            content_type: None,
-            payload_format: None,
-            message_expiry_interval_secs: None,
-            response_topic: None,
-            correlation_data: None,
-            correlation_data_bytes: None,
-            topic_alias: None,
-            subscription_identifiers: Vec::new().into(),
-            user_properties: Vec::new().into(),
-            reason_codes: Vec::new().into(),
-            reason_string: None,
-        })),
-    }
+        },
+        PayloadValue::Bytes(Cow::Borrowed(packet.payload().as_slice())),
+        None,
+        Some(
+            MqttMeta {
+                topic: Some(Cow::Borrowed(packet.topic_name())),
+                qos: Some(packet.qos() as u8),
+                retain: packet.retain(),
+                duplicate: packet.dup(),
+                packet_id: packet.packet_id(),
+                ..MqttMeta::default()
+            }
+            .into_transport_meta(),
+        ),
+    )
 }
 
-fn mqtt_payload_format(packet: &mqtt::packet::v5_0::Publish) -> Option<Cow<'static, str>> {
+fn mqtt_payload_format(packet: &mqtt::packet::v5_0::Publish) -> Option<MqttPayloadFormat> {
     for prop in packet.props() {
         if let mqtt::packet::Property::PayloadFormatIndicator(prop) = prop {
-            return Some(Cow::Owned(prop.val().to_string()));
+            return Some(if prop.val() == 1 {
+                MqttPayloadFormat::Utf8
+            } else {
+                MqttPayloadFormat::Bytes
+            });
         }
     }
     None
@@ -1325,9 +1331,9 @@ fn mqtt_payload_format(packet: &mqtt::packet::v5_0::Publish) -> Option<Cow<'stat
 
 fn payload_value_from_mqtt_bytes<'a>(
     bytes: &'a [u8],
-    payload_format: Option<&str>,
+    payload_format: Option<MqttPayloadFormat>,
 ) -> PayloadValue<'a> {
-    if payload_format == Some("1")
+    if payload_format == Some(MqttPayloadFormat::Utf8)
         && let Ok(value) = core::str::from_utf8(bytes)
     {
         return PayloadValue::String(Cow::Borrowed(value));
@@ -1336,8 +1342,8 @@ fn payload_value_from_mqtt_bytes<'a>(
 }
 
 fn routed_result_from_v5_puback(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Puback,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1354,22 +1360,22 @@ fn routed_result_from_v5_puback(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
 fn routed_result_from_v5_pubrec(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Pubrec,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1386,22 +1392,22 @@ fn routed_result_from_v5_pubrec(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         false,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
 fn routed_result_from_v5_pubrel(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Pubrel,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1418,22 +1424,22 @@ fn routed_result_from_v5_pubrel(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         false,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
 fn routed_result_from_v5_pubcomp(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Pubcomp,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1450,22 +1456,22 @@ fn routed_result_from_v5_pubcomp(
         }),
         reason_code
             .filter(|code| code.is_failure())
-            .map(|code| Cow::Owned(code.to_string())),
+            .map(|code| code.to_string()),
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_code
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
+        )),
     )
 }
 
 fn routed_result_from_v5_suback(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Suback,
 ) -> RoutedResult<'static> {
     let reason_codes = packet.reason_codes();
@@ -1486,23 +1492,23 @@ fn routed_result_from_v5_suback(
         if failed_codes.is_empty() {
             None
         } else {
-            Some(Cow::Owned(failed_codes.join(",")))
+            Some(failed_codes.join(","))
         },
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_codes
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props(packet.props()),
-        ))),
+        )),
     )
 }
 
 fn routed_result_from_v5_unsuback(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Unsuback,
 ) -> RoutedResult<'static> {
     let reason_codes = packet.reason_codes();
@@ -1523,22 +1529,22 @@ fn routed_result_from_v5_unsuback(
         if failed_codes.is_empty() {
             None
         } else {
-            Some(Cow::Owned(failed_codes.join(",")))
+            Some(failed_codes.join(","))
         },
         true,
-        Some(TransportMeta::Mqtt(mqtt_result_meta(
+        Some(mqtt_result_meta(
             Some(packet.packet_id()),
             reason_codes
                 .into_iter()
                 .map(|code| code.to_string())
                 .collect(),
             reason_string_from_props(packet.props()),
-        ))),
+        )),
     )
 }
 
 fn routed_result_from_v5_disconnect(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Disconnect,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1551,30 +1557,30 @@ fn routed_result_from_v5_disconnect(
         }
         Some(_) => DeliveryState::Rejected,
     };
-    RoutedResult {
-        source: mqtt_source(device_id),
-        result: CommandResult {
-            command_id: "__mqtt_disconnect__".to_string(),
-            device_id: device_id.to_string(),
-            state: state.clone(),
-            payload: None,
-            error: if state == DeliveryState::Rejected {
-                reason_code_text.clone().map(Cow::Owned)
+    RoutedResult::new(
+        mqtt_source(device_id),
+        CommandResult::new(
+            "__mqtt_disconnect__".into(),
+            device_id.clone(),
+            state.clone(),
+            None,
+            if state == DeliveryState::Rejected {
+                reason_code_text.clone()
             } else {
                 None
             },
-            correlation: None,
-        },
-        transport: Some(TransportMeta::Mqtt(mqtt_result_meta(
+            None,
+        ),
+        Some(mqtt_result_meta(
             None,
             reason_code_text.into_iter().collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
-    }
+        )),
+    )
 }
 
 fn routed_result_from_v5_auth(
-    device_id: &str,
+    device_id: &DeviceId,
     packet: &mqtt::packet::v5_0::Auth,
 ) -> RoutedResult<'static> {
     let reason_code = packet.reason_code();
@@ -1586,56 +1592,45 @@ fn routed_result_from_v5_auth(
             DeliveryState::Rejected
         }
     });
-    RoutedResult {
-        source: mqtt_source(device_id),
-        result: CommandResult {
-            command_id: "__mqtt_auth__".to_string(),
-            device_id: device_id.to_string(),
-            state: state.clone(),
-            payload: None,
-            error: if state == DeliveryState::Rejected {
-                reason_code_text.clone().map(Cow::Owned)
+    RoutedResult::new(
+        mqtt_source(device_id),
+        CommandResult::new(
+            "__mqtt_auth__".into(),
+            device_id.clone(),
+            state.clone(),
+            None,
+            if state == DeliveryState::Rejected {
+                reason_code_text.clone()
             } else {
                 None
             },
-            correlation: None,
-        },
-        transport: Some(TransportMeta::Mqtt(mqtt_result_meta(
+            None,
+        ),
+        Some(mqtt_result_meta(
             None,
             reason_code_text.into_iter().collect(),
             reason_string_from_props_opt(packet.props()),
-        ))),
-    }
+        )),
+    )
 }
 
 fn mqtt_result_meta(
     packet_id: Option<u16>,
     reason_codes: Vec<String>,
     reason_string: Option<String>,
-) -> MqttMeta<'static> {
+) -> TransportMeta<'static> {
     MqttMeta {
-        topic: Cow::Borrowed(""),
-        qos: 0,
-        retain: false,
-        duplicate: false,
         packet_id,
-        content_type: None,
-        payload_format: None,
-        message_expiry_interval_secs: None,
-        response_topic: None,
-        correlation_data: None,
-        correlation_data_bytes: None,
-        topic_alias: None,
-        subscription_identifiers: Vec::new().into(),
-        user_properties: Vec::new().into(),
         reason_codes: reason_codes.into_iter().map(Cow::Owned).collect(),
         reason_string: reason_string.map(Cow::Owned),
+        ..MqttMeta::default()
     }
+    .into_transport_meta()
 }
 
 pub(crate) fn routed_result_from_packet_id(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet_id: u16,
     state: DeliveryState,
     remove: bool,
@@ -1652,34 +1647,34 @@ pub(crate) fn routed_result_from_packet_id(
 }
 
 fn routed_result_from_packet_id_with_transport(
-    pending_command_ids: &mut Map<u16, String>,
-    device_id: &str,
+    pending_command_ids: &mut Map<u16, CommandId>,
+    device_id: &DeviceId,
     packet_id: u16,
     state: DeliveryState,
-    error: Option<Cow<'static, str>>,
+    error: Option<String>,
     remove: bool,
     transport: Option<TransportMeta<'static>>,
 ) -> RoutedResult<'static> {
     let command_id = if remove {
         pending_command_ids
             .remove(&packet_id)
-            .unwrap_or_else(|| packet_id.to_string())
+            .unwrap_or_else(|| packet_id.to_string().into())
     } else {
         pending_command_ids
             .get(&packet_id)
             .cloned()
-            .unwrap_or_else(|| packet_id.to_string())
+            .unwrap_or_else(|| packet_id.to_string().into())
     };
-    RoutedResult {
-        source: mqtt_source(device_id),
-        result: CommandResult {
-            command_id,
-            device_id: device_id.to_string(),
+    RoutedResult::new(
+        mqtt_source(device_id),
+        CommandResult::new(
+            command_id.into(),
+            device_id.clone(),
             state,
-            payload: None,
+            None,
             error,
-            correlation: None,
-        },
+            None,
+        ),
         transport,
-    }
+    )
 }

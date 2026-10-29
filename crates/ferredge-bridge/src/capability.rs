@@ -1,9 +1,8 @@
-use alloc::string::String;
-
 use serde::{Deserialize, Serialize};
 
 /// Capability family expressed by a bridge message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BridgeCapability {
     /// Topic or channel oriented message exchange.
     Messaging(MessagingCapability),
@@ -36,17 +35,4 @@ pub struct RequestResponseCapability {
 pub struct RegisterAccessCapability {
     /// Whether the capability accepts opaque binary payloads without serialization.
     pub binary_payloads: bool,
-}
-
-/// Protocol hint carried in bridge metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BridgeProtocolHint {
-    /// HTTP semantic hint.
-    Http,
-    /// MQTT semantic hint.
-    Mqtt,
-    /// Modbus semantic hint.
-    Modbus,
-    /// Future or adapter-specific protocol hint.
-    Reserved(String),
 }

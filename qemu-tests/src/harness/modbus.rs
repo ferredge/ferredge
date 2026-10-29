@@ -6,7 +6,8 @@ use core::time::Duration;
 
 use ferredge_core::prelude::*;
 use ferredge_proto_modbus::{
-    ModbusDriver, ModbusParserSeed, ModbusRequest, ModbusResponseDecoder, SerialTransport,
+    ModbusClientOptions, ModbusDriver, ModbusEndpoint, ModbusParserSeed, ModbusRequest,
+    ModbusResponseDecoder, ModbusRtuEndpointConfig, ModbusTcpEndpointConfig, SerialTransport,
     TcpTransport,
 };
 use ferredge_runtime_embassy::{EmbassyNet, EmbassyRuntime, EmbassySerial};
@@ -23,10 +24,10 @@ pub async fn rtu(runtime: &EmbassyRuntime) {
 
     let driver = ModbusDriver::with_transport(
         Device {
-            id: "harness-modbus".to_string(),
+            id: "harness-modbus".into(),
             name: "diagslave".to_string(),
             status: DeviceStatus::Online,
-            endpoint: DeviceEndpoint::ModbusRTU(ModbusRtuEndpointConfig {
+            endpoint: ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
                 serial: SerialPortConfig {
                     path: "/dev/uart1".to_string(),
                     ..SerialPortConfig::default()
@@ -79,10 +80,10 @@ pub async fn rtu(runtime: &EmbassyRuntime) {
 pub async fn tcp(runtime: &EmbassyRuntime, net: EmbassyNet) {
     let driver = ModbusDriver::with_transport(
         Device {
-            id: "harness-modbus-tcp".to_string(),
+            id: "harness-modbus-tcp".into(),
             name: "diagslave-tcp".to_string(),
             status: DeviceStatus::Online,
-            endpoint: DeviceEndpoint::ModbusTCP(ModbusTcpEndpointConfig {
+            endpoint: ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
                 addr: HOST_ADDR.to_string(),
                 port: 41502,
                 options: ModbusClientOptions::default(),

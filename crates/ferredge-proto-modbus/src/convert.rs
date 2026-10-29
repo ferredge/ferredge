@@ -10,6 +10,7 @@ use crate::{
     ModbusCommandConversionError, ModbusParserSeed, ModbusRequest, ModbusResponseDecoder,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::encode_wire_frame,
+    endpoint::{ModbusClientOptions, ModbusDevice},
     types::ModbusValue,
     types::{ModbusCommandRef, ModbusNativePlan},
 };
@@ -21,7 +22,7 @@ pub struct ModbusBridgeCodec<'a> {
 
 impl<'a> ModbusBridgeCodec<'a> {
     /// Creates a codec bound to one Modbus device context.
-    pub fn new(device: &'a Device<ModbusResourceAttributes>) -> Self {
+    pub fn new(device: &'a ModbusDevice) -> Self {
         Self {
             value: ModbusCommandRef { device },
         }
@@ -37,16 +38,8 @@ impl<'a> ModbusBridgeCodec<'a> {
             payload,
             ..
         } = planned;
-        let proto = proto_from_endpoint(&self.value.device.endpoint).ok_or_else(|| {
-            ModbusCommandConversionError::InvalidResource(
-                "device endpoint is not Modbus".to_string(),
-            )
-        })?;
-        let options = endpoint_options(&self.value.device.endpoint).ok_or_else(|| {
-            ModbusCommandConversionError::InvalidResource(
-                "missing Modbus endpoint options".to_string(),
-            )
-        })?;
+        let proto = self.value.device.endpoint.proto();
+        let options = self.value.device.endpoint.options();
         let attributes = &self
             .value
             .device
@@ -63,16 +56,18 @@ impl<'a> ModbusBridgeCodec<'a> {
                 let payload = payload.ok_or(ModbusCommandConversionError::InvalidBridgeMessage)?;
                 build_write_request(resource.as_ref(), attributes, payload, proto, options)
             }
+            // Forward-compat: actions added later are not supported by this codec.
+            _ => Err(ModbusCommandConversionError::InvalidBridgeMessage),
         }
     }
 }
 
-impl ProtocolEncoder<NativeOutbound, ModbusNativePlan<'static>, ModbusRequest>
+impl<'p> ProtocolEncoder<NativeOutbound, ModbusNativePlan<'p>, ModbusRequest>
     for ModbusBridgeCodec<'_>
 {
     type Error = ModbusCommandConversionError;
 
-    fn encode(&self, planned: ModbusNativePlan<'static>) -> Result<ModbusRequest, Self::Error> {
+    fn encode(&self, planned: ModbusNativePlan<'p>) -> Result<ModbusRequest, Self::Error> {
         self.encode_ref(planned)
     }
 }
@@ -274,28 +269,6 @@ fn build_holding_write_request(
         ModbusValueCodec::Bool | ModbusValueCodec::Bits => Err(
             ModbusCommandConversionError::UnsupportedWrite(resource.to_string()),
         ),
-    }
-}
-
-pub(crate) fn proto_from_endpoint(endpoint: &DeviceEndpoint) -> Option<ModbusProto> {
-    match endpoint {
-        DeviceEndpoint::ModbusTCP(_) | DeviceEndpoint::ModbusUDP(_) => Some(ModbusProto::TcpUdp),
-        DeviceEndpoint::ModbusRTUOverTCP(_) | DeviceEndpoint::ModbusRTU(_) => {
-            Some(ModbusProto::Rtu)
-        }
-        DeviceEndpoint::ModbusASCII(_) => Some(ModbusProto::Ascii),
-        _ => None,
-    }
-}
-
-pub(crate) fn endpoint_options(endpoint: &DeviceEndpoint) -> Option<&ModbusClientOptions> {
-    match endpoint {
-        DeviceEndpoint::ModbusTCP(config) => Some(&config.options),
-        DeviceEndpoint::ModbusRTUOverTCP(config) => Some(&config.options),
-        DeviceEndpoint::ModbusUDP(config) => Some(&config.options),
-        DeviceEndpoint::ModbusRTU(config) => Some(&config.options),
-        DeviceEndpoint::ModbusASCII(config) => Some(&config.options),
-        _ => None,
     }
 }
 

@@ -9,13 +9,15 @@ use rmodbus::{
 };
 
 use crate::{
-    ModbusDriver, ModbusRequest, ModbusResponse, ModbusResponseDecoderContext,
+    ModbusAsciiEndpointConfig, ModbusClientOptions, ModbusDriver, ModbusEndpoint, ModbusRequest,
+    ModbusResponse, ModbusResponseDecoderContext, ModbusRtuEndpointConfig,
+    ModbusRtuOverTcpEndpointConfig, ModbusTcpEndpointConfig,
     attributes::{ModbusRegisterKind, ModbusResourceAttributes, ModbusValueCodec},
     codec::{decode_ascii_wire_frame, decode_modbus_response},
 };
 use ferredge_bridge::ProtocolDecoder;
 
-fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
+fn make_driver(endpoint: ModbusEndpoint) -> ModbusDriver {
     let mut resources = Map::default();
     resources.insert(
         "holding_u16".to_string(),
@@ -194,7 +196,7 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
     );
 
     ModbusDriver::new(Device {
-        id: "dvc-1".to_string(),
+        id: "dvc-1".into(),
         name: "modbus-test".to_string(),
         status: DeviceStatus::Online,
         endpoint,
@@ -205,16 +207,16 @@ fn make_driver(endpoint: DeviceEndpoint) -> ModbusDriver {
     })
 }
 
-fn tcp_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_tcp(ModbusTcpEndpointConfig {
+fn tcp_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::Tcp(ModbusTcpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: 502,
         options: ModbusClientOptions::default(),
     })
 }
 
-fn rtu_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_rtu(ModbusRtuEndpointConfig {
+fn rtu_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::Rtu(ModbusRtuEndpointConfig {
         serial: SerialPortConfig {
             path: "/dev/ttyUSB0".to_string(),
             ..SerialPortConfig::default()
@@ -223,16 +225,16 @@ fn rtu_endpoint() -> DeviceEndpoint {
     })
 }
 
-fn rtu_over_tcp_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_rtu_over_tcp(ModbusRtuOverTcpEndpointConfig {
+fn rtu_over_tcp_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::RtuOverTcp(ModbusRtuOverTcpEndpointConfig {
         addr: "127.0.0.1".to_string(),
         port: 502,
         options: ModbusClientOptions::default(),
     })
 }
 
-fn ascii_endpoint() -> DeviceEndpoint {
-    DeviceEndpoint::modbus_ascii(ModbusAsciiEndpointConfig {
+fn ascii_endpoint() -> ModbusEndpoint {
+    ModbusEndpoint::Ascii(ModbusAsciiEndpointConfig {
         serial: SerialPortConfig {
             path: "/dev/ttyUSB0".to_string(),
             ..SerialPortConfig::default()
@@ -241,26 +243,26 @@ fn ascii_endpoint() -> DeviceEndpoint {
     })
 }
 
-fn command_read(resource: &str) -> Command {
+fn command_read<'a>(resource: &'a str) -> Command<'a> {
     Command {
-        id: "cmd-1".to_string(),
+        id: "cmd-1".into(),
         source_device_id: None,
-        target_device_id: "dvc-1".to_string(),
+        target_device_id: "dvc-1".into(),
         intent: Intent::Read {
-            resource: resource.to_string(),
+            resource: resource.into(),
             options: RequestOptions::default(),
         },
         correlation: None,
     }
 }
 
-fn command_write(resource: &str, payload: PayloadValue<'static>) -> Command {
+fn command_write<'a>(resource: &'a str, payload: PayloadValue<'static>) -> Command<'a> {
     Command {
-        id: "cmd-2".to_string(),
+        id: "cmd-2".into(),
         source_device_id: None,
-        target_device_id: "dvc-1".to_string(),
+        target_device_id: "dvc-1".into(),
         intent: Intent::Write {
-            resource: resource.to_string(),
+            resource: resource.into(),
             payload,
             options: RequestOptions::default(),
         },
@@ -471,14 +473,11 @@ fn bits_response_still_decodes_to_same_values() {
 
     assert_eq!(
         payload,
-        PayloadValue::List(
-            vec![
-                PayloadValue::Bool(false),
-                PayloadValue::Bool(false),
-                PayloadValue::Bool(false),
-            ]
-            .into(),
-        )
+        PayloadValue::List(vec![
+            PayloadValue::Bool(false),
+            PayloadValue::Bool(false),
+            PayloadValue::Bool(false),
+        ])
     );
 }
 
@@ -540,14 +539,11 @@ fn build_write_multiple_coils_request() {
     let request = driver
         .native_request(command_write(
             "coil_bits",
-            PayloadValue::List(
-                vec![
-                    PayloadValue::Bool(true),
-                    PayloadValue::Bool(false),
-                    PayloadValue::Bool(true),
-                ]
-                .into(),
-            ),
+            PayloadValue::List(vec![
+                PayloadValue::Bool(true),
+                PayloadValue::Bool(false),
+                PayloadValue::Bool(true),
+            ]),
         ))
         .unwrap();
 
@@ -674,7 +670,7 @@ fn invalid_holding_payload_is_rejected() {
     let error = driver
         .native_request(command_write(
             "holding_u16",
-            PayloadValue::List(vec![PayloadValue::U64(1), PayloadValue::U64(2)].into()),
+            PayloadValue::List(vec![PayloadValue::U64(1), PayloadValue::U64(2)]),
         ))
         .unwrap_err();
 
@@ -732,10 +728,10 @@ fn native_modbus_roundtrip_decodes_to_routed_result() {
             assert_eq!(result.result.payload, Some(PayloadValue::U64(0x1234)));
             assert_eq!(
                 result.result.correlation,
-                Some(Correlation {
-                    request_id: "cmd-1".to_string().into(),
-                    reply_to: Some(Address::Resource("holding_u16".to_string().into())),
-                })
+                Some(Correlation::new(
+                    "cmd-1".to_string().into(),
+                    Some(Address::Resource("holding_u16".to_string().into())),
+                ))
             );
         }
         other => panic!("expected routed result, got {other:?}"),

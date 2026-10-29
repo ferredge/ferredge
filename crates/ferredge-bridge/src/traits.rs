@@ -9,12 +9,14 @@ pub struct BridgeOutbound;
 pub struct NativeOutbound;
 
 /// Outbound planning contract from routed commands into protocol-specific planned messages.
-pub trait ProtocolPlanner<TTarget, TPlanned> {
+pub trait ProtocolPlanner<TTarget> {
     /// Planner-specific error type.
     type Error;
+    /// Planned outbound message produced for one command lifetime.
+    type Planned<'a>;
 
     /// Converts one outbound core command into a protocol-planned message.
-    fn plan(&self, command: Command) -> Result<TPlanned, Self::Error>;
+    fn plan<'a>(&self, command: Command<'a>) -> Result<Self::Planned<'a>, Self::Error>;
 }
 
 /// Encode boundary between planned outbound messages and one native protocol type.
