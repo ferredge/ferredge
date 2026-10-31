@@ -35,13 +35,15 @@ mod runtime_stack {
 #[cfg(feature = "embassy-runtime")]
 mod runtime_stack {
     pub use ferredge_runtime_embassy::{
-        EmbassyNet as StackNet,
-        EmbassyRuntime as StackRuntime,
-        EmbassyTask as RuntimeTask,
+        EmbassyNet as StackNet, EmbassyRuntime as StackRuntime, EmbassyTask as RuntimeTask,
     };
 }
 
-#[cfg(not(any(feature = "tokio-runtime", feature = "async-std-runtime", feature = "embassy-runtime")))]
+#[cfg(not(any(
+    feature = "tokio-runtime",
+    feature = "async-std-runtime",
+    feature = "embassy-runtime"
+)))]
 compile_error!("ferredge-proto-zenoh requires a supported runtime stack feature to be enabled");
 
 #[cfg(any(feature = "std", feature = "no_std"))]
@@ -57,7 +59,7 @@ type RuntimeReceiver<T> = <StackRuntime as AsyncRuntime>::Receiver<T>;
 type RuntimeMutex<T> = <StackRuntime as AsyncRuntime>::Mutex<T>;
 
 #[cfg(feature = "no_std")]
-use runtime_stack::{StackNet, RuntimeTask};
+use runtime_stack::{RuntimeTask, StackNet};
 
 #[cfg(test)]
 mod tests;
@@ -137,10 +139,7 @@ impl ZenohDriver {
 
     /// Creates a new Zenoh driver for std runtimes with explicit runtime.
     #[cfg(feature = "std")]
-    pub fn with_stack(
-        dvc: ZenohDevice,
-        runtime: StackRuntime,
-    ) -> Self {
+    pub fn with_stack(dvc: ZenohDevice, runtime: StackRuntime) -> Self {
         Self {
             dvc,
             runtime: runtime.clone(),
@@ -152,11 +151,7 @@ impl ZenohDriver {
 
     /// Creates a new Zenoh driver for embassy runtime with explicit runtime and net stack.
     #[cfg(feature = "embassy-runtime")]
-    pub fn with_stack(
-        dvc: ZenohDevice,
-        runtime: StackRuntime,
-        net: StackNet,
-    ) -> Self {
+    pub fn with_stack(dvc: ZenohDevice, runtime: StackRuntime, net: StackNet) -> Self {
         Self {
             dvc,
             runtime: runtime.clone(),

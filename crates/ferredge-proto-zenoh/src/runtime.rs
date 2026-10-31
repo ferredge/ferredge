@@ -15,18 +15,21 @@ mod std_runtime {
     use ferredge_core::prelude::*;
 
     use crate::{
-        types::{
-            ZenohError, ZenohEvent, ZenohPublishRequest, ZenohQueryResponse,
-            ZenohReply, ZenohRequest, ZenohResponse, ZenohSubscription,
-        },
         RuntimeReceiver, ZenohDriver, ZenohListenerStatus,
+        types::{
+            ZenohError, ZenohEvent, ZenohPublishRequest, ZenohQueryResponse, ZenohReply,
+            ZenohRequest, ZenohResponse, ZenohSubscription,
+        },
     };
 
     /// Zenoh session state wrapper.
     pub(crate) struct ZenohSessionState {
         pub(crate) session: zenoh::Session,
         // Store subscriptions as key_expr -> Subscriber handle with default FIFO handler
-        pub(crate) subscriptions: HashMap<String, zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>>,
+        pub(crate) subscriptions: HashMap<
+            String,
+            zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+        >,
         // Store queryables as key_expr -> unit
         pub(crate) queryables: HashMap<String, ()>,
     }
@@ -369,7 +372,8 @@ mod std_runtime {
                                         .lock()
                                         .await
                                         .map_err(|e| ZenohError::Other(e.to_string()))?;
-                                    *status_guard = ZenohListenerStatus::Failed("Sink closed".to_string());
+                                    *status_guard =
+                                        ZenohListenerStatus::Failed("Sink closed".to_string());
                                     return Err(ZenohError::Io("sink closed".to_string()));
                                 }
                             }
@@ -408,12 +412,12 @@ mod embassy_runtime {
     use ferredge_core::prelude::*;
 
     use crate::{
+        ZenohDriver, ZenohListenerStatus,
         runtime_stack::RuntimeTask,
         types::{
-            ZenohError, ZenohEvent, ZenohPublishRequest,
-            ZenohRequest, ZenohResponse, ZenohSubscription,
+            ZenohError, ZenohEvent, ZenohPublishRequest, ZenohRequest, ZenohResponse,
+            ZenohSubscription,
         },
-        ZenohDriver, ZenohListenerStatus,
     };
 
     /// Subscription handle with forwarding task.
@@ -449,7 +453,8 @@ mod embassy_runtime {
         }
 
         Err(ZenohError::Other(
-            "zenoh-nostd requires platform-specific config (see PLATFORM_INTEGRATION.md)".to_string(),
+            "zenoh-nostd requires platform-specific config (see PLATFORM_INTEGRATION.md)"
+                .to_string(),
         ))
     }
 
@@ -532,7 +537,8 @@ mod embassy_runtime {
         }
 
         Err(ZenohError::Other(
-            "zenoh-nostd subscribe requires static channels (see PLATFORM_INTEGRATION.md)".to_string(),
+            "zenoh-nostd subscribe requires static channels (see PLATFORM_INTEGRATION.md)"
+                .to_string(),
         ))
     }
 
@@ -551,7 +557,11 @@ mod embassy_runtime {
             .as_mut()
             .ok_or(ZenohError::SessionNotInitialized)?;
 
-        if let Some(pos) = state.subscriptions.iter().position(|s| s.key_expr == key_expr) {
+        if let Some(pos) = state
+            .subscriptions
+            .iter()
+            .position(|s| s.key_expr == key_expr)
+        {
             let mut sub_handle = state.subscriptions.remove(pos);
 
             if let Some(task) = sub_handle.forward_task.take() {
@@ -628,17 +638,12 @@ mod embassy_runtime {
                 undeclare_queryable(driver, queryable_req).await?;
                 Ok(ZenohResponse::QueryableUndeclared)
             }
-            ZenohRequest::Query(_query_req) => {
-                Err(ZenohError::RuntimeNotAvailable)
-            }
+            ZenohRequest::Query(_query_req) => Err(ZenohError::RuntimeNotAvailable),
         }
     }
 
     /// Start listener.
-    pub(crate) async fn start_listener<S>(
-        driver: &ZenohDriver,
-        _sink: S,
-    ) -> Result<(), ZenohError>
+    pub(crate) async fn start_listener<S>(driver: &ZenohDriver, _sink: S) -> Result<(), ZenohError>
     where
         S: EventSink<Event = ZenohEvent>,
     {

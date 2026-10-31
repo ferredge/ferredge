@@ -2,9 +2,7 @@ extern crate alloc;
 
 use alloc::{borrow::Cow, string::ToString, vec, vec::Vec};
 
-use ferredge_bridge::{
-    BridgeMessage, BridgeOutbound, NativeOutbound, ProtocolEncoder,
-};
+use ferredge_bridge::{BridgeMessage, BridgeOutbound, NativeOutbound, ProtocolEncoder};
 use ferredge_core::prelude::*;
 
 use crate::types::{
@@ -47,7 +45,7 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, ZenohRequest>
                         _ => {
                             return Err(ZenohCommandConversionError::InvalidAddressType(
                                 "expected messaging route".to_string(),
-                            ))
+                            ));
                         }
                     };
 
@@ -71,13 +69,11 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, ZenohRequest>
             ferredge_bridge::BridgeOp::RequestResponse(op) => match op.action {
                 ferredge_bridge::RequestResponseAction::Read => {
                     let key_expr = match &bridge.route {
-                        Route::RequestResponse { resource, .. } => {
-                            resource.to_string()
-                        }
+                        Route::RequestResponse { resource, .. } => resource.to_string(),
                         _ => {
                             return Err(ZenohCommandConversionError::InvalidAddressType(
                                 "expected request/response route".to_string(),
-                            ))
+                            ));
                         }
                     };
 
@@ -168,7 +164,7 @@ pub fn plan_from_command(
                 _ => {
                     return Err(ZenohCommandConversionError::InvalidAddressType(
                         "Zenoh only supports topic-like channels".to_string(),
-                    ))
+                    ));
                 }
             };
 
@@ -184,7 +180,7 @@ pub fn plan_from_command(
                 _ => {
                     return Err(ZenohCommandConversionError::InvalidAddressType(
                         "Zenoh only supports topic-like channels".to_string(),
-                    ))
+                    ));
                 }
             };
 
@@ -199,7 +195,7 @@ pub fn plan_from_command(
                 _ => {
                     return Err(ZenohCommandConversionError::InvalidAddressType(
                         "Zenoh only supports topic-like channels".to_string(),
-                    ))
+                    ));
                 }
             };
 
@@ -216,7 +212,9 @@ pub fn plan_from_command(
                 parameters: None,
             })
         }
-        Intent::Write { resource, payload, .. } => {
+        Intent::Write {
+            resource, payload, ..
+        } => {
             let key_expr = Cow::Owned(resource.to_string());
 
             Ok(ZenohNativePlan::Put {
@@ -225,7 +223,9 @@ pub fn plan_from_command(
                 payload: payload.clone().into_owned(),
             })
         }
-        Intent::Invoke { operation, args, .. } => {
+        Intent::Invoke {
+            operation, args, ..
+        } => {
             // Map Invoke with "queryable" operation to DeclareQueryable
             if operation.as_str() == "queryable" {
                 // Extract key_expr from args (args is a PayloadValue which can be a Map)
@@ -246,7 +246,8 @@ pub fn plan_from_command(
                     })
                     .ok_or_else(|| {
                         ZenohCommandConversionError::UnsupportedIntent(
-                            "Invoke queryable requires 'key_expr' string argument in map".to_string(),
+                            "Invoke queryable requires 'key_expr' string argument in map"
+                                .to_string(),
                         )
                     })?;
 
