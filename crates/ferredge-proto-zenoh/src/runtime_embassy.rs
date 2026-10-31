@@ -302,9 +302,67 @@ pub(crate) async fn unsubscribe(
     }
 }
 
-/// Executes a Zenoh request (publish or query).
+/// Declare a queryable for responding to queries.
+pub(crate) async fn declare_queryable(
+    driver: &ZenohDriver,
+    request: crate::types::ZenohQueryableRequest,
+) -> Result<(), ZenohError> {
+    let _session_guard = driver
+        .session
+        .lock()
+        .await
+        .map_err(|e| ZenohError::Other(e.to_string()))?;
+
+    // When zenoh-nostd is integrated:
+    // 1. Declare queryable with session.declare_queryable()
+    // 2. Spawn handler task to receive queries and call query.reply()
+    // 3. Store queryable handle for later undeclare
+
+    #[cfg(feature = "no_std")]
+    {
+        let _ = request;
+        Err(ZenohError::Other(
+            "Queryable support requires zenoh-nostd integration (see runtime_embassy.rs docs)"
+                .to_string(),
+        ))
+    }
+
+    #[cfg(not(feature = "no_std"))]
+    Err(ZenohError::RuntimeNotAvailable)
+}
+
+/// Undeclare a queryable.
+pub(crate) async fn undeclare_queryable(
+    driver: &ZenohDriver,
+    request: crate::types::ZenohQueryableRequest,
+) -> Result<(), ZenohError> {
+    let _session_guard = driver
+        .session
+        .lock()
+        .await
+        .map_err(|e| ZenohError::Other(e.to_string()))?;
+
+    // When zenoh-nostd is integrated:
+    // 1. Find queryable by key_expr
+    // 2. Call queryable.undeclare()
+    // 3. Cancel handler task
+    // 4. Remove from state
+
+    #[cfg(feature = "no_std")]
+    {
+        let _ = request;
+        Err(ZenohError::Other(
+            "Queryable support requires zenoh-nostd integration".to_string(),
+        ))
+    }
+
+    #[cfg(not(feature = "no_std"))]
+    Err(ZenohError::RuntimeNotAvailable)
+}
+
+/// Executes a Zenoh request (publish, query, or queryable operations).
 ///
-/// Handles both publish and query operations using zenoh-nostd's .finish() builder pattern.
+/// Handles publish, query, and queryable operations using zenoh-nostd's .finish() builder pattern.
 pub(crate) async fn execute_request(
     driver: &ZenohDriver,
     request: ZenohRequest,
@@ -314,6 +372,14 @@ pub(crate) async fn execute_request(
             // Delegate to publish function
             publish(driver, pub_req).await?;
             Ok(ZenohResponse::Published)
+        }
+        ZenohRequest::DeclareQueryable(queryable_req) => {
+            declare_queryable(driver, queryable_req).await?;
+            Ok(ZenohResponse::QueryableDeclared)
+        }
+        ZenohRequest::UndeclareQueryable(queryable_req) => {
+            undeclare_queryable(driver, queryable_req).await?;
+            Ok(ZenohResponse::QueryableUndeclared)
         }
         ZenohRequest::Query(_query_req) => {
             let session_guard = driver

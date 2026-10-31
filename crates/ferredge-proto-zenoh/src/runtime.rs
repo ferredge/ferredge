@@ -164,6 +164,55 @@ pub(crate) async fn unsubscribe(
     Ok(())
 }
 
+/// Declare a queryable for responding to queries.
+pub(crate) async fn declare_queryable(
+    driver: &ZenohDriver,
+    request: crate::types::ZenohQueryableRequest,
+) -> Result<(), ZenohError> {
+    let mut session_guard = driver
+        .session
+        .lock()
+        .await
+        .map_err(|e| ZenohError::Other(e.to_string()))?;
+    let state = session_guard
+        .as_mut()
+        .ok_or(ZenohError::SessionNotInitialized)?;
+
+    // Check if already declared
+    if state.queryables.contains_key(&request.key_expr) {
+        return Ok(());
+    }
+
+    // Declare Zenoh queryable for this key expression
+    // Note: The actual query handling happens in the listener task
+    // For now, we just mark it as declared
+    // TODO: Implement actual zenoh queryable declaration with query.respond()
+    state.queryables.insert(request.key_expr.clone(), ());
+
+    Ok(())
+}
+
+/// Undeclare a queryable.
+pub(crate) async fn undeclare_queryable(
+    driver: &ZenohDriver,
+    request: crate::types::ZenohQueryableRequest,
+) -> Result<(), ZenohError> {
+    let mut session_guard = driver
+        .session
+        .lock()
+        .await
+        .map_err(|e| ZenohError::Other(e.to_string()))?;
+    let state = session_guard
+        .as_mut()
+        .ok_or(ZenohError::SessionNotInitialized)?;
+
+    if state.queryables.remove(&request.key_expr).is_none() {
+        return Err(ZenohError::QueryableNotFound(request.key_expr));
+    }
+
+    Ok(())
+}
+
 /// Execute a request (query).
 pub(crate) async fn execute_request(
     driver: &ZenohDriver,
@@ -173,6 +222,14 @@ pub(crate) async fn execute_request(
         ZenohRequest::Publish(pub_req) => {
             publish(driver, pub_req).await?;
             Ok(ZenohResponse::Published)
+        }
+        ZenohRequest::DeclareQueryable(queryable_req) => {
+            declare_queryable(driver, queryable_req).await?;
+            Ok(ZenohResponse::QueryableDeclared)
+        }
+        ZenohRequest::UndeclareQueryable(queryable_req) => {
+            undeclare_queryable(driver, queryable_req).await?;
+            Ok(ZenohResponse::QueryableUndeclared)
         }
         ZenohRequest::Query(query_req) => {
             let session_guard = driver

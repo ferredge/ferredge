@@ -123,3 +123,36 @@ fn test_plan_from_read_command() {
         _ => panic!("Expected Get plan"),
     }
 }
+
+#[test]
+fn test_plan_from_invoke_command() {
+    let device = test_device();
+
+    let command = Command {
+        id: CommandId::new("cmd-4"),
+        source_device_id: None,
+        target_device_id: DeviceId::new("test-device"),
+        intent: Intent::Invoke {
+            operation: OperationName::new("queryable"),
+            args: Some(PayloadValue::Map(vec![(
+                Cow::Borrowed("key_expr"),
+                PayloadValue::String(Cow::Borrowed("storage/data")),
+            )])),
+            options: Default::default(),
+        },
+        correlation: None,
+    };
+
+    let plan = plan_from_command(&command, &device).unwrap();
+
+    match plan {
+        ZenohNativePlan::DeclareQueryable {
+            command_id,
+            key_expr,
+        } => {
+            assert_eq!(command_id, "cmd-4");
+            assert_eq!(key_expr, "storage/data");
+        }
+        _ => panic!("Expected DeclareQueryable plan"),
+    }
+}

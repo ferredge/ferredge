@@ -225,9 +225,41 @@ pub fn plan_from_command(
                 payload: payload.clone().into_owned(),
             })
         }
-        Intent::Invoke { .. } => Err(ZenohCommandConversionError::UnsupportedIntent(
-            "Invoke intent not yet supported for Zenoh".to_string(),
-        )),
+        Intent::Invoke { operation, args, .. } => {
+            // Map Invoke with "queryable" operation to DeclareQueryable
+            if operation.as_str() == "queryable" {
+                // Extract key_expr from args (args is a PayloadValue which can be a Map)
+                let key_expr = args
+                    .as_ref()
+                    .and_then(|payload| match payload {
+                        PayloadValue::Map(map) => {
+                            // Find key_expr in the map
+                            map.iter()
+                                .find(|(k, _)| k.as_ref() == "key_expr")
+                                .map(|(_, v)| v)
+                        }
+                        _ => None,
+                    })
+                    .and_then(|v| match v {
+                        PayloadValue::String(s) => Some(Cow::Owned(s.to_string())),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        ZenohCommandConversionError::UnsupportedIntent(
+                            "Invoke queryable requires 'key_expr' string argument in map".to_string(),
+                        )
+                    })?;
+
+                Ok(ZenohNativePlan::DeclareQueryable {
+                    command_id,
+                    key_expr,
+                })
+            } else {
+                Err(ZenohCommandConversionError::UnsupportedIntent(
+                    alloc::format!("Invoke operation '{}' not supported for Zenoh", operation),
+                ))
+            }
+        }
         _ => Err(ZenohCommandConversionError::UnsupportedIntent(
             "Intent not supported for Zenoh".to_string(),
         )),

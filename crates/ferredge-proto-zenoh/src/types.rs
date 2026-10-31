@@ -165,6 +165,39 @@ pub struct ZenohQueryRequest {
     pub timeout_ms: Option<u64>,
 }
 
+/// Zenoh queryable declaration request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZenohQueryableRequest {
+    /// Original command identifier for correlation.
+    pub command_id: String,
+    /// Zenoh key expression for queryable.
+    pub key_expr: String,
+}
+
+/// Incoming query that a queryable must respond to.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Used in query handlers (future implementation)
+pub struct ZenohIncomingQuery {
+    /// Query identifier for correlation.
+    pub query_id: String,
+    /// Key expression being queried.
+    pub key_expr: String,
+    /// Optional query selector.
+    pub selector: Option<String>,
+}
+
+/// Response to an incoming query.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Used in query handlers (future implementation)
+pub struct ZenohQueryReply {
+    /// Query identifier being replied to.
+    pub query_id: String,
+    /// Key expression of the reply.
+    pub key_expr: String,
+    /// Payload data.
+    pub payload: Vec<u8>,
+}
+
 /// Zenoh request types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ZenohRequest {
@@ -172,6 +205,10 @@ pub enum ZenohRequest {
     Publish(ZenohPublishRequest),
     /// Query request.
     Query(ZenohQueryRequest),
+    /// Declare queryable request.
+    DeclareQueryable(ZenohQueryableRequest),
+    /// Undeclare queryable request.
+    UndeclareQueryable(ZenohQueryableRequest),
 }
 
 /// Zenoh query response.
@@ -194,6 +231,10 @@ pub enum ZenohResponse {
     Published,
     /// Query response with replies.
     QueryResponse(ZenohQueryResponse),
+    /// Queryable declared successfully.
+    QueryableDeclared,
+    /// Queryable undeclared successfully.
+    QueryableUndeclared,
 }
 
 /// Zenoh event from subscription or queryable.
@@ -201,6 +242,16 @@ pub enum ZenohResponse {
 pub struct ZenohEvent {
     pub key_expr: String,
     pub payload: Vec<u8>,
+}
+
+/// Zenoh event type discriminator.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Used for event type discrimination (future implementation)
+pub enum ZenohEventType {
+    /// Event from a subscription.
+    Subscription(ZenohEvent),
+    /// Incoming query to a queryable.
+    IncomingQuery(ZenohIncomingQuery),
 }
 
 /// Zenoh protocol errors.
