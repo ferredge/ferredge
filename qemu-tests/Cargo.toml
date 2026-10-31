@@ -63,6 +63,7 @@ cortex-m-rt = "0.7"
 cortex-m-semihosting = "0.5"
 embedded-alloc = "0.6"
 panic-semihosting = { version = "0.6", features = ["exit"] }
+getrandom = { version = "0.2", features = ["custom"] }
 
 [features]
 default = []

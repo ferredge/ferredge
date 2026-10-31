@@ -136,8 +136,8 @@ impl Driver for TestDriver {
 }
 
 /// Drives an embassy-net stack over the in-memory wire; the runners never terminate,
-/// and the net (2) and mqtt (2) suites each bring up a pair, hence the pool of 4.
-#[embassy_executor::task(pool_size = 4)]
+/// and the net (2), mqtt (2), and zenoh (1) suites each bring up stacks, hence the pool of 6.
+#[embassy_executor::task(pool_size = 6)]
 async fn net_task(mut runner: embassy_net::Runner<'static, TestDriver>) -> ! {
     runner.run().await
 }

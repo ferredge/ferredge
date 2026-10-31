@@ -587,6 +587,7 @@ dependencies = [
  "ferredge-proto-mqtt",
  "ferredge-proto-zenoh",
  "ferredge-runtime-embassy",
+ "getrandom",
  "heapless 0.9.3",
  "log",
  "panic-semihosting",
