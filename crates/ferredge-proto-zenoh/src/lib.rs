@@ -52,7 +52,7 @@ use runtime_stack::StackRuntime;
 #[cfg(feature = "std")]
 type RuntimeSender<T> = <StackRuntime as AsyncRuntime>::Sender<T>;
 
-#[cfg(any(feature = "std", feature = "no_std"))]
+#[cfg(feature = "std")]
 type RuntimeReceiver<T> = <StackRuntime as AsyncRuntime>::Receiver<T>;
 
 #[cfg(any(feature = "std", feature = "no_std"))]
@@ -110,10 +110,14 @@ pub struct ZenohDriver {
     #[cfg(feature = "std")]
     listener_stop_tx: Shared<RuntimeMutex<Option<RuntimeSender<()>>>>,
 
+    /// Runtime adapter for task spawning (embassy/no_std only).
     #[cfg(feature = "no_std")]
+    #[cfg_attr(feature = "no_std", allow(dead_code))]
     runtime: StackRuntime,
 
+    /// Network stack for zenoh-nostd transport (embassy/no_std only).
     #[cfg(feature = "no_std")]
+    #[cfg_attr(feature = "no_std", allow(dead_code))]
     net: StackNet,
 
     #[cfg(feature = "no_std")]
@@ -122,7 +126,9 @@ pub struct ZenohDriver {
     #[cfg(feature = "no_std")]
     listener_status: Shared<RuntimeMutex<ZenohListenerStatus>>,
 
+    /// Background listener task handle (embassy/no_std only).
     #[cfg(feature = "no_std")]
+    #[cfg_attr(feature = "no_std", allow(dead_code))]
     listener_handle: Shared<RuntimeMutex<Option<RuntimeTask<()>>>>,
 }
 
