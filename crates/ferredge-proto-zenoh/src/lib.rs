@@ -12,10 +12,7 @@ pub use endpoint::{ZenohDevice, ZenohEndpointConfig};
 mod attributes;
 mod convert;
 mod endpoint;
-#[cfg(feature = "std")]
 mod runtime;
-#[cfg(feature = "embassy-runtime")]
-mod runtime_embassy;
 mod types;
 
 #[cfg(any(
@@ -118,7 +115,7 @@ pub struct ZenohDriver {
     net: StackNet,
 
     #[cfg(feature = "no_std")]
-    session: Shared<RuntimeMutex<Option<runtime_embassy::ZenohNoStdSessionState>>>,
+    session: Shared<RuntimeMutex<Option<runtime::ZenohNoStdSessionState>>>,
 
     #[cfg(feature = "no_std")]
     listener_status: Shared<RuntimeMutex<ZenohListenerStatus>>,
@@ -258,11 +255,11 @@ impl Lifecycle for ZenohDriver {
     type Error = ZenohError;
 
     async fn start(&self) -> Result<(), Self::Error> {
-        runtime_embassy::start_session(self).await
+        runtime::start_session(self).await
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
-        runtime_embassy::stop_session(self).await
+        runtime::stop_session(self).await
     }
 }
 
@@ -287,7 +284,7 @@ impl PubSub for ZenohDriver {
     type Error = ZenohError;
 
     async fn publish(&self, request: Self::PublishRequest) -> Result<(), Self::Error> {
-        runtime_embassy::publish(self, request).await
+        runtime::publish(self, request).await
     }
 
     async fn subscribe<S>(
@@ -298,11 +295,11 @@ impl PubSub for ZenohDriver {
     where
         S: EventSink<Event = RoutedEvent<'static>>,
     {
-        runtime_embassy::subscribe(self, subscription, sink).await
+        runtime::subscribe(self, subscription, sink).await
     }
 
     async fn unsubscribe(&self, subscription: Self::Subscription) -> Result<(), Self::Error> {
-        runtime_embassy::unsubscribe(self, &subscription.key_expr).await
+        runtime::unsubscribe(self, &subscription.key_expr).await
     }
 }
 
@@ -339,7 +336,7 @@ impl RequestResponse for ZenohDriver {
     type Error = ZenohError;
 
     async fn execute(&self, request: Self::Request) -> Result<Self::Response, Self::Error> {
-        runtime_embassy::execute_request(self, request).await
+        runtime::execute_request(self, request).await
     }
 }
 
@@ -363,11 +360,11 @@ impl EventSource for ZenohDriver {
     where
         S: EventSink<Event = Self::Event>,
     {
-        runtime_embassy::start_listener(self, sink).await
+        runtime::start_listener(self, sink).await
     }
 
     async fn stop_listening(&self) -> Result<(), Self::Error> {
-        runtime_embassy::stop_listener(self).await
+        runtime::stop_listener(self).await
     }
 }
 
