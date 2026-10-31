@@ -41,7 +41,7 @@ pub enum ZenohNativePlan<'a> {
     Put {
         command_id: Cow<'a, str>,
         key_expr: Cow<'a, str>,
-        payload: ferredge_bridge::BridgePayload<'a>,
+        payload: PayloadValue<'a>,
     },
     /// Subscribe to key expression.
     Subscribe {
@@ -129,7 +129,7 @@ impl ZenohNativePlan<'_> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ZenohCommandRef<'a> {
     #[allow(dead_code)]
-    pub device: &'a Device<ZenohResourceAttributes>,
+    pub device: &'a crate::ZenohDevice,
 }
 
 /// Zenoh publish request.

@@ -15,8 +15,8 @@ use crate::{
 /// Zenoh session state wrapper.
 pub(crate) struct ZenohSessionState {
     pub(crate) session: zenoh::Session,
-    // Store subscriptions as key_expr -> unit (we'll handle the actual subscription differently)
-    pub(crate) subscriptions: HashMap<String, ()>,
+    // Store subscriptions as key_expr -> Subscriber handle with default FIFO handler
+    pub(crate) subscriptions: HashMap<String, zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>>,
     // Store queryables as key_expr -> unit
     pub(crate) queryables: HashMap<String, ()>,
 }
@@ -126,13 +126,19 @@ where
         return Ok(());
     }
 
-    // For now, just mark as subscribed
-    // The actual subscription will be handled when the listener starts
+    // Declare Zenoh subscriber for this key expression
+    let subscriber = state
+        .session
+        .declare_subscriber(&subscription.key_expr)
+        .await
+        .map_err(|e| ZenohError::Io(e.to_string()))?;
+
+    // Store the subscriber handle
     state
         .subscriptions
-        .insert(subscription.key_expr.clone(), ());
+        .insert(subscription.key_expr.clone(), subscriber);
 
-    // Note: Actual message forwarding happens in the listener via start_listening
+    // Note: Message forwarding happens in the listener via start_listening
 
     Ok(())
 }
@@ -184,12 +190,12 @@ pub(crate) async fn execute_request(
                 selector = format!("{}?{}", selector, params);
             }
 
-            let get_builder = state.session.get(&selector);
+            let mut get_builder = state.session.get(&selector);
 
-            // TODO: Add timeout support when Zenoh API is confirmed
-            // if let Some(timeout_ms) = query_req.timeout_ms {
-            //     get_builder = get_builder.timeout(Duration::from_millis(timeout_ms));
-            // }
+            // Apply optional timeout
+            if let Some(timeout_ms) = query_req.timeout_ms {
+                get_builder = get_builder.timeout(Duration::from_millis(timeout_ms));
+            }
 
             let replies = get_builder
                 .await
@@ -298,23 +304,52 @@ where
             return Ok(());
         }
 
-        // For now, simplified polling - actual subscription handling will be improved
-        // In a full implementation, we would declare actual Zenoh subscribers and poll them
-        // For this initial version, we're just setting up the infrastructure
+        // Poll all subscriptions for new messages
+        let session_guard = driver
+            .session
+            .lock()
+            .await
+            .map_err(|e| ZenohError::Other(e.to_string()))?;
 
-        // TODO: Implement actual subscription polling with:
-        // 1. Declare Zenoh subscribers for each key_expr in state.subscriptions
-        // 2. Poll subscribers for samples
-        // 3. Forward samples to sink as ZenohEvent
-        //
-        // Example (when Zenoh API confirmed):
-        // if let Ok(sample) = subscriber.try_recv() {
-        //     let event = ZenohEvent {
-        //         key_expr: sample.key_expr().to_string(),
-        //         payload: sample.payload().to_bytes().to_vec(),
-        //     };
-        //     let _ = sink.handle(event);
-        // }
+        if let Some(state) = session_guard.as_ref() {
+            for subscriber in state.subscriptions.values() {
+                // Non-blocking poll for new samples
+                loop {
+                    match subscriber.try_recv() {
+                        Ok(Some(sample)) => {
+                            let event = ZenohEvent {
+                                key_expr: sample.key_expr().to_string(),
+                                payload: sample.payload().to_bytes().to_vec(),
+                            };
+
+                            // Forward event to sink, stop listener if sink fails
+                            if _sink.handle(event).is_err() {
+                                drop(session_guard);
+                                let mut status_guard = driver
+                                    .listener_status
+                                    .lock()
+                                    .await
+                                    .map_err(|e| ZenohError::Other(e.to_string()))?;
+                                *status_guard = ZenohListenerStatus::Failed("Sink closed".to_string());
+                                return Err(ZenohError::Io("sink closed".to_string()));
+                            }
+                        }
+                        Ok(None) => {
+                            // Channel is empty, move to next subscription
+                            break;
+                        }
+                        Err(e) => {
+                            // Subscriber closed or error, log and continue
+                            tracing::warn!("Subscriber error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Release lock before sleeping
+        drop(session_guard);
 
         // Small sleep to avoid busy-waiting
         driver.runtime.sleep(Duration::from_millis(10)).await;

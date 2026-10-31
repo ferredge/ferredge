@@ -1,30 +1,20 @@
 use ferredge_core::prelude::*;
 
 use crate::convert::plan_from_command;
-use crate::types::{ZenohNativePlan, ZenohResourceAttributes};
+use crate::types::ZenohNativePlan;
+use crate::{ZenohDevice, ZenohEndpointConfig};
 
 use std::borrow::Cow;
 use std::collections::HashMap as Map;
 
-fn test_device() -> Device<ZenohResourceAttributes> {
+fn test_device() -> ZenohDevice {
     Device {
-        id: "test-device".to_string(),
+        id: DeviceId::new("test-device"),
         name: "Test Zenoh Device".to_string(),
         status: DeviceStatus::Online,
-        endpoint: DeviceEndpoint::mqtt(MqttEndpointConfig {
-            broker: "tcp://localhost:7447".to_string(), // Using MQTT config for testing
-            client_id: "test-zenoh-client".to_string(),
-            auth: None,
-            tls: None,
-            keepalive_secs: Some(60),
-            clean_start: true,
-            session_expiry_secs: None,
-            topic_prefix: None,
-            connect_properties: MqttConnectProperties::default(),
-            will: None,
-            reconnect: BrokerReconnectConfig::default(),
-            supported_versions: vec![MqttProtocolVersion::V5_0],
-        }),
+        endpoint: ZenohEndpointConfig {
+            locators: vec!["tcp/localhost:7447".to_string()],
+        },
         metadata: None,
         max_connections: None,
         resources: Map::new(),
@@ -37,12 +27,12 @@ fn test_plan_from_send_command() {
     let device = test_device();
 
     let command = Command {
-        id: "cmd-1".to_string(),
+        id: CommandId::new("cmd-1"),
         source_device_id: None,
-        target_device_id: "test-device".to_string(),
+        target_device_id: DeviceId::new("test-device"),
         intent: Intent::Send {
             channel: BrokerAddress {
-                name: "sensor/temperature".to_string(),
+                name: ChannelName::new("sensor/temperature"),
                 kind: Some(BrokerChannelKind::Topic),
             },
             payload: PayloadValue::String(Cow::Borrowed("25.5")),
@@ -61,10 +51,10 @@ fn test_plan_from_send_command() {
         } => {
             assert_eq!(command_id, "cmd-1");
             assert_eq!(key_expr, "sensor/temperature");
-            // Payload is now BridgePayload, check it's text
+            // Payload is now PayloadValue
             match payload {
-                ferredge_bridge::BridgePayload::Text(s) => assert_eq!(s, "25.5"),
-                _ => panic!("Expected text payload"),
+                PayloadValue::String(s) => assert_eq!(s.as_ref(), "25.5"),
+                _ => panic!("Expected string payload"),
             }
         }
         _ => panic!("Expected Put plan"),
@@ -76,12 +66,12 @@ fn test_plan_from_subscribe_command() {
     let device = test_device();
 
     let command = Command {
-        id: "cmd-2".to_string(),
+        id: CommandId::new("cmd-2"),
         source_device_id: None,
-        target_device_id: "test-device".to_string(),
+        target_device_id: DeviceId::new("test-device"),
         intent: Intent::Subscribe {
             channel: BrokerAddress {
-                name: "sensor/+/temperature".to_string(),
+                name: ChannelName::new("sensor/+/temperature"),
                 kind: Some(BrokerChannelKind::Topic),
             },
             options: Default::default(),
@@ -108,11 +98,11 @@ fn test_plan_from_read_command() {
     let device = test_device();
 
     let command = Command {
-        id: "cmd-3".to_string(),
+        id: CommandId::new("cmd-3"),
         source_device_id: None,
-        target_device_id: "test-device".to_string(),
+        target_device_id: DeviceId::new("test-device"),
         intent: Intent::Read {
-            resource: "sensor/temperature".to_string(),
+            resource: ResourceName::new("sensor/temperature"),
             options: Default::default(),
         },
         correlation: None,

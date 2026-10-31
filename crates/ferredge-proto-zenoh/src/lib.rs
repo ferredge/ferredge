@@ -7,8 +7,11 @@ extern crate alloc;
 use alloc::string::String;
 use ferredge_core::prelude::*;
 
+pub use endpoint::{ZenohDevice, ZenohEndpointConfig};
+
 mod attributes;
 mod convert;
+mod endpoint;
 #[cfg(feature = "std")]
 mod runtime;
 #[cfg(feature = "embassy-runtime")]
@@ -62,7 +65,7 @@ use runtime_stack::{StackNet, RuntimeTask};
 #[cfg(test)]
 mod tests;
 
-use types::{ZenohNativePlan, ZenohRequest, ZenohResourceAttributes};
+use types::{ZenohNativePlan, ZenohRequest};
 
 pub use convert::ZenohBridgeCodec;
 pub use types::{
@@ -93,7 +96,7 @@ pub enum ZenohListenerStatus {
 #[derive(Clone)]
 pub struct ZenohDriver {
     /// Device metadata and Zenoh configuration served by this driver.
-    pub dvc: Device<ZenohResourceAttributes>,
+    pub dvc: ZenohDevice,
 
     // std build fields - uses standard zenoh library
     #[cfg(feature = "std")]
@@ -131,14 +134,14 @@ impl ZenohDriver {
     /// embassy stack has no ambient executor or network stack — construct with
     /// [`ZenohDriver::with_stack`] there.
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-    pub fn new(dvc: Device<ZenohResourceAttributes>) -> Self {
+    pub fn new(dvc: ZenohDevice) -> Self {
         Self::with_stack(dvc, StackRuntime::default())
     }
 
     /// Creates a new Zenoh driver for std runtimes with explicit runtime.
     #[cfg(feature = "std")]
     pub fn with_stack(
-        dvc: Device<ZenohResourceAttributes>,
+        dvc: ZenohDevice,
         runtime: StackRuntime,
     ) -> Self {
         Self {
@@ -153,7 +156,7 @@ impl ZenohDriver {
     /// Creates a new Zenoh driver for embassy runtime with explicit runtime and net stack.
     #[cfg(feature = "embassy-runtime")]
     pub fn with_stack(
-        dvc: Device<ZenohResourceAttributes>,
+        dvc: ZenohDevice,
         runtime: StackRuntime,
         net: StackNet,
     ) -> Self {
@@ -169,7 +172,7 @@ impl ZenohDriver {
 
     /// Creates a new Zenoh driver for the given device (stub when no runtime available).
     #[cfg(not(any(feature = "std", feature = "no_std")))]
-    pub fn new(dvc: Device<ZenohResourceAttributes>) -> Self {
+    pub fn new(dvc: ZenohDevice) -> Self {
         Self { dvc }
     }
 

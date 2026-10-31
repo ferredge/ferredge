@@ -3,23 +3,24 @@ extern crate alloc;
 use alloc::{borrow::Cow, string::ToString, vec, vec::Vec};
 
 use ferredge_bridge::{
-    BridgeMessage, BridgeOutbound, BridgePayload, NativeOutbound, ProtocolEncoder,
+    BridgeMessage, BridgeOutbound, NativeOutbound, ProtocolEncoder,
 };
 use ferredge_core::prelude::*;
 
 use crate::types::{
     ZenohCommandConversionError, ZenohCommandRef, ZenohNativePlan, ZenohPublishRequest,
-    ZenohQueryRequest, ZenohRequest, ZenohResourceAttributes,
+    ZenohQueryRequest, ZenohRequest,
 };
 
 /// Bridge codec for Zenoh protocol.
 pub struct ZenohBridgeCodec<'a> {
+    #[allow(dead_code)]
     command_ref: ZenohCommandRef<'a>,
 }
 
 impl<'a> ZenohBridgeCodec<'a> {
     /// Creates a codec bound to one Zenoh device definition.
-    pub fn new(device: &'a Device<ZenohResourceAttributes>) -> Self {
+    pub fn new(device: &'a crate::ZenohDevice) -> Self {
         Self {
             command_ref: ZenohCommandRef { device },
         }
@@ -42,7 +43,7 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, ZenohRequest>
             ferredge_bridge::BridgeOp::Messaging(op) => match op.action {
                 ferredge_bridge::MessagingAction::Publish => {
                     let key_expr = match &bridge.route {
-                        ferredge_bridge::BridgeRoute::Messaging { topic } => topic.to_string(),
+                        Route::Messaging { topic } => topic.to_string(),
                         _ => {
                             return Err(ZenohCommandConversionError::InvalidAddressType(
                                 "expected messaging route".to_string(),
@@ -58,7 +59,7 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, ZenohRequest>
                         .unwrap_or_default();
 
                     Ok(ZenohRequest::Publish(ZenohPublishRequest {
-                        command_id: bridge.id.into_owned(),
+                        command_id: bridge.id.to_string(),
                         key_expr,
                         payload,
                     }))
@@ -70,7 +71,7 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, ZenohRequest>
             ferredge_bridge::BridgeOp::RequestResponse(op) => match op.action {
                 ferredge_bridge::RequestResponseAction::Read => {
                     let key_expr = match &bridge.route {
-                        ferredge_bridge::BridgeRoute::RequestResponse { resource, .. } => {
+                        Route::RequestResponse { resource, .. } => {
                             resource.to_string()
                         }
                         _ => {
@@ -81,7 +82,7 @@ impl ProtocolEncoder<BridgeOutbound, BridgeMessage<'static>, ZenohRequest>
                     };
 
                     Ok(ZenohRequest::Query(ZenohQueryRequest {
-                        command_id: bridge.id.into_owned(),
+                        command_id: bridge.id.to_string(),
                         key_expr,
                         parameters: None,
                         timeout_ms: None,
@@ -141,12 +142,12 @@ impl ProtocolEncoder<NativeOutbound, ZenohNativePlan<'static>, ZenohRequest>
     }
 }
 
-fn payload_to_bytes(payload: &BridgePayload) -> Result<Vec<u8>, ZenohCommandConversionError> {
+fn payload_to_bytes(payload: &PayloadValue) -> Result<Vec<u8>, ZenohCommandConversionError> {
     match payload {
-        BridgePayload::Binary(bytes) => Ok(bytes.to_vec()),
-        BridgePayload::Text(value) => Ok(value.as_bytes().to_vec()),
-        BridgePayload::Empty => Ok(vec![]),
-        other => serde_json::to_vec(&PayloadValue::from(other.clone()))
+        PayloadValue::Bytes(bytes) => Ok(bytes.to_vec()),
+        PayloadValue::String(value) => Ok(value.as_bytes().to_vec()),
+        PayloadValue::Null => Ok(vec![]),
+        other => serde_json::to_vec(other)
             .map_err(|e| ZenohCommandConversionError::PayloadEncoding(e.to_string())),
     }
 }
@@ -154,16 +155,16 @@ fn payload_to_bytes(payload: &BridgePayload) -> Result<Vec<u8>, ZenohCommandConv
 /// Convert a Command to a ZenohNativePlan (planner function).
 pub fn plan_from_command(
     command: &Command,
-    _device: &Device<ZenohResourceAttributes>,
+    _device: &crate::ZenohDevice,
 ) -> Result<ZenohNativePlan<'static>, ZenohCommandConversionError> {
-    let command_id = Cow::Owned(command.id.clone());
+    let command_id = Cow::Owned(command.id.to_string());
 
     match &command.intent {
         Intent::Send {
             channel, payload, ..
         } => {
             let key_expr = match &channel.kind {
-                Some(BrokerChannelKind::Topic) | None => Cow::Owned(channel.name.clone()),
+                Some(BrokerChannelKind::Topic) | None => Cow::Owned(channel.name.to_string()),
                 _ => {
                     return Err(ZenohCommandConversionError::InvalidAddressType(
                         "Zenoh only supports topic-like channels".to_string(),
@@ -171,17 +172,15 @@ pub fn plan_from_command(
                 }
             };
 
-            let bridge_payload = BridgePayload::from(payload.clone());
-
             Ok(ZenohNativePlan::Put {
                 command_id,
                 key_expr,
-                payload: bridge_payload,
+                payload: payload.clone().into_owned(),
             })
         }
         Intent::Subscribe { channel, .. } => {
             let key_expr = match &channel.kind {
-                Some(BrokerChannelKind::Topic) | None => Cow::Owned(channel.name.clone()),
+                Some(BrokerChannelKind::Topic) | None => Cow::Owned(channel.name.to_string()),
                 _ => {
                     return Err(ZenohCommandConversionError::InvalidAddressType(
                         "Zenoh only supports topic-like channels".to_string(),
@@ -196,7 +195,7 @@ pub fn plan_from_command(
         }
         Intent::Unsubscribe { channel } => {
             let key_expr = match &channel.kind {
-                Some(BrokerChannelKind::Topic) | None => Cow::Owned(channel.name.clone()),
+                Some(BrokerChannelKind::Topic) | None => Cow::Owned(channel.name.to_string()),
                 _ => {
                     return Err(ZenohCommandConversionError::InvalidAddressType(
                         "Zenoh only supports topic-like channels".to_string(),
@@ -210,7 +209,7 @@ pub fn plan_from_command(
             })
         }
         Intent::Read { resource, .. } => {
-            let key_expr = Cow::Owned(resource.clone());
+            let key_expr = Cow::Owned(resource.to_string());
             Ok(ZenohNativePlan::Get {
                 command_id,
                 key_expr,
@@ -218,17 +217,19 @@ pub fn plan_from_command(
             })
         }
         Intent::Write { resource, payload, .. } => {
-            let key_expr = Cow::Owned(resource.clone());
-            let bridge_payload = BridgePayload::from(payload.clone());
+            let key_expr = Cow::Owned(resource.to_string());
 
             Ok(ZenohNativePlan::Put {
                 command_id,
                 key_expr,
-                payload: bridge_payload,
+                payload: payload.clone().into_owned(),
             })
         }
         Intent::Invoke { .. } => Err(ZenohCommandConversionError::UnsupportedIntent(
             "Invoke intent not yet supported for Zenoh".to_string(),
+        )),
+        _ => Err(ZenohCommandConversionError::UnsupportedIntent(
+            "Intent not supported for Zenoh".to_string(),
         )),
     }
 }
