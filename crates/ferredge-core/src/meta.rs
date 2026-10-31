@@ -22,6 +22,8 @@ impl ProtocolId {
     pub const MODBUS: ProtocolId = ProtocolId(Cow::Borrowed("modbus"));
     /// CoAP protocol identifier.
     pub const COAP: ProtocolId = ProtocolId(Cow::Borrowed("coap"));
+    /// Zenoh protocol identifier.
+    pub const ZENOH: ProtocolId = ProtocolId(Cow::Borrowed("zenoh"));
 
     /// Returns the identifier as a string slice.
     pub fn as_str(&self) -> &str {

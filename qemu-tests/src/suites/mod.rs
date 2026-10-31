@@ -6,6 +6,7 @@ pub mod mqtt;
 pub mod net;
 pub mod runtime;
 pub mod serial;
+pub mod zenoh;
 
 use embassy_executor::Spawner;
 use ferredge_runtime_embassy::EmbassyRuntime;
@@ -21,4 +22,6 @@ pub async fn run_all(spawner: Spawner, rt: &EmbassyRuntime) {
     log::info!("modbus driver tests passed");
     mqtt::run(spawner, rt).await;
     log::info!("mqtt driver tests passed");
+    zenoh::run(spawner, rt).await;
+    log::info!("zenoh driver tests passed");
 }

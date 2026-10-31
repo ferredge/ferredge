@@ -27,6 +27,7 @@ mod fakes;
 mod harness;
 mod hw;
 mod logger;
+mod rng;
 mod suites;
 
 #[global_allocator]
@@ -51,6 +52,9 @@ async fn main(spawner: Spawner) {
     let mut peripherals = cortex_m::Peripherals::take().expect("core peripherals");
     hw::time_driver::init(&mut peripherals.SYST);
     log::debug!("SysTick time driver initialized");
+
+    rng::init();
+    log::debug!("RNG initialized");
 
     let runtime: EmbassyRuntime = EmbassyRuntime::new(spawner);
 
