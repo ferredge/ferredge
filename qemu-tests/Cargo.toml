@@ -29,6 +29,9 @@ ferredge-proto-modbus = { path = "../crates/ferredge-proto-modbus", default-feat
 ferredge-proto-mqtt = { path = "../crates/ferredge-proto-mqtt", default-features = false, features = [
     "embassy-runtime",
 ] }
+ferredge-proto-zenoh = { path = "../crates/ferredge-proto-zenoh", default-features = false, features = [
+    "embassy-runtime",
+] }
 ferredge-proto-http = { path = "../crates/ferredge-proto-http", default-features = false, features = [
     "embassy-runtime",
 ], optional = true }
